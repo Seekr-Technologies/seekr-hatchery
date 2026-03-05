@@ -1,0 +1,22 @@
+################
+# GLOBAL REFS. #
+################
+
+.build-rules:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: on_success
+    - when: never
+
+.install-uv-deps:
+  script:
+    - echo "Installing UV dependencies..."
+    - pip install uv
+    - uv --version
+
+.prepare-base-image:
+  script:
+    - echo "Preparing base image..."
+    - export DEBIAN_FRONTEND=noninteractive
+    - apt-get update
+    - apt-get install -y curl git

@@ -1,0 +1,125 @@
+validate-mr-title:
+  stage: setup
+  image: alpine:3
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: always
+    - when: never
+  script:
+    - |
+      TITLE="$CI_MERGE_REQUEST_TITLE"
+      REGEX='^(feat|fix|docs|chore|style|refactor|perf|test|build|ci|revert|no-bump)(\([^)]+\))?(!)?: .+'
+      echo "Validating MR title: $TITLE"
+      if ! echo "$TITLE" | grep -qE "$REGEX"; then
+        echo ""
+        echo "ERROR: MR title does not follow Conventional Commits format."
+        echo ""
+        echo "The MR title becomes the squash commit message on main, which"
+        echo "determines the version bump for the release."
+        echo ""
+        echo "Required format:  <type>(<scope>): <description>"
+        echo "Example:          feat(cli): add --dry-run flag"
+        echo "Example:          fix: handle missing config file gracefully"
+        echo "Example:          feat!: rename command (breaking change)"
+        echo "Example:          no-bump: update CI workflow"
+        echo ""
+        echo "Allowed types: feat fix docs chore style refactor perf test build ci revert no-bump"
+        echo "(Use no-bump to skip version increment and release entirely.)"
+        exit 1
+      fi
+      echo "OK: MR title is a valid conventional commit."
+
+compute-version:
+  stage: setup
+  image: alpine:3
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: always
+    - when: never
+  before_script:
+    - apk add --no-cache git curl jq
+  script:
+    - |
+      set -eu
+
+      git fetch origin --tags --prune --prune-tags --unshallow || git fetch origin --tags --prune --prune-tags
+
+      LATEST_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || echo "")
+
+      # Skip release if HEAD is already tagged — catches force pushes that
+      # reset main to a previously-released commit.
+      ALREADY_TAGGED=$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true)
+      if [ -n "$ALREADY_TAGGED" ]; then
+        echo "HEAD already tagged as $ALREADY_TAGGED — skipping release."
+        echo "NEXT_VERSION=$ALREADY_TAGGED" > version.env
+        echo "SKIP_RELEASE=true" >> version.env
+        exit 0
+      fi
+      if [ -z "$LATEST_TAG" ]; then
+        LATEST_TAG="v0.0.0"
+      fi
+
+      MAJOR=$(echo "$LATEST_TAG" | sed 's/^v//' | cut -d. -f1)
+      MINOR=$(echo "$LATEST_TAG" | sed 's/^v//' | cut -d. -f2)
+      PATCH=$(echo "$LATEST_TAG" | sed 's/^v//' | cut -d. -f3)
+
+      # Resolve MR title via GitLab API — works regardless of merge method
+      # (merge commit, fast-forward, semi-linear) since GitLab associates the
+      # MR with its resulting commit SHA whether that is the squash commit or
+      # the merge commit on top.
+      MR_TITLE=$(curl --silent \
+        --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+        "$CI_API_V4_URL/projects/$CI_PROJECT_ID/repository/commits/$CI_COMMIT_SHA/merge_requests" \
+        | jq -r '.[0].title // empty')
+
+      if [ -z "$MR_TITLE" ]; then
+        echo "WARNING: no MR found for $CI_COMMIT_SHA — skipping release."
+        echo "  (Direct push or non-squash merge detected; releases require a merged MR.)"
+        echo "NEXT_VERSION=$LATEST_TAG" > version.env
+        echo "SKIP_RELEASE=true" >> version.env
+        exit 0
+      fi
+
+      echo "Latest tag: $LATEST_TAG"
+      echo "MR title:   $MR_TITLE"
+
+      # no-bump: skip release entirely
+      if echo "$MR_TITLE" | grep -qE '^no-bump(\([^)]+\))?:'; then
+        BUMP="none"
+      # Breaking change: any type with ! before the colon
+      elif echo "$MR_TITLE" | grep -qE '^[a-z]+(\([^)]+\))?!:'; then
+        BUMP="major"
+      elif echo "$MR_TITLE" | grep -qE '^feat(\([^)]+\))?:'; then
+        BUMP="minor"
+      elif echo "$MR_TITLE" | grep -qE '^(fix|perf)(\([^)]+\))?:'; then
+        BUMP="patch"
+      elif echo "$MR_TITLE" | grep -qE '^(chore|docs|style|refactor|test|build|ci|revert)(\([^)]+\))?:'; then
+        BUMP="patch"
+      else
+        # catch-all: unrecognized/non-conventional commit type → skip release
+        echo "WARNING: unrecognized commit type in '$MR_TITLE', skipping release"
+        BUMP="none"
+      fi
+
+      echo "Bump type: $BUMP"
+
+      case "$BUMP" in
+        major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+        minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+        patch) PATCH=$((PATCH + 1)) ;;
+        none)  ;;
+      esac
+
+      NEXT_VERSION="v${MAJOR}.${MINOR}.${PATCH}"
+      echo "Next version: $NEXT_VERSION"
+      echo "NEXT_VERSION=$NEXT_VERSION" > version.env
+      if [ "$BUMP" = "none" ]; then
+        echo "SKIP_RELEASE=true" >> version.env
+        echo "Skipping release: version stays at $NEXT_VERSION"
+      else
+        echo "SKIP_RELEASE=false" >> version.env
+      fi
+  artifacts:
+    reports:
+      dotenv: version.env
+    expire_in: 2 hours

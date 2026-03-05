@@ -1,0 +1,35 @@
+create-release:
+  stage: release
+  image: alpine:3
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: always
+    - when: never
+  before_script:
+    - apk add --no-cache git
+  needs:
+    - job: compute-version
+      artifacts: true
+  script:
+    - |
+      set -eu
+
+      if [ "${SKIP_RELEASE:-false}" = "true" ]; then
+        echo "Skipping release: no-bump MR title detected."
+        exit 0
+      fi
+
+      echo "Creating release: $NEXT_VERSION"
+
+      git config user.email "ci-bot@gitlab"
+      git config user.name "GitLab CI"
+
+      # Authenticate using project token (same pattern as former semantic-release template)
+      NEW_URL="$(echo "$CI_REPOSITORY_URL" | sed "s/gitlab-ci-token:${CI_JOB_TOKEN}/oauth2:${GITLAB_TOKEN}/")"
+      git remote set-url origin "$NEW_URL"
+
+      # Tag the current HEAD
+      git tag -a "$NEXT_VERSION" -m "Release $NEXT_VERSION"
+      git push origin "$NEXT_VERSION"
+
+      echo "✓ Tagged and pushed $NEXT_VERSION"

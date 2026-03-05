@@ -1,0 +1,127 @@
+name: Release
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions: read-all
+
+jobs:
+  compute-version:
+    name: Compute next version
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    outputs:
+      next_version: ${{ steps.compute.outputs.next_version }}
+      skip_release: ${{ steps.compute.outputs.skip_release }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Compute version
+        id: compute
+        run: |
+          set -eu
+
+          LATEST_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || echo "")
+          if [ -z "$LATEST_TAG" ]; then
+            LATEST_TAG="v0.0.0"
+          fi
+
+          MAJOR=$(echo "$LATEST_TAG" | sed 's/^v//' | cut -d. -f1)
+          MINOR=$(echo "$LATEST_TAG" | sed 's/^v//' | cut -d. -f2)
+          PATCH=$(echo "$LATEST_TAG" | sed 's/^v//' | cut -d. -f3)
+
+          # PR title is available directly from the event payload — no git log needed
+          COMMIT_TITLE="${{ github.event.pull_request.title }}"
+
+          echo "Latest tag:    $LATEST_TAG"
+          echo "Commit title:  $COMMIT_TITLE"
+
+          # no-bump: skip release entirely
+          if echo "$COMMIT_TITLE" | grep -qE '^no-bump(\([^)]+\))?:'; then
+            BUMP="none"
+          # Breaking change: any type with ! before the colon
+          elif echo "$COMMIT_TITLE" | grep -qE '^[a-z]+(\([^)]+\))?!:'; then
+            BUMP="major"
+          elif echo "$COMMIT_TITLE" | grep -qE '^feat(\([^)]+\))?:'; then
+            BUMP="minor"
+          elif echo "$COMMIT_TITLE" | grep -qE '^(fix|perf)(\([^)]+\))?:'; then
+            BUMP="patch"
+          elif echo "$COMMIT_TITLE" | grep -qE '^(chore|docs|style|refactor|test|build|ci|revert)(\([^)]+\))?:'; then
+            BUMP="patch"
+          else
+            echo "WARNING: unrecognized commit type in '$COMMIT_TITLE', skipping release"
+            BUMP="none"
+          fi
+
+          echo "Bump type: $BUMP"
+
+          case "$BUMP" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+            none)  ;;
+          esac
+
+          NEXT_VERSION="v${MAJOR}.${MINOR}.${PATCH}"
+          echo "Next version: $NEXT_VERSION"
+          echo "next_version=$NEXT_VERSION" >> "$GITHUB_OUTPUT"
+
+          if [ "$BUMP" = "none" ]; then
+            echo "skip_release=true" >> "$GITHUB_OUTPUT"
+            echo "Skipping release: version stays at $LATEST_TAG"
+          else
+            echo "skip_release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  create-release:
+    name: Create release
+    needs: compute-version
+    if: needs.compute-version.outputs.skip_release == 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      NEXT_VERSION: ${{ needs.compute-version.outputs.next_version }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Configure git identity
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+
+      - name: Tag and push
+        run: |
+          git tag -a "$NEXT_VERSION" -m "Release $NEXT_VERSION"
+          git push origin "$NEXT_VERSION"
+
+      - name: Create GitHub Release
+        run: gh release create "$NEXT_VERSION" --generate-notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098 # v7.3.1
+
+      - name: Build
+        run: uv build
+
+      - name: Publish
+        run: uv publish --token "${{ secrets.PYPI_TOKEN }}"

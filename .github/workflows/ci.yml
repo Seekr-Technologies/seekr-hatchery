@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions: read-all
+
+jobs:
+  validate-pr-title:
+    name: Validate PR title
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check conventional commit format
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          REGEX='^(feat|fix|docs|chore|style|refactor|perf|test|build|ci|revert|no-bump)(\([^)]+\))?(!)?: .+'
+          echo "Validating PR title: $TITLE"
+          if ! echo "$TITLE" | grep -qE "$REGEX"; then
+            echo ""
+            echo "ERROR: PR title does not follow Conventional Commits format."
+            echo ""
+            echo "The PR title becomes the squash commit message on main, which"
+            echo "determines the version bump for the release."
+            echo ""
+            echo "Required format:  <type>(<scope>): <description>"
+            echo "Example:          feat(cli): add --dry-run flag"
+            echo "Example:          fix: handle missing config file gracefully"
+            echo "Example:          feat!: rename command (breaking change)"
+            echo "Example:          no-bump: update CI workflow"
+            echo ""
+            echo "Allowed types: feat fix docs chore style refactor perf test build ci revert no-bump"
+            echo "(Use no-bump to skip version increment and release entirely.)"
+            exit 1
+          fi
+          echo "OK: PR title is a valid conventional commit."
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098 # v7.3.1
+      - run: uv sync
+      - run: uv run ruff check .
+
+  test:
+    name: Test
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098 # v7.3.1
+      - run: uv sync
+      - run: uv run pytest tests
+
+  test-integration:
+    name: Integration Tests
+    needs: lint
+    runs-on: ubuntu-latest
+    # quay.io/podman/stable is Fedora-based and pre-configured for rootless
+    # Podman-in-container (fuse-overlayfs, user namespaces, storage config).
+    # Matches the GitLab CI setup exactly.
+    container:
+      image: quay.io/podman/stable
+      options: --privileged
+    env:
+      STORAGE_DRIVER: overlay
+      BUILDAH_FORMAT: docker
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install dependencies
+        run: |
+          dnf install -y --quiet python3.12 python3-pip git
+          pip3 install uv
+      - name: Fix git ownership
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Verify Podman
+        run: podman info
+      - run: uv sync
+      - name: Run integration tests
+        run: uv run pytest tests/test_sandbox.py --integration -v

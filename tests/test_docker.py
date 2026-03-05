@@ -1,0 +1,474 @@
+"""Tests for docker.py functions (runtime detection, container execution)."""
+
+import subprocess
+import sys as _sys
+from unittest.mock import MagicMock
+
+import pytest
+
+import seekr_hatchery.agent as agent
+import seekr_hatchery.docker as docker
+import seekr_hatchery.proxy as proxy_mod
+import seekr_hatchery.tasks as tasks
+
+# ---------------------------------------------------------------------------
+# docker_available()
+# ---------------------------------------------------------------------------
+
+
+class TestDockerAvailable:
+    def test_returns_true_when_rc_zero(self, monkeypatch):
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        monkeypatch.setattr(tasks, "run", lambda *a, **kw: mock_result)
+        assert docker.docker_available() is True
+
+    def test_returns_false_when_rc_nonzero(self, monkeypatch):
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        monkeypatch.setattr(tasks, "run", lambda *a, **kw: mock_result)
+        assert docker.docker_available() is False
+
+
+# ---------------------------------------------------------------------------
+# podman_available()
+# ---------------------------------------------------------------------------
+
+
+class TestPodmanAvailable:
+    def test_returns_true_when_rc_zero(self, monkeypatch):
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        monkeypatch.setattr(tasks, "run", lambda *a, **kw: mock_result)
+        assert docker.podman_available() is True
+
+    def test_returns_false_when_rc_nonzero(self, monkeypatch):
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        monkeypatch.setattr(tasks, "run", lambda *a, **kw: mock_result)
+        assert docker.podman_available() is False
+
+
+# ---------------------------------------------------------------------------
+# detect_runtime()
+# ---------------------------------------------------------------------------
+
+
+class TestDetectRuntime:
+    def test_returns_podman_when_podman_available(self, monkeypatch):
+        monkeypatch.setattr(docker, "podman_available", lambda: True)
+        monkeypatch.setattr(docker, "docker_available", lambda: True)
+        assert docker.detect_runtime() == docker.Runtime.PODMAN
+
+    def test_prefers_podman_over_docker(self, monkeypatch):
+        monkeypatch.setattr(docker, "podman_available", lambda: True)
+        monkeypatch.setattr(docker, "docker_available", lambda: False)
+        assert docker.detect_runtime() == docker.Runtime.PODMAN
+
+    def test_falls_back_to_docker_when_podman_not_installed(self, monkeypatch):
+        monkeypatch.setattr(docker, "podman_available", lambda: False)
+        monkeypatch.setattr(docker.shutil, "which", lambda _: None)
+        monkeypatch.setattr(docker, "docker_available", lambda: True)
+        assert docker.detect_runtime() == docker.Runtime.DOCKER
+
+    def test_exits_when_neither_available(self, monkeypatch):
+        monkeypatch.setattr(docker, "podman_available", lambda: False)
+        monkeypatch.setattr(docker.shutil, "which", lambda _: None)
+        monkeypatch.setattr(docker, "docker_available", lambda: False)
+        with pytest.raises(SystemExit) as exc_info:
+            docker.detect_runtime()
+        assert exc_info.value.code == 1
+
+    def test_exits_when_podman_installed_but_not_running(self, monkeypatch):
+        monkeypatch.setattr(docker, "podman_available", lambda: False)
+        monkeypatch.setattr(docker.shutil, "which", lambda _: "/usr/local/bin/podman")
+        with pytest.raises(SystemExit) as exc_info:
+            docker.detect_runtime()
+        assert exc_info.value.code == 1
+
+    def test_installed_not_running_error_message(self, monkeypatch, capsys):
+        monkeypatch.setattr(docker, "podman_available", lambda: False)
+        monkeypatch.setattr(docker.shutil, "which", lambda _: "/usr/local/bin/podman")
+        with pytest.raises(SystemExit):
+            docker.detect_runtime()
+        assert "not running" in capsys.readouterr().err
+
+    def test_installed_not_running_macos_hint(self, monkeypatch, capsys):
+        monkeypatch.setattr(docker, "podman_available", lambda: False)
+        monkeypatch.setattr(docker.shutil, "which", lambda _: "/usr/local/bin/podman")
+        monkeypatch.setattr(docker.sys, "platform", "darwin")
+        with pytest.raises(SystemExit):
+            docker.detect_runtime()
+        err = capsys.readouterr().err
+        assert "podman machine start" in err
+        assert "podman machine init" in err
+
+    def test_neither_available_error_message(self, monkeypatch, capsys):
+        monkeypatch.setattr(docker, "podman_available", lambda: False)
+        monkeypatch.setattr(docker.shutil, "which", lambda _: None)
+        monkeypatch.setattr(docker, "docker_available", lambda: False)
+        with pytest.raises(SystemExit):
+            docker.detect_runtime()
+        err = capsys.readouterr().err
+        assert "Podman" in err or "Docker" in err
+
+
+# ---------------------------------------------------------------------------
+# resolve_runtime()
+# ---------------------------------------------------------------------------
+
+
+class TestResolveRuntime:
+    def test_returns_none_when_no_docker_flag(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        result = docker.resolve_runtime(repo, worktree, no_docker=True)
+        assert result is None
+
+    def test_exits_when_no_dockerfile_and_docker_not_disabled(self, tmp_path, capsys):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        # No Dockerfile in worktree — should error, not silently run natively
+        with pytest.raises(SystemExit) as exc_info:
+            docker.resolve_runtime(repo, worktree, no_docker=False)
+        assert exc_info.value.code == 1
+        assert "No Dockerfile found" in capsys.readouterr().err
+
+    def test_returns_podman_when_dockerfile_and_podman_available(self, tmp_path, monkeypatch):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        dockerfile_dir = worktree / ".hatchery"
+        dockerfile_dir.mkdir()
+        (dockerfile_dir / "Dockerfile.claude").write_text("FROM debian\n")
+        monkeypatch.setattr(docker, "detect_runtime", lambda: docker.Runtime.PODMAN)
+        result = docker.resolve_runtime(repo, worktree, no_docker=False)
+        assert result == docker.Runtime.PODMAN
+
+    def test_returns_docker_when_dockerfile_and_docker_available(self, tmp_path, monkeypatch):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        dockerfile_dir = worktree / ".hatchery"
+        dockerfile_dir.mkdir()
+        (dockerfile_dir / "Dockerfile.claude").write_text("FROM debian\n")
+        monkeypatch.setattr(docker, "detect_runtime", lambda: docker.Runtime.DOCKER)
+        result = docker.resolve_runtime(repo, worktree, no_docker=False)
+        assert result == docker.Runtime.DOCKER
+
+    def test_exits_when_dockerfile_present_but_no_runtime(self, tmp_path, monkeypatch, capsys):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        dockerfile_dir = worktree / ".hatchery"
+        dockerfile_dir.mkdir()
+        (dockerfile_dir / "Dockerfile.claude").write_text("FROM debian\n")
+        monkeypatch.setattr(docker, "detect_runtime", lambda: (_ for _ in ()).throw(SystemExit(1)))
+        with pytest.raises(SystemExit) as exc_info:
+            docker.resolve_runtime(repo, worktree, no_docker=False)
+        assert exc_info.value.code == 1
+
+    def test_stderr_message_when_no_runtime(self, tmp_path, monkeypatch, capsys):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        dockerfile_dir = worktree / ".hatchery"
+        dockerfile_dir.mkdir()
+        (dockerfile_dir / "Dockerfile.claude").write_text("FROM debian\n")
+
+        def _exit():
+            print("Error: neither Podman nor Docker is running.", file=_sys.stderr)
+            raise SystemExit(1)
+
+        monkeypatch.setattr(docker, "detect_runtime", _exit)
+        with pytest.raises(SystemExit):
+            docker.resolve_runtime(repo, worktree, no_docker=False)
+        captured = capsys.readouterr()
+        assert "Podman" in captured.err or "Docker" in captured.err
+
+    def test_no_docker_flag_skips_dockerfile_check(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        # Even with Dockerfile present, no_docker=True returns None
+        dockerfile_dir = worktree / ".hatchery"
+        dockerfile_dir.mkdir()
+        (dockerfile_dir / "Dockerfile.claude").write_text("FROM debian\n")
+        result = docker.resolve_runtime(repo, worktree, no_docker=True)
+        assert result is None
+
+    def test_agent_specific_dockerfile_detected(self, tmp_path, monkeypatch):
+        worktree = tmp_path / "worktree"
+        (worktree / ".hatchery").mkdir(parents=True)
+        docker.dockerfile_path(worktree, agent.CLAUDE).write_text("FROM debian\n")
+        monkeypatch.setattr(docker, "detect_runtime", lambda: docker.Runtime.DOCKER)
+        assert (
+            docker.resolve_runtime(tmp_path, worktree, no_docker=False, backend=agent.CLAUDE) == docker.Runtime.DOCKER
+        )
+
+    def test_exits_when_only_other_agents_dockerfile_present(self, tmp_path, capsys):
+        worktree = tmp_path / "worktree"
+        (worktree / ".hatchery").mkdir(parents=True)
+        docker.dockerfile_path(worktree, agent.CLAUDE).write_text("FROM debian\n")
+        # Codex Dockerfile absent → should error for codex, not silently run natively
+        with pytest.raises(SystemExit) as exc_info:
+            docker.resolve_runtime(tmp_path, worktree, no_docker=False, backend=agent.CODEX)
+        assert exc_info.value.code == 1
+        assert "codex" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# _run_container() — runtime flag injection
+# ---------------------------------------------------------------------------
+
+
+class TestRunContainerRuntime:
+    """Verify _run_container injects correct flags for each runtime."""
+
+    def _capture_cmd(
+        self,
+        monkeypatch,
+        runtime: docker.Runtime = docker.Runtime.DOCKER,
+        api_key: str = "real-secret-key",
+        proxy_token: str = "proxy-uuid-token",
+        proxy_port: int = 9999,
+    ) -> list[str]:
+        captured: list[list[str]] = []
+
+        # Mock the proxy so we don't start a real server; inject predictable values.
+        mock_server = MagicMock()
+        mock_server.server_address = ("0.0.0.0", proxy_port)
+        monkeypatch.setattr(proxy_mod, "start_proxy", lambda _key, _token, **kw: (mock_server, "ignored-token"))
+        monkeypatch.setattr(proxy_mod, "stop_proxy", lambda _srv: None)
+
+        def _mock_run(cmd, **kw):
+            captured.append(cmd)
+            return docker.subprocess.CompletedProcess(cmd, 0)
+
+        monkeypatch.setattr(docker.subprocess, "run", _mock_run)
+        docker._run_container(
+            image="test-image",
+            mounts=[],
+            workdir="/workspace",
+            hatchery_repo="/repo",
+            name="test-task",
+            api_key=api_key,
+            proxy_token=proxy_token,
+            agent_cmd=["claude"],
+            backend=agent.CLAUDE,
+            runtime=runtime,
+        )
+        return captured[0]
+
+    # --- runtime binary ---
+
+    def test_docker_runtime_uses_docker_binary(self, monkeypatch):
+        cmd = self._capture_cmd(monkeypatch, runtime=docker.Runtime.DOCKER)
+        assert cmd[0] == "docker"
+
+    def test_podman_runtime_uses_podman_binary(self, monkeypatch):
+        cmd = self._capture_cmd(monkeypatch, runtime=docker.Runtime.PODMAN)
+        assert cmd[0] == "podman"
+
+    # --- Podman outer-container flags ---
+
+    def test_podman_userns_keep_id_on_linux(self, monkeypatch):
+        monkeypatch.setattr(docker.sys, "platform", "linux")
+        cmd = self._capture_cmd(monkeypatch, runtime=docker.Runtime.PODMAN)
+        assert "--userns=keep-id" in cmd
+
+    def test_podman_no_userns_keep_id_on_macos(self, monkeypatch):
+        monkeypatch.setattr(docker.sys, "platform", "darwin")
+        cmd = self._capture_cmd(monkeypatch, runtime=docker.Runtime.PODMAN)
+        assert "--userns=keep-id" not in cmd
+
+    def test_podman_runtime_adds_label_disable(self, monkeypatch):
+        cmd = self._capture_cmd(monkeypatch, runtime=docker.Runtime.PODMAN)
+        assert "label=disable" in " ".join(cmd)
+
+    def test_docker_runtime_no_userns(self, monkeypatch):
+        cmd = self._capture_cmd(monkeypatch, runtime=docker.Runtime.DOCKER)
+        assert "--userns=keep-id" not in cmd
+
+    def test_docker_runtime_no_label_disable(self, monkeypatch):
+        cmd = self._capture_cmd(monkeypatch, runtime=docker.Runtime.DOCKER)
+        assert "label=disable" not in " ".join(cmd)
+
+    # --- Security regression guards ---
+
+    def test_podman_no_privileged(self, monkeypatch):
+        cmd = self._capture_cmd(monkeypatch, runtime=docker.Runtime.PODMAN)
+        assert "--privileged" not in cmd
+
+    def test_podman_no_seccomp_unconfined(self, monkeypatch):
+        cmd = self._capture_cmd(monkeypatch, runtime=docker.Runtime.PODMAN)
+        assert "seccomp=unconfined" not in " ".join(cmd)
+
+    def test_docker_no_privileged(self, monkeypatch):
+        cmd = self._capture_cmd(monkeypatch, runtime=docker.Runtime.DOCKER)
+        assert "--privileged" not in cmd
+
+    # --- API key security guards ---
+
+    def test_real_api_key_absent_from_cmd(self, monkeypatch):
+        """The real API key must never appear in the docker command."""
+        cmd = self._capture_cmd(monkeypatch, api_key="real-secret-key", proxy_token="proxy-uuid-token")
+        assert "real-secret-key" not in " ".join(cmd)
+
+    def test_proxy_token_present_as_anthropic_api_key(self, monkeypatch):
+        """When set_api_key_env=True (no stored credentials), ANTHROPIC_API_KEY
+        must be the proxy token, not the real key."""
+        cmd = self._capture_cmd(monkeypatch, api_key="real-secret-key", proxy_token="proxy-uuid-token")
+        cmd_str = " ".join(cmd)
+        assert "ANTHROPIC_API_KEY=proxy-uuid-token" in cmd_str
+
+    def test_anthropic_base_url_points_to_proxy(self, monkeypatch):
+        """ANTHROPIC_BASE_URL must point to the host proxy port."""
+        cmd = self._capture_cmd(monkeypatch, proxy_port=12345)
+        cmd_str = " ".join(cmd)
+        assert "ANTHROPIC_BASE_URL" in cmd_str
+        assert "host.docker.internal:12345" in cmd_str
+
+    def test_add_host_flag_on_linux(self, monkeypatch):
+        """On Linux, --add-host=host.docker.internal:host-gateway must be present."""
+        monkeypatch.setattr(docker.sys, "platform", "linux")
+        cmd = self._capture_cmd(monkeypatch)
+        assert "--add-host=host.docker.internal:host-gateway" in cmd
+
+    def test_no_add_host_flag_on_macos(self, monkeypatch):
+        """On macOS, Docker Desktop exposes host.docker.internal natively."""
+        monkeypatch.setattr(docker.sys, "platform", "darwin")
+        cmd = self._capture_cmd(monkeypatch)
+        assert "--add-host=host.docker.internal:host-gateway" not in cmd
+
+    def test_proxy_token_always_set_regardless_of_claude_json(self, monkeypatch):
+        """ANTHROPIC_API_KEY must always be set to the stable proxy token.
+        The per-task ~/.claude dir starts empty, so there are no cached host
+        credentials to conflict with it — no dialog appears."""
+        cmd = self._capture_cmd(monkeypatch, proxy_token="stable-token")
+        cmd_str = " ".join(cmd)
+        assert "ANTHROPIC_API_KEY=stable-token" in cmd_str
+
+    def test_no_api_key_env_when_api_key_is_none(self, monkeypatch):
+        """When api_key is None, no ANTHROPIC_API_KEY or ANTHROPIC_BASE_URL should appear."""
+        monkeypatch.setattr(
+            proxy_mod,
+            "start_proxy",
+            lambda _key, _token, **kw: (_ for _ in ()).throw(AssertionError("should not be called")),
+        )
+
+        captured: list[list[str]] = []
+
+        def _mock_run(cmd, **kw):
+            captured.append(cmd)
+            return docker.subprocess.CompletedProcess(cmd, 0)
+
+        monkeypatch.setattr(docker.subprocess, "run", _mock_run)
+        docker._run_container(
+            image="test-image",
+            mounts=[],
+            workdir="/workspace",
+            hatchery_repo="/repo",
+            name="test-task",
+            api_key=None,
+            proxy_token=None,
+            agent_cmd=["claude"],
+            backend=agent.CLAUDE,
+        )
+        cmd_str = " ".join(captured[0])
+        assert "ANTHROPIC_API_KEY" not in cmd_str
+        assert "ANTHROPIC_BASE_URL" not in cmd_str
+
+
+# ---------------------------------------------------------------------------
+# build_docker_image() — build context and stdin
+# ---------------------------------------------------------------------------
+
+
+class TestBuildDockerImage:
+    """Verify build_docker_image uses a temp empty dir as build context."""
+
+    def _capture_build(
+        self,
+        monkeypatch,
+        tmp_path,
+        *,
+        debug: bool = False,
+    ) -> tuple[list[str], dict]:
+        """Set up a fake repo/worktree, call build_docker_image, return the captured command and kwargs."""
+        repo = tmp_path / "repo"
+        worktree = tmp_path / "worktree"
+        hatchery_dir = worktree / ".hatchery"
+        hatchery_dir.mkdir(parents=True)
+
+        docker.dockerfile_path(worktree, agent.CLAUDE).write_text("FROM debian\n")
+
+        captured: list[list[str]] = []
+        captured_kwargs: list[dict] = []
+
+        def _mock_run(cmd, **kw):
+            captured.append(cmd)
+            captured_kwargs.append(kw)
+            return subprocess.CompletedProcess(cmd, 0)
+
+        monkeypatch.setattr(docker.subprocess, "run", _mock_run)
+
+        if debug:
+            monkeypatch.setattr(docker.logger, "isEnabledFor", lambda _lvl: True)
+        else:
+            monkeypatch.setattr(docker.logger, "isEnabledFor", lambda _lvl: False)
+            # _stream_build is used in non-debug mode; stub it out
+            monkeypatch.setattr(docker, "_stream_build", lambda cmd, cwd: (0, []))
+
+        docker.build_docker_image(repo, worktree, "test-task", agent.CLAUDE, runtime=docker.Runtime.PODMAN)
+        return captured[0], captured_kwargs[0]
+
+    def test_build_context_is_not_repo_root(self, monkeypatch, tmp_path):
+        """The last arg (build context) must NOT be the repo root."""
+        cmd, _kw = self._capture_build(monkeypatch, tmp_path, debug=True)
+        context_arg = cmd[-1]
+        # Must be a temp dir, not the repo root
+        assert "repo" not in context_arg
+        assert "hatchery-build-" in context_arg
+
+    def test_build_context_is_empty_temp_dir(self, monkeypatch, tmp_path):
+        """The build context must be a temporary empty directory."""
+        cmd, _kw = self._capture_build(monkeypatch, tmp_path, debug=True)
+        context_arg = cmd[-1]
+        # The temp dir is created by tempfile.TemporaryDirectory with our prefix
+        assert "hatchery-build-" in context_arg
+
+    def test_debug_path_passes_stdin_devnull(self, monkeypatch, tmp_path):
+        """The DEBUG subprocess.run call must pass stdin=DEVNULL to avoid hangs."""
+        _cmd, kw = self._capture_build(monkeypatch, tmp_path, debug=True)
+        assert kw.get("stdin") is subprocess.DEVNULL
+
+
+# ---------------------------------------------------------------------------
+# _stream_build() — stdin handling
+# ---------------------------------------------------------------------------
+
+
+class TestStreamBuild:
+    def test_non_tty_passes_stdin_devnull(self, monkeypatch):
+        """The non-TTY path must pass stdin=DEVNULL to subprocess.run."""
+        monkeypatch.setattr(_sys.stdout, "isatty", lambda: False)
+
+        captured_kwargs: list[dict] = []
+
+        def _mock_run(cmd, **kw):
+            captured_kwargs.append(kw)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(docker.subprocess, "run", _mock_run)
+        docker._stream_build(["echo", "hello"], cwd=_sys.modules["pathlib"].Path("."))
+        assert captured_kwargs[0].get("stdin") is subprocess.DEVNULL
