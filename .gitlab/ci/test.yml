@@ -1,0 +1,39 @@
+lint:
+  stage: test
+  image: python:3.12-slim
+  rules: !reference [.build-rules, rules]
+  before_script:
+    - apt-get update -qq && apt-get install -y --no-install-recommends git
+    - pip install uv
+  script:
+    - uv sync
+    - uv run ruff check .
+
+test:
+  stage: test
+  image: python:3.12-slim
+  rules: !reference [.build-rules, rules]
+  before_script:
+    - apt-get update -qq && apt-get install -y --no-install-recommends git
+    - pip install uv
+  script:
+    - uv sync
+    - uv run pytest tests
+
+test-integration:
+  stage: test
+  # quay.io/podman/stable is Fedora-based and pre-configured for rootless
+  # Podman-in-container (fuse-overlayfs, user namespaces, storage config).
+  # The runner must have privileged: true for user namespace creation to work.
+  image: quay.io/podman/stable
+  rules: !reference [.build-rules, rules]
+  variables:
+    STORAGE_DRIVER: overlay
+    BUILDAH_FORMAT: docker
+  before_script:
+    - dnf install -y --quiet python3.12 python3-pip git
+    - pip3 install uv
+    - podman info  # fail fast if Podman can't start containers
+  script:
+    - uv sync
+    - uv run pytest tests/test_sandbox.py --integration -v

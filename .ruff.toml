@@ -1,0 +1,25 @@
+line-length = 120
+target-version = "py312"
+exclude = [
+  ".git",
+  ".venv",
+  "__pycache__",
+]
+
+[lint]
+select = ["E", "F", "I"]
+ignore = [
+  "E501", # Line length
+  "E203", # White space before ':'
+  "E251"  # White space around '='
+]
+
+[lint.isort]
+known-first-party = ["seekr_hatchery"]
+section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]
+split-on-trailing-comma = true
+
+[format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"

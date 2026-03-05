@@ -1,0 +1,42 @@
+publish-pypi-snapshot:
+  stage: publish-pypi
+  image: k8-nexus.cb.ntent.com:7443/ntent/ubuntu24-python313
+  before_script:
+    - !reference [.prepare-base-image, script]
+    - !reference [.install-uv-deps, script]
+    - git fetch origin --tags --prune --prune-tags --unshallow || git fetch origin --tags --prune --prune-tags
+  script:
+    - uv build
+    - uv publish
+      --publish-url https://dev-nexus-01.cb.ntent.com/repository/ntent-pypi-snapshots/
+      --username ntent-pypi
+      --password "$NTENT_PYPI_PASSWORD"
+  needs:
+    - job: test
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+publish-pypi-release:
+  stage: publish-pypi
+  image: k8-nexus.cb.ntent.com:7443/ntent/ubuntu24-python313
+  before_script:
+    - !reference [.prepare-base-image, script]
+    - !reference [.install-uv-deps, script]
+    - git fetch origin --tags --prune --prune-tags --unshallow || git fetch origin --tags --prune --prune-tags
+  script:
+    - |
+      if [ "${SKIP_RELEASE:-false}" = "true" ]; then
+        echo "Skipping PyPI release publish: no-bump MR title detected."
+        exit 0
+      fi
+    - uv build
+    - uv publish
+      --publish-url https://dev-nexus-01.cb.ntent.com/repository/ntent-pypi-releases/
+      --username ntent-pypi
+      --password "$NTENT_PYPI_PASSWORD"
+  needs:
+    - job: create-release
+    - job: compute-version
+      artifacts: true
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "push"

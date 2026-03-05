@@ -1,0 +1,34 @@
+workflow:
+  rules:
+    # Disable tag pipelines — create-release pushes the tag, no separate pipeline needed
+    - if: $CI_COMMIT_TAG
+      when: never
+
+    # Always run pipelines triggered by merge requests
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: always
+
+    # Allow push pipelines only on the default branch
+    - if: >
+        $CI_PIPELINE_SOURCE == "push" &&
+        $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: always
+
+    # Block all other pipelines (prevents duplicate push pipelines on MR branches)
+    - when: never
+
+include:
+  - local: .gitlab/ci/templates.yml
+  - local: .gitlab/ci/setup.yml
+  - local: .gitlab/ci/test.yml
+  - local: .gitlab/ci/release.yml
+  - local: .gitlab/ci/pypi.yml
+
+stages:
+  - setup
+  - test
+  - release
+  - publish-pypi
+
+variables:
+  UV_VERSION: 0.8.3
