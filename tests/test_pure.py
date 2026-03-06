@@ -11,6 +11,31 @@ import seekr_hatchery.docker as docker
 import seekr_hatchery.tasks as tasks
 
 # ---------------------------------------------------------------------------
+# find_task_file
+# ---------------------------------------------------------------------------
+
+
+class TestFindTaskFile:
+    def test_finds_matching_file(self, tmp_path):
+        task_file = tmp_path / ".hatchery" / "tasks" / "2026-01-15-my-task.md"
+        task_file.parent.mkdir(parents=True)
+        task_file.write_text("contents")
+        assert tasks.find_task_file(tmp_path, "my-task") == task_file
+
+    def test_returns_none_when_no_match(self, tmp_path):
+        (tmp_path / ".hatchery" / "tasks").mkdir(parents=True)
+        assert tasks.find_task_file(tmp_path, "nonexistent") is None
+
+    def test_returns_latest_when_multiple(self, tmp_path):
+        tasks_dir = tmp_path / ".hatchery" / "tasks"
+        tasks_dir.mkdir(parents=True)
+        (tasks_dir / "2026-01-10-my-task.md").write_text("old")
+        (tasks_dir / "2026-03-04-my-task.md").write_text("new")
+        result = tasks.find_task_file(tmp_path, "my-task")
+        assert result == tasks_dir / "2026-03-04-my-task.md"
+
+
+# ---------------------------------------------------------------------------
 # to_name
 # ---------------------------------------------------------------------------
 
@@ -96,18 +121,29 @@ class TestSessionPrompt:
         task_file = tmp_path / ".hatchery" / "tasks" / "2026-01-15-my-task.md"
         task_file.parent.mkdir(parents=True)
         task_file.write_text("task contents")
-        with patch("seekr_hatchery.tasks.datetime") as mock_dt:
-            mock_dt.now.return_value = datetime(2026, 1, 15)
-            result = tasks.session_prompt("my-task", tmp_path)
-        assert "2026-01-15-my-task.md" in result
-        assert ".hatchery/tasks/" in result
+        result = tasks.session_prompt("my-task", tmp_path)
+        assert ".hatchery/tasks/2026-01-15-my-task.md" in result
 
     def test_is_string(self, tmp_path):
-        task_file = tmp_path / ".hatchery" / "tasks" / tasks.task_file_name("foo")
+        task_file = tmp_path / ".hatchery" / "tasks" / "2026-01-15-foo.md"
         task_file.parent.mkdir(parents=True)
         task_file.write_text("contents")
         result = tasks.session_prompt("foo", tmp_path)
         assert isinstance(result, str)
+
+    def test_file_not_found_exits(self, tmp_path):
+        (tmp_path / ".hatchery" / "tasks").mkdir(parents=True)
+        with pytest.raises(SystemExit, match="1"):
+            tasks.session_prompt("nonexistent", tmp_path)
+
+    def test_finds_file_from_different_date(self, tmp_path):
+        """Regression: resuming a task created on a different day must work."""
+        task_file = tmp_path / ".hatchery" / "tasks" / "2026-01-01-old-task.md"
+        task_file.parent.mkdir(parents=True)
+        task_file.write_text("created yesterday")
+        result = tasks.session_prompt("old-task", tmp_path)
+        assert "2026-01-01-old-task.md" in result
+        assert "created yesterday" in result
 
 
 # ---------------------------------------------------------------------------
