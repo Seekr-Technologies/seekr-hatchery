@@ -112,14 +112,20 @@ def docker_image_name(repo: Path, name: str) -> str:
 def docker_available() -> bool:
     """Return True if the Docker daemon is reachable."""
     logger.debug("Checking Docker availability")
-    result = tasks.run(["docker", "info"], check=False)
+    try:
+        result = tasks.run(["docker", "info"], check=False)
+    except FileNotFoundError:
+        return False
     return result.returncode == 0
 
 
 def podman_available() -> bool:
     """Return True if the Podman CLI is reachable."""
     logger.debug("Checking Podman availability")
-    result = tasks.run(["podman", "info"], check=False)
+    try:
+        result = tasks.run(["podman", "info"], check=False)
+    except FileNotFoundError:
+        return False
     return result.returncode == 0
 
 
