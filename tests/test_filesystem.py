@@ -450,6 +450,18 @@ class TestEnsureDockerfile:
             docker.ensure_dockerfile(fake_repo)
         mock_run.assert_not_called()
 
+    def test_placeholders_resolved(self, fake_repo, monkeypatch):
+        """Rendered Dockerfile contains no raw placeholders and includes the
+        DinD lines in commented-out form."""
+        self._prep(fake_repo)
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+        docker.ensure_dockerfile(fake_repo, agent.CLAUDE)
+        content = docker.dockerfile_path(fake_repo, agent.CLAUDE).read_text()
+        assert "{{AGENT_INSTALL}}" not in content
+        assert "{{DIND}}" not in content
+        assert "# USER root" in content
+        assert "fuse-overlayfs" in content
+
 
 # ---------------------------------------------------------------------------
 # ensure_docker_config

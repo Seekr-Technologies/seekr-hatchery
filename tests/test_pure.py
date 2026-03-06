@@ -694,6 +694,11 @@ class TestRunContainerDindFlags:
             "SETFCAP",
             "SYS_CHROOT",
             "SETPCAP",
+            "AUDIT_WRITE",
+            "FSETID",
+            "KILL",
+            "NET_BIND_SERVICE",
+            "NET_RAW",
         }
         # /dev/fuse device
         device_values = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--device"]

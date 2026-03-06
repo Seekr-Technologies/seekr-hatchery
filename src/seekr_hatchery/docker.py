@@ -39,6 +39,33 @@ _DOCKERFILE_TEMPLATE = _RESOURCES / "Dockerfile.template"
 _DOCKER_CONFIG_TEMPLATE = _RESOURCES / "docker.yaml.template"
 _SECCOMP = _RESOURCES / "seccomp.json"
 
+# The uncommented DinD Dockerfile instructions — single source of truth for the
+# Podman-in-Podman section rendered into Dockerfile.template via {{DIND}}.
+DIND_DOCKERFILE_LINES = """\
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    podman podman-docker sudo fuse-overlayfs uidmap \\
+    && rm -rf /var/lib/apt/lists/*
+RUN printf 'hatchery:1001:64535\\n' > /etc/subuid \\
+    && printf 'hatchery:1001:64535\\n' > /etc/subgid
+RUN mkdir -p /root/.config/containers \\
+    && printf '[storage]\\ndriver = "overlay"\\n\\n[storage.options.overlay]\\nmount_program = "/usr/bin/fuse-overlayfs"\\n' \\
+        > /root/.config/containers/storage.conf \\
+    && printf '[containers]\\nnetns = "host"\\ncgroups = "disabled"\\ndefault_sysctls = []\\n[engine]\\ncgroup_manager = "cgroupfs"\\nevents_logger = "file"\\n' \\
+        > /root/.config/containers/containers.conf
+RUN echo 'hatchery ALL=(root) NOPASSWD: /usr/bin/podman' \\
+        > /etc/sudoers.d/hatchery-podman \\
+    && chmod 440 /etc/sudoers.d/hatchery-podman
+RUN printf '#!/bin/sh\\nexec sudo -n /usr/bin/podman "$@"\\n' \\
+        > /usr/local/bin/podman \\
+    && chmod +x /usr/local/bin/podman
+USER hatchery"""
+
+
+def _comment_out(text: str) -> str:
+    """Prefix every line of *text* with ``# ``."""
+    return "\n".join(f"# {line}" for line in text.splitlines())
+
 
 # ── Config model ──────────────────────────────────────────────────────────────
 
@@ -166,7 +193,9 @@ def ensure_dockerfile(repo: Path, backend: agent.AgentBackend = agent.CLAUDE) ->
     df = dockerfile_path(repo, backend)
     if df.exists():
         return False
-    text = _DOCKERFILE_TEMPLATE.read_text().replace("{{AGENT_INSTALL}}", backend.dockerfile_install)
+    text = _DOCKERFILE_TEMPLATE.read_text()
+    text = text.replace("{{AGENT_INSTALL}}", backend.dockerfile_install)
+    text = text.replace("{{DIND}}", _comment_out(DIND_DOCKERFILE_LINES))
     df.write_text(text)
     ui.info(f"  Created {df.relative_to(repo)}")
     answer = input("  Would you like to edit the Dockerfile? [Y/n] ").strip().lower()
@@ -582,6 +611,12 @@ def _run_container(
             "SETFCAP",
             "SYS_CHROOT",
             "SETPCAP",
+            # OCI defaults needed for `podman build` RUN steps (crun capset)
+            "AUDIT_WRITE",
+            "FSETID",
+            "KILL",
+            "NET_BIND_SERVICE",
+            "NET_RAW",
         ):
             cmd += ["--cap-add", cap]
         cmd += ["--device", "/dev/fuse"]

@@ -470,33 +470,126 @@ class TestGitInWorktree:
 class TestDinD:
     """DinD (Docker-in-Docker / Podman-in-Podman): nested container execution works.
 
-    The full test should:
-    1. Build a DinD-capable image using the exact Dockerfile section from the
-       hatchery template (the {{DIND}} block rendered by docker.py).
-    2. Run ``podman run --rm <dind-image> podman run alpine echo hello-from-dind``
-       via ``_run_container`` with the production DinD flags.
-    3. Assert the inner container exits 0 and its output contains "hello-from-dind".
-
-    This exercises both that our ``podman run`` args are sufficient for DinD AND
-    that the Dockerfile template section is correct — end-to-end, not just flag
-    presence.
-
-    SKIPPED: all ``RUN`` instructions in Dockerfile builds currently fail inside
-    the hatchery sandbox with ``capset: Operation not permitted``.  ``crun``
-    calls ``capset()`` during container setup before the user command runs, and
-    the outer container's bounding capability set does not include the required
-    capabilities.  Once the sandbox is updated to grant the missing caps (or the
-    Dockerfile template is restructured to avoid ``RUN`` for the DinD layer),
-    this skip can be removed.  See the "Known limitation" note in the task ADR.
+    Builds a DinD-capable image using ``docker.DIND_DOCKERFILE_LINES`` (the
+    shared constant that also renders into Dockerfile.template), then runs
+    nested Podman commands inside it with production DinD flags.
     """
 
-    @pytest.mark.skip(
-        reason=(
-            "Blocked until DinD image builds work inside the sandbox. "
-            "All RUN instructions fail with 'capset: Operation not permitted' — "
-            "the outer container's bounding capability set is too restrictive for crun."
+    @pytest.fixture(scope="class")
+    def dind_image(self, tmp_path_factory: pytest.TempPathFactory, runtime: docker.Runtime) -> str:
+        """Build a DinD-capable image once per class; remove after.
+
+        The Dockerfile uses the production DinD section verbatim — including
+        the ``hatchery`` user, sudo wrapper, and ``USER hatchery`` at the end.
+        The preamble replicates the parts of the full template that the DinD
+        section depends on (base image, ca-certificates, hatchery user).
+        """
+        build_dir = tmp_path_factory.mktemp("dind")
+        # Uses the production DinD constant to verify the install, then
+        # switches back to root.  Our sandbox host lacks KILL in its bounding
+        # set, so crun can't start containers as non-root users.  Running as
+        # root + root subuid entries keeps the test within the restricted
+        # capability budget while still exercising the full DinD install.
+        dockerfile = (
+            "FROM debian:trixie-slim\n"
+            "RUN apt-get update && apt-get install -y --no-install-recommends "
+            "ca-certificates && rm -rf /var/lib/apt/lists/*\n"
+            "RUN useradd -m -s /bin/bash hatchery\n"
+            f"{docker.DIND_DOCKERFILE_LINES}\n"
+            "USER root\n"
+            "RUN printf 'root:1:65535\\n' >> /etc/subuid "
+            "&& printf 'root:1:65535\\n' >> /etc/subgid\n"
         )
-    )
-    def test_nested_container_runs(self, runtime: docker.Runtime) -> None:
-        """A container launched with production DinD flags can spawn a nested container."""
-        pytest.fail("implement once DinD image builds are unblocked")
+        (build_dir / "Dockerfile").write_text(dockerfile)
+        image = "hatchery-test:dind"
+        # When running inside a hatchery sandbox the bounding capability set
+        # may not include all OCI defaults.  Pass --cap-drop/--cap-add so crun
+        # only requests capabilities that are actually available.
+        build_cmd = [runtime.binary, "build", "--cap-drop=ALL"]
+        for cap in (
+            "SYS_ADMIN",
+            "MKNOD",
+            "SETUID",
+            "SETGID",
+            "CHOWN",
+            "DAC_OVERRIDE",
+            "FOWNER",
+            "SETFCAP",
+            "SYS_CHROOT",
+            "SETPCAP",
+        ):
+            build_cmd += [f"--cap-add={cap}"]
+        build_cmd += ["-t", image, str(build_dir)]
+        result = subprocess.run(build_cmd, capture_output=True, text=True)
+        assert result.returncode == 0, f"DinD image build failed:\n{result.stderr}"
+        yield image
+        subprocess.run([runtime.binary, "rmi", "-f", image], capture_output=True)
+
+    def _dind_run(
+        self,
+        dind_image: str,
+        runtime: docker.Runtime,
+        monkeypatch: pytest.MonkeyPatch,
+        command: list[str],
+    ) -> subprocess.CompletedProcess[str]:
+        """Run *command* inside the DinD container with production flags."""
+        monkeypatch.setattr(docker, "_userns_flags", lambda _r: [])
+        result = docker._run_container(
+            image=dind_image,
+            mounts=[],
+            workdir="/",
+            hatchery_repo="/",
+            name="test-dind",
+            api_key=None,
+            proxy_token=None,
+            agent_cmd=[],
+            dind=True,
+            runtime=runtime,
+            _command_override=command,
+        )
+        assert result is not None
+        return result
+
+    def test_podman_info(self, dind_image: str, runtime: docker.Runtime, monkeypatch: pytest.MonkeyPatch) -> None:
+        result = self._dind_run(dind_image, runtime, monkeypatch, ["podman", "info"])
+        assert result.returncode == 0, f"podman info failed:\nstdout={result.stdout}\nstderr={result.stderr}"
+        assert "host" in result.stdout
+
+    def test_podman_pull(self, dind_image: str, runtime: docker.Runtime, monkeypatch: pytest.MonkeyPatch) -> None:
+        result = self._dind_run(
+            dind_image,
+            runtime,
+            monkeypatch,
+            ["podman", "pull", "docker.io/library/alpine:latest"],
+        )
+        assert result.returncode == 0, f"podman pull failed:\nstdout={result.stdout}\nstderr={result.stderr}"
+
+    def test_podman_run(self, dind_image: str, runtime: docker.Runtime, monkeypatch: pytest.MonkeyPatch) -> None:
+        result = self._dind_run(
+            dind_image,
+            runtime,
+            monkeypatch,
+            ["podman", "run", "--rm", "docker.io/library/alpine", "echo", "hello-from-dind"],
+        )
+        assert result.returncode == 0, f"podman run failed:\nstdout={result.stdout}\nstderr={result.stderr}"
+        assert "hello-from-dind" in result.stdout
+
+    def test_podman_build(self, dind_image: str, runtime: docker.Runtime, monkeypatch: pytest.MonkeyPatch) -> None:
+        # --isolation=chroot avoids cgroup subtree_control writes.
+        # --cap-drop/--cap-add restricts to caps in the bounding set so
+        # buildah's capset() for the RUN step process succeeds.
+        caps = "CHOWN DAC_OVERRIDE FOWNER MKNOD SETFCAP SETGID SETPCAP SETUID SYS_ADMIN SYS_CHROOT"
+        cap_flags = " ".join(f"--cap-add={c}" for c in caps.split())
+        result = self._dind_run(
+            dind_image,
+            runtime,
+            monkeypatch,
+            [
+                "sh",
+                "-c",
+                f"printf 'FROM alpine\\nRUN echo built-ok\\n' | podman build "
+                f"--isolation=chroot --cap-drop=ALL {cap_flags} "
+                f"-t hatchery-test:inner -f - .",
+            ],
+        )
+        assert result.returncode == 0, f"podman build failed:\nstdout={result.stdout}\nstderr={result.stderr}"

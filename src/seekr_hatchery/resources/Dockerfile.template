@@ -50,24 +50,7 @@ ENV PATH="/home/hatchery/.npm-global/bin:/home/hatchery/.local/bin:$PATH"
 
 # ── Podman-in-Podman (DinD) ──────────────────────────────────────────────────
 # Uncomment this section AND set `dind: true` in .hatchery/docker.yaml.
-# USER root
-# RUN apt-get update && apt-get install -y --no-install-recommends \
-#     podman podman-docker sudo fuse-overlayfs uidmap \
-#     && rm -rf /var/lib/apt/lists/*
-# RUN printf 'hatchery:1001:64535\n' > /etc/subuid \
-#     && printf 'hatchery:1001:64535\n' > /etc/subgid
-# RUN mkdir -p /root/.config/containers \
-#     && printf '[storage]\ndriver = "overlay"\n\n[storage.options.overlay]\nmount_program = "/usr/bin/fuse-overlayfs"\n' \
-#         > /root/.config/containers/storage.conf \
-#     && printf '[containers]\nnetns = "host"\ncgroups = "disabled"\ndefault_sysctls = []\n[engine]\ncgroup_manager = "cgroupfs"\nevents_logger = "file"\n' \
-#         > /root/.config/containers/containers.conf
-# RUN echo 'hatchery ALL=(root) NOPASSWD: /usr/bin/podman' \
-#         > /etc/sudoers.d/hatchery-podman \
-#     && chmod 440 /etc/sudoers.d/hatchery-podman
-# RUN printf '#!/bin/sh\nexec sudo -n /usr/bin/podman "$@"\n' \
-#         > /usr/local/bin/podman \
-#     && chmod +x /usr/local/bin/podman
-# USER hatchery
+{{DIND}}
 
 # =============================================================================
 
