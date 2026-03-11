@@ -355,6 +355,48 @@ class TestPathPrefix:
         assert recorded[0]["path"] == "/backend-api/codex/responses"
 
 
+class TestHeaderSanitization:
+    def test_crlf_stripped_from_response_headers(self, monkeypatch):
+        """Headers containing \\r\\n must be sanitized to prevent HTTP response splitting."""
+
+        class _MaliciousResp:
+            status = 200
+            _data = b"ok"
+
+            def getheaders(self):
+                return [
+                    ("content-type", "text/plain"),
+                    ("x-evil", "value\r\nInjected-Header: pwned"),
+                    ("x-bad\r\nAnother: oops", "clean-value"),
+                ]
+
+            def read(self, n):
+                chunk, self._data = self._data[:n], self._data[n:]
+                return chunk
+
+        class _MaliciousConn(_MockHTTPSConn):
+            def getresponse(self):
+                return _MaliciousResp()
+
+        monkeypatch.setattr(http.client, "HTTPSConnection", _MaliciousConn)
+        server, _ = proxy.start_proxy("real-key", _TOKEN)
+        port = server.server_address[1]
+        _wait_for_port(port)
+
+        try:
+            conn = http.client.HTTPConnection("localhost", port)
+            conn.request("GET", "/v1/test", headers={"x-api-key": _TOKEN})
+            resp = conn.getresponse()
+            resp.read()
+
+            # Verify no header name or value contains CR or LF.
+            for name, value in resp.getheaders():
+                assert "\r" not in name and "\n" not in name, f"Header name contains CRLF: {name!r}"
+                assert "\r" not in value and "\n" not in value, f"Header value contains CRLF: {value!r}"
+        finally:
+            proxy.stop_proxy(server)
+
+
 class TestProxyConcurrentRequests:
     def test_two_concurrent_requests_both_succeed(self, monkeypatch):
         """ThreadingMixIn must handle simultaneous requests without blocking."""

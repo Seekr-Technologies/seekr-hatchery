@@ -56,6 +56,11 @@ _HOP_BY_HOP = frozenset(
 )
 
 
+def _sanitize_header(value: str) -> str:
+    """Strip CR/LF to prevent HTTP response splitting."""
+    return value.replace("\r", "").replace("\n", "")
+
+
 class _ProxyHandler(http.server.BaseHTTPRequestHandler):
     """Validates the proxy token, strips inbound auth, injects the real API key, and forwards."""
 
@@ -133,7 +138,7 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
             for key, value in resp.getheaders():
                 if key.lower() in _HOP_BY_HOP:
                     continue
-                self.send_header(key, value)
+                self.send_header(_sanitize_header(key), _sanitize_header(value))
             self.end_headers()
 
             # Stream response body in chunks (handles SSE correctly).
