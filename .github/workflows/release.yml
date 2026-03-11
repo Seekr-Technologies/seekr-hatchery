@@ -23,6 +23,8 @@ jobs:
 
       - name: Compute version
         id: compute
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           set -eu
 
@@ -36,7 +38,7 @@ jobs:
           PATCH=$(echo "$LATEST_TAG" | sed 's/^v//' | cut -d. -f3)
 
           # PR title is available directly from the event payload — no git log needed
-          COMMIT_TITLE="${{ github.event.pull_request.title }}"
+          COMMIT_TITLE="$PR_TITLE"
 
           echo "Latest tag:    $LATEST_TAG"
           echo "Commit title:  $COMMIT_TITLE"
