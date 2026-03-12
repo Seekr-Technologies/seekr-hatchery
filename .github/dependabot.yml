@@ -6,7 +6,7 @@ updates:
     schedule:
       interval: "weekly"
     commit-message:
-      prefix: "chore"
+      prefix: "no-bump"
     labels:
       - "dependencies"
     open-pull-requests-limit: 5
@@ -16,7 +16,7 @@ updates:
     schedule:
       interval: "weekly"
     commit-message:
-      prefix: "ci"
+      prefix: "no-bump"
     labels:
       - "dependencies"
     open-pull-requests-limit: 5
