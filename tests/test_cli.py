@@ -8,7 +8,14 @@ from click.testing import CliRunner
 
 import seekr_hatchery.docker as docker
 import seekr_hatchery.tasks as tasks
-from seekr_hatchery.cli import _WRAP_UP_PROMPT, _launch_finalize, _launch_new, _launch_resume, cli
+from seekr_hatchery.cli import (
+    _WRAP_UP_PROMPT,
+    _launch_finalize,
+    _launch_new,
+    _launch_resume,
+    _next_chat_name,
+    cli,
+)
 
 # ---------------------------------------------------------------------------
 # --version
@@ -42,7 +49,7 @@ class TestHelp:
         runner = CliRunner()
         result = runner.invoke(cli, ["--help"])
         assert result.exit_code == 0
-        for cmd in ("new", "resume", "done", "sandbox", "archive", "delete", "list", "status", "config"):
+        for cmd in ("new", "chat", "resume", "done", "sandbox", "archive", "delete", "list", "status", "config"):
             assert cmd in result.output
 
     def test_new_help_shows_from_option(self):
@@ -1195,3 +1202,461 @@ class TestRunningState:
             )
 
         assert statuses_saved == ["running", "in-progress"]
+
+
+# ---------------------------------------------------------------------------
+# Chat command
+# ---------------------------------------------------------------------------
+
+
+class TestChat:
+    def test_help_lists_chat_command(self):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["--help"])
+        assert result.exit_code == 0
+        assert "chat" in result.output
+
+    def test_chat_help_shows_agent_option(self):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["chat", "--help"])
+        assert result.exit_code == 0
+        assert "--agent" in result.output
+
+    def test_chat_help_shows_name_argument(self):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["chat", "--help"])
+        assert result.exit_code == 0
+        assert "NAME" in result.output
+
+
+class TestNextChatName:
+    def test_no_existing_chats(self, fake_tasks_db):
+        with patch("seekr_hatchery.cli.tasks.repo_tasks_for_current_repo", return_value=[]):
+            result = _next_chat_name(Path("/my/repo"))
+        assert result == "chat-1"
+
+    def test_one_existing_chat(self, fake_tasks_db):
+        existing = [{"name": "chat-1", "type": "chat"}]
+        with patch("seekr_hatchery.cli.tasks.repo_tasks_for_current_repo", return_value=existing):
+            result = _next_chat_name(Path("/my/repo"))
+        assert result == "chat-2"
+
+    def test_reuses_gap(self, fake_tasks_db):
+        """If chat-1 is gone but chat-2 and chat-3 exist, reuse chat-1."""
+        existing = [
+            {"name": "chat-2", "type": "chat"},
+            {"name": "chat-3", "type": "chat"},
+        ]
+        with patch("seekr_hatchery.cli.tasks.repo_tasks_for_current_repo", return_value=existing):
+            result = _next_chat_name(Path("/my/repo"))
+        assert result == "chat-1"
+
+    def test_reuses_middle_gap(self, fake_tasks_db):
+        existing = [
+            {"name": "chat-1", "type": "chat"},
+            {"name": "chat-3", "type": "chat"},
+        ]
+        with patch("seekr_hatchery.cli.tasks.repo_tasks_for_current_repo", return_value=existing):
+            result = _next_chat_name(Path("/my/repo"))
+        assert result == "chat-2"
+
+    def test_no_gap_uses_next(self, fake_tasks_db):
+        existing = [
+            {"name": "chat-1", "type": "chat"},
+            {"name": "chat-2", "type": "chat"},
+            {"name": "chat-3", "type": "chat"},
+        ]
+        with patch("seekr_hatchery.cli.tasks.repo_tasks_for_current_repo", return_value=existing):
+            result = _next_chat_name(Path("/my/repo"))
+        assert result == "chat-4"
+
+    def test_ignores_non_chat_tasks(self, fake_tasks_db):
+        existing = [
+            {"name": "my-task", "type": "task"},
+            {"name": "chat-1", "type": "chat"},
+        ]
+        with patch("seekr_hatchery.cli.tasks.repo_tasks_for_current_repo", return_value=existing):
+            result = _next_chat_name(Path("/my/repo"))
+        assert result == "chat-2"
+
+    def test_ignores_non_numeric_chat_names(self, fake_tasks_db):
+        existing = [
+            {"name": "chat-foo", "type": "chat"},
+            {"name": "chat-1", "type": "chat"},
+        ]
+        with patch("seekr_hatchery.cli.tasks.repo_tasks_for_current_repo", return_value=existing):
+            result = _next_chat_name(Path("/my/repo"))
+        assert result == "chat-2"
+
+
+class TestLaunchNewChat:
+    """Assert that _launch_new with is_chat=True passes no system/initial prompt."""
+
+    def _patches(self):
+        return [
+            patch("seekr_hatchery.cli.tasks.task_session_dir", return_value=Path("/session")),
+            patch("seekr_hatchery.cli.subprocess.run"),
+            patch(
+                "seekr_hatchery.cli.tasks.load_task",
+                return_value={"name": "t", "status": "in-progress", "branch": ""},
+            ),
+            patch("seekr_hatchery.cli.tasks.save_task"),
+            patch("seekr_hatchery.cli._post_exit_check"),
+            patch("seekr_hatchery.cli._chat_post_exit"),
+            patch("seekr_hatchery.cli.os.chdir"),
+        ]
+
+    def test_launch_new_chat_empty_system_prompt(self, spy_backend):
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for p in self._patches():
+                stack.enter_context(p)
+            _launch_new(
+                repo=Path("/repo"),
+                worktree=Path("/repo"),
+                name="chat-1",
+                session_id="sid",
+                backend=spy_backend,
+                runtime=None,
+                branch="",
+                main_branch="main",
+                no_worktree=True,
+                is_chat=True,
+            )
+
+        build_call = [c for c in spy_backend.calls if c[0] == "build_new_command"][0]
+        system_prompt = build_call[2]
+        assert system_prompt == ""
+
+    def test_launch_new_chat_empty_initial_prompt(self, spy_backend):
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for p in self._patches():
+                stack.enter_context(p)
+            _launch_new(
+                repo=Path("/repo"),
+                worktree=Path("/repo"),
+                name="chat-1",
+                session_id="sid",
+                backend=spy_backend,
+                runtime=None,
+                branch="",
+                main_branch="main",
+                no_worktree=True,
+                is_chat=True,
+            )
+
+        build_call = [c for c in spy_backend.calls if c[0] == "build_new_command"][0]
+        initial_prompt = build_call[3]
+        assert initial_prompt == ""
+
+    def test_launch_new_chat_calls_chat_post_exit(self, spy_backend):
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in self._patches()]
+            mock_post_exit = mocks[4]  # _post_exit_check
+            mock_chat_post_exit = mocks[5]  # _chat_post_exit
+            _launch_new(
+                repo=Path("/repo"),
+                worktree=Path("/repo"),
+                name="chat-1",
+                session_id="sid",
+                backend=spy_backend,
+                runtime=None,
+                branch="",
+                main_branch="main",
+                no_worktree=True,
+                is_chat=True,
+            )
+
+        assert mock_chat_post_exit.called
+        assert not mock_post_exit.called
+
+    def test_launch_new_task_calls_post_exit_check(self, spy_backend):
+        """Non-chat launch should still use _post_exit_check."""
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in self._patches()]
+            mock_post_exit = mocks[4]
+            mock_chat_post_exit = mocks[5]
+            # Need sandbox_context, session_prompt, SESSION_SYSTEM for task mode
+            stack.enter_context(patch("seekr_hatchery.cli.tasks.sandbox_context", return_value="ctx"))
+            stack.enter_context(patch("seekr_hatchery.cli.tasks.session_prompt", return_value="prompt"))
+            stack.enter_context(patch("seekr_hatchery.cli.tasks.SESSION_SYSTEM", "sys"))
+            _launch_new(
+                repo=Path("/repo"),
+                worktree=Path("/worktree"),
+                name="t",
+                session_id="sid",
+                backend=spy_backend,
+                runtime=None,
+                branch="b",
+                main_branch="main",
+            )
+
+        assert mock_post_exit.called
+        assert not mock_chat_post_exit.called
+
+
+class TestLaunchResumeChat:
+    """Assert that _launch_resume with is_chat=True passes no system/initial prompt."""
+
+    def _patches(self):
+        return [
+            patch("seekr_hatchery.cli.subprocess.run"),
+            patch(
+                "seekr_hatchery.cli.tasks.load_task",
+                return_value={"name": "t", "status": "in-progress", "branch": ""},
+            ),
+            patch("seekr_hatchery.cli.tasks.save_task"),
+            patch("seekr_hatchery.cli._post_exit_check"),
+            patch("seekr_hatchery.cli._chat_post_exit"),
+            patch("seekr_hatchery.cli.os.chdir"),
+        ]
+
+    def test_launch_resume_chat_empty_system_prompt(self, spy_backend):
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for p in self._patches():
+                stack.enter_context(p)
+            _launch_resume(
+                repo=Path("/repo"),
+                worktree=Path("/repo"),
+                name="chat-1",
+                session_id="sid",
+                backend=spy_backend,
+                runtime=None,
+                branch="",
+                main_branch="main",
+                no_worktree=True,
+                is_chat=True,
+            )
+
+        build_call = [c for c in spy_backend.calls if c[0] == "build_resume_command"][0]
+        system_prompt = build_call[2]
+        assert system_prompt == ""
+
+    def test_launch_resume_chat_calls_chat_post_exit(self, spy_backend):
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in self._patches()]
+            mock_post_exit = mocks[3]
+            mock_chat_post_exit = mocks[4]
+            _launch_resume(
+                repo=Path("/repo"),
+                worktree=Path("/repo"),
+                name="chat-1",
+                session_id="sid",
+                backend=spy_backend,
+                runtime=None,
+                branch="",
+                main_branch="main",
+                no_worktree=True,
+                is_chat=True,
+            )
+
+        assert mock_chat_post_exit.called
+        assert not mock_post_exit.called
+
+
+class TestCmdChatDispatch:
+    """Test the cmd_chat Click command."""
+
+    def test_chat_requires_git_repo(self):
+        runner = CliRunner()
+        with patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path("/some/dir"), False)):
+            result = runner.invoke(cli, ["chat"])
+        assert result.exit_code == 1
+        assert "git repository" in result.output
+
+    def test_chat_auto_generates_name(self, fake_tasks_db):
+        runner = CliRunner()
+        saved_meta = {}
+
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path("/repo"), True)),
+            patch("seekr_hatchery.cli._next_chat_name", return_value="chat-1"),
+            patch("seekr_hatchery.cli.docker.ensure_dockerfile", return_value=False),
+            patch("seekr_hatchery.cli.docker.ensure_docker_config", return_value=False),
+            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
+            patch("seekr_hatchery.cli.tasks.save_task", side_effect=lambda m: saved_meta.update(m)),
+            patch("seekr_hatchery.cli._launch_new"),
+            patch("seekr_hatchery.cli.tasks.task_db_path") as mock_db_path,
+        ):
+            from unittest.mock import MagicMock
+
+            mock_db_path.return_value = MagicMock(exists=lambda: False)
+            result = runner.invoke(cli, ["chat"])
+
+        assert result.exit_code == 0
+        assert saved_meta.get("name") == "chat-1"
+        assert saved_meta.get("type") == "chat"
+        assert saved_meta.get("no_worktree") is True
+        assert saved_meta.get("branch") == ""
+
+    def test_chat_with_explicit_name(self, fake_tasks_db):
+        runner = CliRunner()
+        saved_meta = {}
+
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path("/repo"), True)),
+            patch("seekr_hatchery.cli.docker.ensure_dockerfile", return_value=False),
+            patch("seekr_hatchery.cli.docker.ensure_docker_config", return_value=False),
+            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
+            patch("seekr_hatchery.cli.tasks.save_task", side_effect=lambda m: saved_meta.update(m)),
+            patch("seekr_hatchery.cli._launch_new"),
+            patch("seekr_hatchery.cli.tasks.task_db_path") as mock_db_path,
+        ):
+            from unittest.mock import MagicMock
+
+            mock_db_path.return_value = MagicMock(exists=lambda: False)
+            result = runner.invoke(cli, ["chat", "my-session"])
+
+        assert result.exit_code == 0
+        assert saved_meta.get("name") == "my-session"
+        assert saved_meta.get("type") == "chat"
+
+    def test_chat_passes_is_chat_to_launch(self, fake_tasks_db):
+        runner = CliRunner()
+
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path("/repo"), True)),
+            patch("seekr_hatchery.cli._next_chat_name", return_value="chat-1"),
+            patch("seekr_hatchery.cli.docker.ensure_dockerfile", return_value=False),
+            patch("seekr_hatchery.cli.docker.ensure_docker_config", return_value=False),
+            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
+            patch("seekr_hatchery.cli.tasks.save_task"),
+            patch("seekr_hatchery.cli._launch_new") as mock_launch,
+            patch("seekr_hatchery.cli.tasks.task_db_path") as mock_db_path,
+        ):
+            from unittest.mock import MagicMock
+
+            mock_db_path.return_value = MagicMock(exists=lambda: False)
+            runner.invoke(cli, ["chat"])
+
+        assert mock_launch.called
+        call_kwargs = mock_launch.call_args
+        args = call_kwargs[0] if call_kwargs[0] else []
+        kwargs = call_kwargs[1] if call_kwargs[1] else {}
+        # is_chat should be True (either as positional or keyword arg)
+        assert kwargs.get("is_chat") is True or (len(args) > 9 and args[9] is True)
+
+
+class TestCmdStatusShowsType:
+    """Test that cmd_status shows a Type: line."""
+
+    def test_status_shows_type_chat(self, fake_tasks_db):
+        runner = CliRunner()
+        meta = {
+            "name": "chat-1",
+            "type": "chat",
+            "branch": "",
+            "worktree": "/nonexistent",
+            "repo": "/my/repo",
+            "status": "in-progress",
+            "created": "2026-01-15T10:00:00",
+            "session_id": "sid",
+            "no_worktree": True,
+        }
+        tasks.save_task(meta)
+        with patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path("/my/repo"), True)):
+            result = runner.invoke(cli, ["status", "chat-1"])
+        assert result.exit_code == 0
+        assert "chat" in result.output
+
+    def test_status_shows_type_task_default(self, fake_tasks_db):
+        runner = CliRunner()
+        meta = {
+            "name": "my-task",
+            "branch": "hatchery/my-task",
+            "worktree": "/nonexistent",
+            "repo": "/my/repo",
+            "status": "in-progress",
+            "created": "2026-01-15T10:00:00",
+            "session_id": "sid",
+        }
+        tasks.save_task(meta)
+        with patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path("/my/repo"), True)):
+            result = runner.invoke(cli, ["status", "my-task"])
+        assert result.exit_code == 0
+        assert "task" in result.output
+
+
+class TestResumeChat:
+    """Test that cmd_resume passes is_chat for chat metadata."""
+
+    def test_resume_passes_is_chat_for_chat(self, fake_tasks_db):
+        runner = CliRunner()
+
+        with (
+            patch("seekr_hatchery.cli.tasks.load_task") as mock_load,
+            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
+            patch("seekr_hatchery.cli._launch_resume") as mock_launch,
+        ):
+            from unittest.mock import MagicMock
+
+            worktree = MagicMock(spec=Path)
+            worktree.exists.return_value = True
+            mock_load.return_value = {
+                "name": "chat-1",
+                "type": "chat",
+                "branch": "",
+                "worktree": "/some/repo",
+                "repo": "/some/repo",
+                "session_id": "sid-123",
+                "no_worktree": True,
+            }
+
+            with patch("seekr_hatchery.cli.Path") as mock_path_cls:
+                mock_path_cls.return_value = worktree
+                runner.invoke(cli, ["resume", "chat-1"])
+
+        assert mock_launch.called
+        call_kwargs = mock_launch.call_args
+        args = call_kwargs[0] if call_kwargs[0] else []
+        kwargs = call_kwargs[1] if call_kwargs[1] else {}
+        # is_chat should be True
+        assert kwargs.get("is_chat") is True or (len(args) > 9 and args[9] is True)
+
+    def test_resume_passes_is_chat_false_for_task(self, fake_tasks_db):
+        runner = CliRunner()
+
+        with (
+            patch("seekr_hatchery.cli.tasks.load_task") as mock_load,
+            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
+            patch("seekr_hatchery.cli._launch_resume") as mock_launch,
+        ):
+            from unittest.mock import MagicMock
+
+            worktree = MagicMock(spec=Path)
+            worktree.exists.return_value = True
+            mock_load.return_value = {
+                "name": "my-task",
+                "branch": "hatchery/my-task",
+                "worktree": "/some/worktree",
+                "repo": "/some/repo",
+                "session_id": "sid-123",
+            }
+
+            with patch("seekr_hatchery.cli.Path") as mock_path_cls:
+                mock_path_cls.return_value = worktree
+                runner.invoke(cli, ["resume", "my-task"])
+
+        assert mock_launch.called
+        call_kwargs = mock_launch.call_args
+        args = call_kwargs[0] if call_kwargs[0] else []
+        kwargs = call_kwargs[1] if call_kwargs[1] else {}
+        # is_chat should be False (default)
+        is_chat = kwargs.get("is_chat", False) if kwargs else (args[9] if len(args) > 9 else False)
+        assert is_chat is False
