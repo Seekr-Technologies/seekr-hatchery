@@ -389,6 +389,129 @@ class TestRunContainerRuntime:
 
 
 # ---------------------------------------------------------------------------
+# _run_container() — _interactive flag
+# ---------------------------------------------------------------------------
+
+
+class TestRunContainerInteractive:
+    """Verify _interactive=True adds -it and does not capture output."""
+
+    def test_interactive_override_adds_it_flags(self, monkeypatch):
+        """_interactive=True + _command_override should add -it to the command."""
+        captured: list[list[str]] = []
+
+        def _mock_run(cmd, **kw):
+            captured.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0)
+
+        monkeypatch.setattr(docker.subprocess, "run", _mock_run)
+        docker._run_container(
+            image="test-image",
+            mounts=[],
+            workdir="/workspace",
+            hatchery_repo="/repo",
+            name="test-task",
+            api_key=None,
+            proxy_token=None,
+            agent_cmd=[],
+            runtime=docker.Runtime.DOCKER,
+            _command_override=["/bin/bash"],
+            _interactive=True,
+        )
+        cmd = captured[0]
+        assert "-it" in cmd
+        assert "/bin/bash" in cmd
+
+    def test_interactive_override_does_not_capture(self, monkeypatch):
+        """_interactive=True should call subprocess.run without capture_output."""
+        captured_kwargs: list[dict] = []
+
+        def _mock_run(cmd, **kw):
+            captured_kwargs.append(kw)
+            return subprocess.CompletedProcess(cmd, 0)
+
+        monkeypatch.setattr(docker.subprocess, "run", _mock_run)
+        docker._run_container(
+            image="test-image",
+            mounts=[],
+            workdir="/workspace",
+            hatchery_repo="/repo",
+            name="test-task",
+            api_key=None,
+            proxy_token=None,
+            agent_cmd=[],
+            runtime=docker.Runtime.DOCKER,
+            _command_override=["/bin/bash"],
+            _interactive=True,
+        )
+        assert "capture_output" not in captured_kwargs[0]
+
+    def test_interactive_override_returns_none(self, monkeypatch):
+        """_interactive=True should return None (output not captured)."""
+        monkeypatch.setattr(docker.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0))
+        result = docker._run_container(
+            image="test-image",
+            mounts=[],
+            workdir="/workspace",
+            hatchery_repo="/repo",
+            name="test-task",
+            api_key=None,
+            proxy_token=None,
+            agent_cmd=[],
+            runtime=docker.Runtime.DOCKER,
+            _command_override=["/bin/bash"],
+            _interactive=True,
+        )
+        assert result is None
+
+    def test_non_interactive_override_captures_output(self, monkeypatch):
+        """Default _interactive=False + _command_override should capture output."""
+        captured_kwargs: list[dict] = []
+
+        def _mock_run(cmd, **kw):
+            captured_kwargs.append(kw)
+            return subprocess.CompletedProcess(cmd, 0)
+
+        monkeypatch.setattr(docker.subprocess, "run", _mock_run)
+        docker._run_container(
+            image="test-image",
+            mounts=[],
+            workdir="/workspace",
+            hatchery_repo="/repo",
+            name="test-task",
+            api_key=None,
+            proxy_token=None,
+            agent_cmd=[],
+            runtime=docker.Runtime.DOCKER,
+            _command_override=["echo", "hello"],
+        )
+        assert captured_kwargs[0].get("capture_output") is True
+
+    def test_non_interactive_override_no_it_flags(self, monkeypatch):
+        """Default _interactive=False + _command_override should NOT add -it."""
+        captured: list[list[str]] = []
+
+        def _mock_run(cmd, **kw):
+            captured.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0)
+
+        monkeypatch.setattr(docker.subprocess, "run", _mock_run)
+        docker._run_container(
+            image="test-image",
+            mounts=[],
+            workdir="/workspace",
+            hatchery_repo="/repo",
+            name="test-task",
+            api_key=None,
+            proxy_token=None,
+            agent_cmd=[],
+            runtime=docker.Runtime.DOCKER,
+            _command_override=["echo", "hello"],
+        )
+        assert "-it" not in captured[0]
+
+
+# ---------------------------------------------------------------------------
 # build_docker_image() — build context and stdin
 # ---------------------------------------------------------------------------
 

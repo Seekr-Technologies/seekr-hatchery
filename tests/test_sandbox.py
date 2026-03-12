@@ -313,6 +313,34 @@ class TestNoWorktreeMounts:
 # ---------------------------------------------------------------------------
 
 
+class TestSandboxShell:
+    """Verify _run_container with _interactive=True executes the command."""
+
+    def test_interactive_command_runs(
+        self,
+        no_wt_image: str,
+        runtime: docker.Runtime,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """_interactive=True runs the command and returns None (output inherited)."""
+        monkeypatch.setattr(docker, "_userns_flags", lambda _r: [])
+        result = docker._run_container(
+            image=no_wt_image,
+            mounts=[],
+            workdir="/",
+            hatchery_repo="/",
+            name="test-sandbox",
+            api_key=None,
+            proxy_token=None,
+            agent_cmd=[],
+            runtime=runtime,
+            _command_override=["echo", "sandbox-ok"],
+            _interactive=True,
+        )
+        # _interactive=True returns None (output goes to inherited stdout)
+        assert result is None
+
+
 class TestContainerEnv:
     """Container injects HATCHERY_TASK, HATCHERY_REPO, sets workdir correctly,
     and sets workdir correctly."""

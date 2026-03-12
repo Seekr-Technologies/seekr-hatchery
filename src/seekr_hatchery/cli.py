@@ -612,6 +612,31 @@ def cmd_resume(name: str, no_docker: bool) -> None:
     _launch_resume(repo, worktree, name, session_id, backend, runtime, meta["branch"], main_branch, no_worktree)
 
 
+@cli.command("sandbox")
+@click.option("--shell", default="/bin/bash", help="Shell to launch (default: /bin/bash)")
+def cmd_sandbox(shell: str) -> None:
+    """Drop into an interactive shell inside the Docker sandbox."""
+    repo, in_repo = git.git_root_or_cwd()
+    cfg = user_config.UserConfig.load()
+    backend = cfg.resolve_backend(None)
+    tasks.ensure_tasks_dir(repo)
+    df_created = docker.ensure_dockerfile(repo, backend)
+    dc_created = docker.ensure_docker_config(repo)
+    if in_repo and (df_created or dc_created):
+        ui.info("  Committing...")
+        tasks.run(
+            ["git", "add", str(docker.dockerfile_path(repo, backend).relative_to(repo)), str(tasks.DOCKER_CONFIG)],
+            cwd=repo,
+        )
+        tasks.run(
+            ["git", "commit", "-m", "chore: add hatchery Docker configuration"],
+            cwd=repo,
+        )
+    runtime = docker.detect_runtime()
+    config = docker.load_docker_config(repo)
+    docker.launch_sandbox_shell(repo, backend, config, runtime, shell=shell)
+
+
 @cli.command("done")
 @click.argument("name")
 def cmd_done(name: str) -> None:

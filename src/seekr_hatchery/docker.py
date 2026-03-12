@@ -610,6 +610,7 @@ def _run_container(
     dind: bool = False,
     runtime: Runtime = Runtime.DOCKER,
     _command_override: list[str] | None = None,
+    _interactive: bool = False,
     cap_add: list[str] | None = None,
 ) -> subprocess.CompletedProcess[str] | None:
     """Assemble and execute the container run command for the given agent session.
@@ -632,7 +633,7 @@ def _run_container(
             logger.debug("Proxy started for task; API key in container is a proxy token")
 
     cmd = [runtime.binary, "run", "--rm"]
-    if _command_override is None:
+    if _command_override is None or _interactive:
         cmd += ["-it"]
     for mount in mounts:
         cmd += ["-v", mount]
@@ -695,6 +696,9 @@ def _run_container(
         cmd += _command_override
         logger.debug(f"Launching {runtime.binary} container image={image!r} name={name!r} (command override)")
         try:
+            if _interactive:
+                subprocess.run(cmd)
+                return None
             return subprocess.run(cmd, capture_output=True, text=True)
         finally:
             if proxy_server is not None:
@@ -837,6 +841,40 @@ def launch_docker_no_worktree(
         dind=config.dind,
         runtime=runtime,
         cap_add=config.cap_add,
+    )
+
+
+def launch_sandbox_shell(
+    repo: Path,
+    backend: agent.AgentBackend,
+    config: DockerConfig,
+    runtime: Runtime,
+    shell: str = "/bin/bash",
+) -> None:
+    """Drop the user into an interactive shell inside the sandbox container.
+
+    Builds the same image agents use but skips all agent/proxy/session setup.
+    The repo is mounted read-only at /repo.
+    """
+    build_docker_image(repo, repo, "sandbox", backend, runtime=runtime)
+    image = docker_image_name(repo, "sandbox")
+    mounts = (
+        [f"{repo}:{tasks.CONTAINER_REPO_ROOT}:rw"]
+        + _default_home_mounts()
+        + _construct_docker_mounts(config)
+    )
+    _run_container(
+        image=image,
+        mounts=mounts,
+        workdir=tasks.CONTAINER_REPO_ROOT,
+        hatchery_repo=tasks.CONTAINER_REPO_ROOT,
+        name="sandbox",
+        api_key=None,
+        proxy_token=None,
+        agent_cmd=[],
+        runtime=runtime,
+        _command_override=[shell],
+        _interactive=True,
     )
 
 

@@ -42,7 +42,7 @@ class TestHelp:
         runner = CliRunner()
         result = runner.invoke(cli, ["--help"])
         assert result.exit_code == 0
-        for cmd in ("new", "resume", "done", "archive", "delete", "list", "status", "config"):
+        for cmd in ("new", "resume", "done", "sandbox", "archive", "delete", "list", "status", "config"):
             assert cmd in result.output
 
     def test_new_help_shows_from_option(self):
@@ -520,6 +520,65 @@ class TestCliResume:
 
         call_args = mock_docker.call_args
         assert call_args[0][2] is True or call_args[1].get("no_docker") is True
+
+
+# ---------------------------------------------------------------------------
+# CLI dispatch — sandbox
+# ---------------------------------------------------------------------------
+
+
+class TestSandbox:
+    def test_sandbox_dispatches_to_launch_sandbox_shell(self, tmp_path, monkeypatch):
+        repo = tmp_path / "repo"
+        (repo / ".hatchery").mkdir(parents=True)
+
+        runner = CliRunner()
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
+            patch("seekr_hatchery.cli.docker.ensure_dockerfile", return_value=False),
+            patch("seekr_hatchery.cli.docker.ensure_docker_config", return_value=False),
+            patch("seekr_hatchery.cli.docker.detect_runtime", return_value=docker.Runtime.DOCKER),
+            patch("seekr_hatchery.cli.docker.launch_sandbox_shell") as mock_launch,
+        ):
+            result = runner.invoke(cli, ["sandbox"])
+            assert result.exit_code == 0, result.output
+            assert mock_launch.called
+            call_kwargs = mock_launch.call_args
+            assert call_kwargs[0][0] == repo  # repo arg
+            assert call_kwargs[1]["shell"] == "/bin/bash"  # default shell
+
+    def test_sandbox_custom_shell(self, tmp_path, monkeypatch):
+        repo = tmp_path / "repo"
+        (repo / ".hatchery").mkdir(parents=True)
+
+        runner = CliRunner()
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
+            patch("seekr_hatchery.cli.docker.ensure_dockerfile", return_value=False),
+            patch("seekr_hatchery.cli.docker.ensure_docker_config", return_value=False),
+            patch("seekr_hatchery.cli.docker.detect_runtime", return_value=docker.Runtime.DOCKER),
+            patch("seekr_hatchery.cli.docker.launch_sandbox_shell") as mock_launch,
+        ):
+            result = runner.invoke(cli, ["sandbox", "--shell", "/bin/sh"])
+            assert result.exit_code == 0, result.output
+            assert mock_launch.call_args[1]["shell"] == "/bin/sh"
+
+    def test_sandbox_creates_dockerfile_when_missing(self, tmp_path, monkeypatch):
+        repo = tmp_path / "repo"
+        (repo / ".hatchery").mkdir(parents=True)
+
+        runner = CliRunner()
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
+            patch("seekr_hatchery.cli.docker.ensure_dockerfile", return_value=True) as mock_df,
+            patch("seekr_hatchery.cli.docker.ensure_docker_config", return_value=False),
+            patch("seekr_hatchery.cli.tasks.run"),
+            patch("seekr_hatchery.cli.docker.detect_runtime", return_value=docker.Runtime.DOCKER),
+            patch("seekr_hatchery.cli.docker.launch_sandbox_shell"),
+        ):
+            result = runner.invoke(cli, ["sandbox"])
+            assert result.exit_code == 0, result.output
+            assert mock_df.called
 
 
 # ---------------------------------------------------------------------------
