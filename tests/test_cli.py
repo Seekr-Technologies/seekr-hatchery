@@ -357,6 +357,122 @@ class TestCliNew:
         assert mock_remove_wt.called
         assert mock_delete_br.called
 
+    def test_dockerfile_checked_against_worktree_not_repo(self):
+        """ensure_dockerfile/config are called with the worktree path, not repo root."""
+        runner = CliRunner()
+        from contextlib import ExitStack
+        from unittest.mock import MagicMock
+
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in _new_patches()]
+            (
+                mock_root,
+                _,
+                _,
+                mock_ensure_df,
+                mock_ensure_dc,
+                mock_db_path,
+                mock_wt_dir,
+                _,
+                _,
+                mock_write,
+                _,
+                _,
+                mock_docker,
+                _,
+                _,
+            ) = mocks
+            mock_root.return_value = (Path("/repo"), True)
+            mock_db_path.return_value = MagicMock(exists=lambda: False)
+            mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
+            mock_write.return_value = Path("/repo/.hatchery/tasks/task.md")
+            mock_docker.return_value = None
+            mock_ensure_df.return_value = False
+            mock_ensure_dc.return_value = False
+            runner.invoke(cli, ["new", "my-task"])
+
+        worktree = Path("/repo/.hatchery/worktrees/my-task")
+        assert mock_ensure_df.call_args[0][0] == worktree
+        assert mock_ensure_dc.call_args[0][0] == worktree
+
+    def test_keyboard_interrupt_cleans_up_worktree(self):
+        """Ctrl-C after worktree creation removes the worktree and branch."""
+        runner = CliRunner()
+        from contextlib import ExitStack
+        from unittest.mock import MagicMock
+
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in _new_patches()]
+            (
+                mock_root,
+                _,
+                _,
+                mock_ensure_df,
+                _,
+                mock_db_path,
+                mock_wt_dir,
+                _,
+                _,
+                mock_write,
+                _,
+                _,
+                mock_docker,
+                _,
+                _,
+            ) = mocks
+            mock_remove_wt = stack.enter_context(patch("seekr_hatchery.cli.git.remove_worktree"))
+            mock_delete_br = stack.enter_context(patch("seekr_hatchery.cli.git.delete_branch"))
+            mock_root.return_value = (Path("/repo"), True)
+            mock_db_path.return_value = MagicMock(exists=lambda: False)
+            mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
+            mock_write.return_value = Path("/repo/.hatchery/tasks/task.md")
+            mock_docker.return_value = None
+            mock_ensure_df.side_effect = KeyboardInterrupt
+            result = runner.invoke(cli, ["new", "my-task"])
+
+        assert result.exit_code == 1
+        assert mock_remove_wt.called
+        assert mock_delete_br.called
+
+    def test_keyboard_interrupt_no_worktree_skips_cleanup(self):
+        """Ctrl-C with --no-worktree does not attempt to remove any worktree."""
+        runner = CliRunner()
+        from contextlib import ExitStack
+        from unittest.mock import MagicMock
+
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in _new_patches()]
+            (
+                mock_root,
+                _,
+                _,
+                mock_ensure_df,
+                _,
+                mock_db_path,
+                mock_wt_dir,
+                _,
+                _,
+                mock_write,
+                _,
+                _,
+                mock_docker,
+                _,
+                _,
+            ) = mocks
+            mock_remove_wt = stack.enter_context(patch("seekr_hatchery.cli.git.remove_worktree"))
+            mock_delete_br = stack.enter_context(patch("seekr_hatchery.cli.git.delete_branch"))
+            mock_root.return_value = (Path("/repo"), True)
+            mock_db_path.return_value = MagicMock(exists=lambda: False)
+            mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
+            mock_write.return_value = Path("/repo/.hatchery/tasks/task.md")
+            mock_docker.return_value = None
+            mock_ensure_df.side_effect = KeyboardInterrupt
+            result = runner.invoke(cli, ["new", "my-task", "--no-worktree"])
+
+        assert result.exit_code == 1
+        assert not mock_remove_wt.called
+        assert not mock_delete_br.called
+
 
 # ---------------------------------------------------------------------------
 # config edit
