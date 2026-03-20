@@ -362,6 +362,7 @@ def _launch_new(
     main_branch: str,
     no_worktree: bool = False,
     is_chat: bool = False,
+    no_cache: bool = False,
 ) -> None:
     session_dir = tasks.task_session_dir(repo, name)
     backend.on_new_task(session_dir)
@@ -385,9 +386,9 @@ def _launch_new(
     try:
         if runtime:
             if no_worktree:
-                docker.launch_docker_no_worktree(worktree, name, backend, agent_cmd, config, runtime)
+                docker.launch_docker_no_worktree(worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache)
             else:
-                docker.launch_docker(repo, worktree, name, backend, agent_cmd, config, runtime)
+                docker.launch_docker(repo, worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache)
         else:
             os.chdir(worktree)
             subprocess.run(agent_cmd, env=_session_env(name, repo))
@@ -412,6 +413,7 @@ def _launch_resume(
     main_branch: str,
     no_worktree: bool = False,
     is_chat: bool = False,
+    no_cache: bool = False,
 ) -> None:
     backend.on_before_launch(worktree)
     if is_chat:
@@ -433,9 +435,9 @@ def _launch_resume(
     try:
         if runtime:
             if no_worktree:
-                docker.launch_docker_no_worktree(worktree, name, backend, agent_cmd, config, runtime)
+                docker.launch_docker_no_worktree(worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache)
             else:
-                docker.launch_docker(repo, worktree, name, backend, agent_cmd, config, runtime)
+                docker.launch_docker(repo, worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache)
         else:
             os.chdir(worktree)
             subprocess.run(agent_cmd, env=_session_env(name, repo))
@@ -531,7 +533,15 @@ def cli(log_level: str, log_file: str | None) -> None:
     type=click.Choice(["codex"], case_sensitive=False),
     help="Agent to use (auto-detected if not specified)",
 )
-def cmd_new(name: str, base: str, no_docker: bool, no_worktree: bool, editor: bool | None, agent_name: str) -> None:
+@click.option(
+    "--rebuild-sandbox",
+    "rebuild_sandbox",
+    is_flag=True,
+    help="Rebuild the sandbox image from scratch, ignoring the layer cache",
+)
+def cmd_new(
+    name: str, base: str, no_docker: bool, no_worktree: bool, editor: bool | None, agent_name: str, rebuild_sandbox: bool
+) -> None:
     """Start a new task."""
     ui.hatchery_header(_version)
     repo, in_repo = git.git_root_or_cwd()
@@ -615,7 +625,7 @@ def cmd_new(name: str, base: str, no_docker: bool, no_worktree: bool, editor: bo
 
     runtime = docker.resolve_runtime(repo, worktree, no_docker, backend=backend)
     main_branch = git.get_default_branch(repo)
-    _launch_new(repo, worktree, name, session_id, backend, runtime, branch, main_branch, no_worktree)
+    _launch_new(repo, worktree, name, session_id, backend, runtime, branch, main_branch, no_worktree, no_cache=rebuild_sandbox)
 
 
 @cli.command("chat")
@@ -689,7 +699,13 @@ def cmd_chat(name: str | None, agent_name: str) -> None:
 @cli.command("resume")
 @click.argument("name")
 @click.option("--no-docker", is_flag=True, help="Run agent directly, even if a Dockerfile is present")
-def cmd_resume(name: str, no_docker: bool) -> None:
+@click.option(
+    "--rebuild-sandbox",
+    "rebuild_sandbox",
+    is_flag=True,
+    help="Rebuild the sandbox image from scratch, ignoring the layer cache",
+)
+def cmd_resume(name: str, no_docker: bool, rebuild_sandbox: bool) -> None:
     """Resume exactly where you left off."""
     ui.hatchery_header(_version)
     repo, _ = git.git_root_or_cwd()
@@ -728,12 +744,18 @@ def cmd_resume(name: str, no_docker: bool) -> None:
     is_chat = meta.get("type") == "chat"
     runtime = docker.resolve_runtime(repo, worktree, no_docker, backend=backend)
     main_branch = git.get_default_branch(repo)
-    _launch_resume(repo, worktree, name, session_id, backend, runtime, meta["branch"], main_branch, no_worktree, is_chat)
+    _launch_resume(repo, worktree, name, session_id, backend, runtime, meta["branch"], main_branch, no_worktree, is_chat=is_chat, no_cache=rebuild_sandbox)
 
 
 @cli.command("sandbox")
 @click.option("--shell", default="/bin/bash", help="Shell to launch (default: /bin/bash)")
-def cmd_sandbox(shell: str) -> None:
+@click.option(
+    "--rebuild-sandbox",
+    "rebuild_sandbox",
+    is_flag=True,
+    help="Rebuild the sandbox image from scratch, ignoring the layer cache",
+)
+def cmd_sandbox(shell: str, rebuild_sandbox: bool) -> None:
     """Drop into an interactive shell inside the Docker sandbox."""
     repo, in_repo = git.git_root_or_cwd()
     cfg = user_config.UserConfig.load()
@@ -753,7 +775,7 @@ def cmd_sandbox(shell: str) -> None:
         )
     runtime = docker.detect_runtime()
     config = docker.load_docker_config(repo)
-    docker.launch_sandbox_shell(repo, backend, config, runtime, shell=shell)
+    docker.launch_sandbox_shell(repo, backend, config, runtime, shell=shell, no_cache=rebuild_sandbox)
 
 
 @cli.command("done")
