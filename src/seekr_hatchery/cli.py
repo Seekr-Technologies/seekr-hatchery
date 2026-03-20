@@ -361,18 +361,26 @@ def _launch_new(
     branch: str,
     main_branch: str,
     no_worktree: bool = False,
+    is_chat: bool = False,
 ) -> None:
     session_dir = tasks.task_session_dir(repo, name)
     backend.on_new_task(session_dir)
     backend.on_before_launch(worktree)
-    env_ctx = tasks.sandbox_context(name, branch, worktree, repo, main_branch, bool(runtime), no_worktree)
-    system_prompt = tasks.SESSION_SYSTEM + "\n" + env_ctx
-    initial_prompt = tasks.session_prompt(name, worktree)
+    if is_chat:
+        system_prompt = ""
+        initial_prompt = ""
+    else:
+        env_ctx = tasks.sandbox_context(name, branch, worktree, repo, main_branch, bool(runtime), no_worktree)
+        system_prompt = tasks.SESSION_SYSTEM + "\n" + env_ctx
+        initial_prompt = tasks.session_prompt(name, worktree)
     config, features, container_workdir = _docker_context(runtime, None if no_worktree else worktree, repo)
     agent_cmd = backend.build_new_command(
         session_id, system_prompt, initial_prompt, docker=bool(runtime), workdir=container_workdir
     )
-    ui.banner(name, repo, branch=branch, sandbox=bool(runtime), worktree=not no_worktree, features=features)
+    if is_chat:
+        ui.chat_banner(name, repo, features=features)
+    else:
+        ui.banner(name, repo, branch=branch, sandbox=bool(runtime), worktree=not no_worktree, features=features)
     _set_task_status(repo, name, "running")
     try:
         if runtime:
@@ -385,9 +393,12 @@ def _launch_new(
             subprocess.run(agent_cmd, env=_session_env(name, repo))
     finally:
         _set_task_status(repo, name, "in-progress")
-    _post_exit_check(
-        name, repo, worktree, branch=branch, sandbox=bool(runtime), no_worktree=no_worktree, features=features
-    )
+    if is_chat:
+        _chat_post_exit(name, repo)
+    else:
+        _post_exit_check(
+            name, repo, worktree, branch=branch, sandbox=bool(runtime), no_worktree=no_worktree, features=features
+        )
 
 
 def _launch_resume(
@@ -400,16 +411,24 @@ def _launch_resume(
     branch: str,
     main_branch: str,
     no_worktree: bool = False,
+    is_chat: bool = False,
 ) -> None:
     backend.on_before_launch(worktree)
-    env_ctx = tasks.sandbox_context(name, branch, worktree, repo, main_branch, bool(runtime), no_worktree)
-    system_prompt = tasks.SESSION_SYSTEM + "\n" + env_ctx
-    initial_prompt = tasks.session_prompt(name, worktree)
+    if is_chat:
+        system_prompt = ""
+        initial_prompt = ""
+    else:
+        env_ctx = tasks.sandbox_context(name, branch, worktree, repo, main_branch, bool(runtime), no_worktree)
+        system_prompt = tasks.SESSION_SYSTEM + "\n" + env_ctx
+        initial_prompt = tasks.session_prompt(name, worktree)
     config, features, container_workdir = _docker_context(runtime, None if no_worktree else worktree, repo)
     agent_cmd = backend.build_resume_command(
         session_id, system_prompt, initial_prompt, docker=bool(runtime), workdir=container_workdir
     )
-    ui.banner(name, repo, branch=branch, sandbox=bool(runtime), worktree=not no_worktree, features=features)
+    if is_chat:
+        ui.chat_banner(name, repo, features=features)
+    else:
+        ui.banner(name, repo, branch=branch, sandbox=bool(runtime), worktree=not no_worktree, features=features)
     _set_task_status(repo, name, "running")
     try:
         if runtime:
@@ -422,9 +441,40 @@ def _launch_resume(
             subprocess.run(agent_cmd, env=_session_env(name, repo))
     finally:
         _set_task_status(repo, name, "in-progress")
-    _post_exit_check(
-        name, repo, worktree, branch=branch, sandbox=bool(runtime), no_worktree=no_worktree, features=features
-    )
+    if is_chat:
+        _chat_post_exit(name, repo)
+    else:
+        _post_exit_check(
+            name, repo, worktree, branch=branch, sandbox=bool(runtime), no_worktree=no_worktree, features=features
+        )
+
+
+def _next_chat_name(repo: Path) -> str:
+    """Return the lowest available chat-N name for this repo."""
+    existing = tasks.repo_tasks_for_current_repo(repo)
+    used: set[int] = set()
+    for meta in existing:
+        if meta.get("type") == "chat":
+            name = meta.get("name", "")
+            if name.startswith("chat-") and name[5:].isdigit():
+                used.add(int(name[5:]))
+    n = 1
+    while n in used:
+        n += 1
+    return f"chat-{n}"
+
+
+def _chat_post_exit(name: str, repo: Path) -> None:
+    """Simple post-exit for chat: offer to mark complete."""
+    answer = input(f"\nMark chat '{name}' as complete? [Y/n] ").strip().lower()
+    if answer != "n":
+        meta = tasks.load_task(repo, name)
+        meta["status"] = "complete"
+        meta["completed"] = datetime.now().isoformat()
+        tasks.save_task(meta)
+        ui.success(f"Chat '{name}' marked complete.")
+    else:
+        ui.info(f"Chat '{name}' left in-progress. Resume with: hatchery resume {name}")
 
 
 # ---------------------------------------------------------------------------
@@ -568,6 +618,74 @@ def cmd_new(name: str, base: str, no_docker: bool, no_worktree: bool, editor: bo
     _launch_new(repo, worktree, name, session_id, backend, runtime, branch, main_branch, no_worktree)
 
 
+@cli.command("chat")
+@click.argument("name", required=False, default=None)
+@click.option(
+    "--agent",
+    "agent_name",
+    default=None,
+    type=click.Choice(["codex"], case_sensitive=False),
+    help="Agent to use (auto-detected if not specified)",
+)
+def cmd_chat(name: str | None, agent_name: str) -> None:
+    """Start a free-form chat session in a sandbox."""
+    ui.hatchery_header(_version)
+    repo, in_repo = git.git_root_or_cwd()
+    if not in_repo:
+        ui.error("chat requires a git repository (needed for Docker scaffolding).")
+        sys.exit(1)
+
+    cfg = user_config.UserConfig.load()
+    backend = cfg.resolve_backend(agent_name)
+
+    # Auto-generate name if not provided
+    if name is None:
+        name = _next_chat_name(repo)
+    else:
+        name = tasks.to_name(name)
+
+    db_path = tasks.task_db_path(repo, name)
+    if db_path.exists():
+        existing = json.loads(db_path.read_text())
+        if existing.get("status") in ("in-progress", "running"):
+            ui.error(f"chat '{name}' is already in-progress. Choose a different name or resume it.")
+            sys.exit(1)
+
+    # Ensure Docker scaffolding
+    df_created = docker.ensure_dockerfile(repo, backend)
+    dc_created = docker.ensure_docker_config(repo)
+    if df_created or dc_created:
+        ui.info("  Committing...")
+        tasks.run(
+            ["git", "add", str(docker.dockerfile_path(repo, backend).relative_to(repo)), str(tasks.DOCKER_CONFIG)],
+            cwd=repo,
+        )
+        tasks.run(
+            ["git", "commit", "-m", "chore: add hatchery Docker configuration"],
+            cwd=repo,
+        )
+
+    runtime = docker.resolve_runtime(repo, repo, no_docker=False, backend=backend)
+
+    session_id = str(uuid.uuid4())
+    meta = {
+        "name": name,
+        "type": "chat",
+        "branch": "",
+        "worktree": str(repo),
+        "repo": str(repo),
+        "status": "in-progress",
+        "created": datetime.now().isoformat(),
+        "session_id": session_id,
+        "no_worktree": True,
+        "agent": backend.kind,
+    }
+    tasks.save_task(meta)
+
+    main_branch = git.get_default_branch(repo)
+    _launch_new(repo, repo, name, session_id, backend, runtime, "", main_branch, no_worktree=True, is_chat=True)
+
+
 @cli.command("resume")
 @click.argument("name")
 @click.option("--no-docker", is_flag=True, help="Run agent directly, even if a Dockerfile is present")
@@ -607,9 +725,10 @@ def cmd_resume(name: str, no_docker: bool) -> None:
     if meta.get("status") == "running":
         ui.note(f"task '{name}' was marked as running — a previous session may have exited unexpectedly.")
 
+    is_chat = meta.get("type") == "chat"
     runtime = docker.resolve_runtime(repo, worktree, no_docker, backend=backend)
     main_branch = git.get_default_branch(repo)
-    _launch_resume(repo, worktree, name, session_id, backend, runtime, meta["branch"], main_branch, no_worktree)
+    _launch_resume(repo, worktree, name, session_id, backend, runtime, meta["branch"], main_branch, no_worktree, is_chat)
 
 
 @cli.command("sandbox")
@@ -722,6 +841,7 @@ def cmd_status(name: str) -> None:
     task_path = tasks.find_task_file(worktree, name)
 
     click.echo(click.style("Name:     ", bold=True) + meta["name"])
+    click.echo(click.style("Type:     ", bold=True) + meta.get("type", "task"))
     click.echo(click.style("Status:   ", bold=True) + meta["status"])
     click.echo(click.style("Agent:    ", bold=True) + meta.get("agent", "CODEX").lower())
     click.echo(click.style("Branch:   ", bold=True) + meta["branch"])
