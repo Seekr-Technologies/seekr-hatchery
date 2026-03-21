@@ -3,8 +3,13 @@
 import json
 import logging
 import os
+import subprocess
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
+
+from seekr_hatchery.locks import hatchery_lock
 
 from .agent_backend import CONTAINER_HOME, AgentBackend
 
@@ -86,10 +91,6 @@ class CodexBackend(AgentBackend):
         return None, None
 
     @staticmethod
-    def get_api_key() -> str | None:
-        return CodexBackend._read_codex_creds()[0]
-
-    @staticmethod
     def _detect_auth_source() -> Literal["API_KEY", "OAUTH"] | None:
         return CodexBackend._read_codex_creds()[1]
 
@@ -116,12 +117,62 @@ class CodexBackend(AgentBackend):
     @staticmethod
     def proxy_kwargs() -> dict:
         if CodexBackend._detect_auth_source() == "OAUTH":
-            return {
-                "target_host": "chatgpt.com",
-                "inject_header": "authorization",
-                "path_prefix": "/backend-api/codex",
-            }
-        return {"target_host": "api.openai.com", "inject_header": "authorization"}
+            return {"target_host": "chatgpt.com", "path_prefix": "/backend-api/codex"}
+        return {"target_host": "api.openai.com"}
+
+    @staticmethod
+    def make_header_mutator() -> Callable[..., dict[str, str]]:
+        token, source = CodexBackend._read_codex_creds()
+        if not token:
+            raise RuntimeError(
+                "no API token found. Set OPENAI_API_KEY or log in with `codex login` for OAuth authentication."
+            )
+
+        state: dict = {"token": token}
+
+        def _refresh() -> None:
+            """Acquire a cross-process lock, check if already refreshed, then refresh."""
+            with hatchery_lock("refresh.codex"):
+                # Another process may have already refreshed — check first.
+                new_token, _ = CodexBackend._read_codex_creds()
+                if new_token and new_token != state["token"]:
+                    state["token"] = new_token
+                    return
+
+                auth_file = Path.home() / ".codex" / "auth.json"
+                old_mtime = auth_file.stat().st_mtime if auth_file.exists() else 0
+                old_token = state["token"]
+                proc = subprocess.Popen(
+                    ["codex", "exec", "hello"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline:
+                    current_mtime = auth_file.stat().st_mtime if auth_file.exists() else 0
+                    if current_mtime > old_mtime:
+                        new_token, _ = CodexBackend._read_codex_creds()
+                        if new_token:
+                            state["token"] = new_token
+                        break
+                    if proc.poll() is not None:
+                        new_token, _ = CodexBackend._read_codex_creds()
+                        if new_token and new_token != old_token:
+                            state["token"] = new_token
+                        break
+                    time.sleep(0.5)
+                else:
+                    proc.kill()
+                    proc.wait()
+
+        def _mutate(headers: dict[str, str], *, refresh: bool = False) -> dict[str, str]:
+            if refresh and source == "OAUTH":
+                _refresh()
+            out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")}
+            out["Authorization"] = f"Bearer {state['token']}"
+            return out
+
+        return _mutate
 
     @staticmethod
     def container_env(proxy_token: str, proxy_port: int) -> dict[str, str]:
@@ -164,5 +215,3 @@ RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm \\
 USER hatchery
 RUN npm config set prefix '{CONTAINER_HOME}/.npm-global' \\
     && npm install -g @openai/codex"""
-
-    api_key_missing_hint: str = "Set OPENAI_API_KEY or log in with `codex login` for OAuth authentication."

@@ -2,13 +2,23 @@
 
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 import seekr_hatchery.agents as agent
 import seekr_hatchery.docker as docker
+import seekr_hatchery.proxy as proxy_mod
 import seekr_hatchery.tasks as tasks
+
+
+def _make_mutator(key: str = "test-key"):
+    """Return a simple header mutator for tests."""
+    def _mutate(headers):
+        out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")}
+        out["Authorization"] = f"Bearer {key}"
+        return out
+    return _mutate
 
 # ---------------------------------------------------------------------------
 # find_task_file
@@ -644,7 +654,7 @@ class TestDindCapMerge:
         workdir="/repo/.hatchery/worktrees/task",
         hatchery_repo="/repo",
         name="task",
-        api_key="test-key",
+        mutator=_make_mutator("test-key"),
         proxy_token="test-proxy-token",
         agent_cmd=["codex"],
         backend=agent.CODEX,
@@ -652,7 +662,11 @@ class TestDindCapMerge:
 
     def _run(self, **kwargs) -> list[str]:
         args = {**self._COMMON, **kwargs}
-        with patch("seekr_hatchery.docker.subprocess.run") as mock_run:
+        mock_server = MagicMock()
+        mock_server.server_address = ("0.0.0.0", 9999)
+        with patch("seekr_hatchery.docker.subprocess.run") as mock_run, \
+             patch("seekr_hatchery.proxy.start_proxy", return_value=(mock_server, "tok")), \
+             patch("seekr_hatchery.proxy.stop_proxy"):
             docker._run_container(**args)
         return mock_run.call_args[0][0]
 
@@ -719,7 +733,7 @@ class TestRunContainerDindFlags:
         workdir="/repo/.hatchery/worktrees/task",
         hatchery_repo="/repo",
         name="task",
-        api_key="test-key",
+        mutator=_make_mutator("test-key"),
         proxy_token="test-proxy-token",
         agent_cmd=["codex"],
         backend=agent.CODEX,
@@ -728,7 +742,11 @@ class TestRunContainerDindFlags:
     def _run(self, **kwargs) -> list[str]:
         """Call _run_container with mock subprocess and return the captured cmd."""
         args = {**self._COMMON, **kwargs}
-        with patch("seekr_hatchery.docker.subprocess.run") as mock_run:
+        mock_server = MagicMock()
+        mock_server.server_address = ("0.0.0.0", 9999)
+        with patch("seekr_hatchery.docker.subprocess.run") as mock_run, \
+             patch("seekr_hatchery.proxy.start_proxy", return_value=(mock_server, "tok")), \
+             patch("seekr_hatchery.proxy.stop_proxy"):
             docker._run_container(**args)
         return mock_run.call_args[0][0]
 

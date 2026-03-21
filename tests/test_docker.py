@@ -233,6 +233,15 @@ class TestResolveRuntime:
 # ---------------------------------------------------------------------------
 
 
+def _make_mutator(key: str = "real-secret-key"):
+    """Return a simple header mutator for tests."""
+    def _mutate(headers):
+        out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")}
+        out["Authorization"] = f"Bearer {key}"
+        return out
+    return _mutate
+
+
 class TestRunContainerRuntime:
     """Verify _run_container injects correct flags for each runtime."""
 
@@ -240,16 +249,18 @@ class TestRunContainerRuntime:
         self,
         monkeypatch,
         runtime: docker.Runtime = docker.Runtime.DOCKER,
-        api_key: str = "real-secret-key",
+        mutator=None,
         proxy_token: str = "proxy-uuid-token",
         proxy_port: int = 9999,
     ) -> list[str]:
+        if mutator is None:
+            mutator = _make_mutator()
         captured: list[list[str]] = []
 
         # Mock the proxy so we don't start a real server; inject predictable values.
         mock_server = MagicMock()
         mock_server.server_address = ("0.0.0.0", proxy_port)
-        monkeypatch.setattr(proxy_mod, "start_proxy", lambda _key, _token, **kw: (mock_server, "ignored-token"))
+        monkeypatch.setattr(proxy_mod, "start_proxy", lambda _mutator, _token, **kw: (mock_server, "ignored-token"))
         monkeypatch.setattr(proxy_mod, "stop_proxy", lambda _srv: None)
 
         def _mock_run(cmd, **kw):
@@ -263,7 +274,7 @@ class TestRunContainerRuntime:
             workdir="/workspace",
             hatchery_repo="/repo",
             name="test-task",
-            api_key=api_key,
+            mutator=mutator,
             proxy_token=proxy_token,
             agent_cmd=["codex"],
             backend=agent.CODEX,
@@ -323,12 +334,13 @@ class TestRunContainerRuntime:
 
     def test_real_api_key_absent_from_cmd(self, monkeypatch):
         """The real API key must never appear in the docker command."""
-        cmd = self._capture_cmd(monkeypatch, api_key="real-secret-key", proxy_token="proxy-uuid-token")
+        mutator = _make_mutator("real-secret-key")
+        cmd = self._capture_cmd(monkeypatch, mutator=mutator, proxy_token="proxy-uuid-token")
         assert "real-secret-key" not in " ".join(cmd)
 
     def test_proxy_token_present_as_api_key(self, monkeypatch):
         """The container's API key env var must be the proxy token, not the real key."""
-        cmd = self._capture_cmd(monkeypatch, api_key="real-secret-key", proxy_token="proxy-uuid-token")
+        cmd = self._capture_cmd(monkeypatch, proxy_token="proxy-uuid-token")
         cmd_str = " ".join(cmd)
         assert "OPENAI_API_KEY=proxy-uuid-token" in cmd_str
 
@@ -357,12 +369,12 @@ class TestRunContainerRuntime:
         cmd_str = " ".join(cmd)
         assert "OPENAI_API_KEY=stable-token" in cmd_str
 
-    def test_no_api_key_env_when_api_key_is_none(self, monkeypatch):
-        """When api_key is None, no API key or base URL env vars should appear."""
+    def test_no_api_key_env_when_mutator_is_none(self, monkeypatch):
+        """When mutator is None, no API key or base URL env vars should appear."""
         monkeypatch.setattr(
             proxy_mod,
             "start_proxy",
-            lambda _key, _token, **kw: (_ for _ in ()).throw(AssertionError("should not be called")),
+            lambda _mutator, _token, **kw: (_ for _ in ()).throw(AssertionError("should not be called")),
         )
 
         captured: list[list[str]] = []
@@ -378,7 +390,7 @@ class TestRunContainerRuntime:
             workdir="/workspace",
             hatchery_repo="/repo",
             name="test-task",
-            api_key=None,
+            mutator=None,
             proxy_token=None,
             agent_cmd=["codex"],
             backend=agent.CODEX,
@@ -411,7 +423,7 @@ class TestRunContainerInteractive:
             workdir="/workspace",
             hatchery_repo="/repo",
             name="test-task",
-            api_key=None,
+            mutator=None,
             proxy_token=None,
             agent_cmd=[],
             runtime=docker.Runtime.DOCKER,
@@ -437,7 +449,7 @@ class TestRunContainerInteractive:
             workdir="/workspace",
             hatchery_repo="/repo",
             name="test-task",
-            api_key=None,
+            mutator=None,
             proxy_token=None,
             agent_cmd=[],
             runtime=docker.Runtime.DOCKER,
@@ -455,7 +467,7 @@ class TestRunContainerInteractive:
             workdir="/workspace",
             hatchery_repo="/repo",
             name="test-task",
-            api_key=None,
+            mutator=None,
             proxy_token=None,
             agent_cmd=[],
             runtime=docker.Runtime.DOCKER,
@@ -479,7 +491,7 @@ class TestRunContainerInteractive:
             workdir="/workspace",
             hatchery_repo="/repo",
             name="test-task",
-            api_key=None,
+            mutator=None,
             proxy_token=None,
             agent_cmd=[],
             runtime=docker.Runtime.DOCKER,
@@ -502,7 +514,7 @@ class TestRunContainerInteractive:
             workdir="/workspace",
             hatchery_repo="/repo",
             name="test-task",
-            api_key=None,
+            mutator=None,
             proxy_token=None,
             agent_cmd=[],
             runtime=docker.Runtime.DOCKER,

@@ -179,8 +179,7 @@ class UserConfig:
         if agent_name is not None:
             return agent.from_kind(agent_name)
 
-        all_backends: list[agent.AgentBackend] = [agent.CODEX]
-        detected = _detect_installed(all_backends)
+        detected = _detect_installed(agent.ALL_BACKENDS)
 
         if len(detected) == 1:
             return detected[0]
