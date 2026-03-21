@@ -58,52 +58,6 @@ class TestBuildFinalizeCommand:
 
 
 # ---------------------------------------------------------------------------
-# get_api_key
-# ---------------------------------------------------------------------------
-
-
-class TestGetApiKey:
-    def test_returns_env_var(self, monkeypatch):
-        monkeypatch.setenv("OPENAI_API_KEY", "openai-key-123")
-        assert agent.CODEX.get_api_key() == "openai-key-123"
-
-    def test_returns_none_when_not_set(self, monkeypatch):
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        assert agent.CODEX.get_api_key() is None
-
-    def test_reads_api_key_from_auth_json(self, home, monkeypatch):
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        (home / ".codex").mkdir()
-        (home / ".codex" / "auth.json").write_text(
-            json.dumps({"auth_mode": "api_key", "OPENAI_API_KEY": "key-from-file", "tokens": None})
-        )
-        assert agent.CODEX.get_api_key() == "key-from-file"
-
-    def test_falls_back_to_oauth_access_token(self, home, monkeypatch):
-        # OAuth tokens are routed to chatgpt.com/backend-api/codex by the proxy.
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        (home / ".codex").mkdir()
-        (home / ".codex" / "auth.json").write_text(
-            json.dumps(
-                {
-                    "auth_mode": "chatgpt",
-                    "OPENAI_API_KEY": None,
-                    "tokens": {"access_token": "oauth-access-token", "refresh_token": "r"},
-                }
-            )
-        )
-        assert agent.CODEX.get_api_key() == "oauth-access-token"
-
-    def test_env_var_takes_priority_over_auth_json(self, home, monkeypatch):
-        monkeypatch.setenv("OPENAI_API_KEY", "env-key")
-        (home / ".codex").mkdir()
-        (home / ".codex" / "auth.json").write_text(
-            json.dumps({"auth_mode": "api_key", "OPENAI_API_KEY": "file-key", "tokens": None})
-        )
-        assert agent.CODEX.get_api_key() == "env-key"
-
-
-# ---------------------------------------------------------------------------
 # proxy_kwargs
 # ---------------------------------------------------------------------------
 
@@ -113,8 +67,8 @@ class TestProxyKwargs:
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         assert agent.CODEX.proxy_kwargs() == {
             "target_host": "api.openai.com",
-            "inject_header": "authorization",
         }
+        assert "inject_header" not in agent.CODEX.proxy_kwargs()
 
     def test_oauth_mode(self, home, monkeypatch):
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -124,9 +78,39 @@ class TestProxyKwargs:
         )
         assert agent.CODEX.proxy_kwargs() == {
             "target_host": "chatgpt.com",
-            "inject_header": "authorization",
             "path_prefix": "/backend-api/codex",
         }
+        assert "inject_header" not in agent.CODEX.proxy_kwargs()
+
+
+# ---------------------------------------------------------------------------
+# make_header_mutator
+# ---------------------------------------------------------------------------
+
+
+class TestMakeHeaderMutator:
+    def test_injects_bearer(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test-123")
+        mutator = agent.CODEX.make_header_mutator()
+        result = mutator({})
+        assert result.get("Authorization") == "Bearer sk-test-123"
+        assert "x-api-key" not in {k.lower() for k in result}
+
+    def test_raises_when_no_credentials(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        with pytest.raises(RuntimeError, match="no API token found"):
+            agent.CODEX.make_header_mutator()
+
+    def test_strips_inbound_auth_headers(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "real-key")
+        mutator = agent.CODEX.make_header_mutator()
+        result = mutator({"x-api-key": "proxy-tok", "authorization": "Bearer proxy-tok", "content-type": "application/json"})
+        assert result.get("Authorization") == "Bearer real-key"
+        assert result.get("content-type") == "application/json"
+        lower_keys = {k.lower() for k in result}
+        assert lower_keys.issuperset({"authorization"})
+        # Only one authorization header (the real one), not the proxy one
+        assert result.get("Authorization") == "Bearer real-key"
 
 
 # ---------------------------------------------------------------------------
@@ -278,15 +262,3 @@ class TestDockerfileInstall:
         snippet = agent.CODEX.dockerfile_install
         assert "npm" in snippet
         assert "@openai/codex" in snippet
-
-
-# ---------------------------------------------------------------------------
-# api_key_missing_hint
-# ---------------------------------------------------------------------------
-
-
-class TestApiKeyMissingHint:
-    def test_api_key_missing_hint(self):
-        hint = agent.CODEX.api_key_missing_hint
-        assert "OPENAI_API_KEY" in hint
-        assert "codex login" in hint

@@ -17,17 +17,9 @@ proxy (all containers can reach ``host.docker.internal``).
 
 Public interface::
 
-    server, proxy_token = start_proxy(api_key, proxy_token)
+    server, proxy_token = start_proxy(header_mutator, proxy_token)
     # ... run container ...
     stop_proxy(server)
-
-For OpenAI (codex)::
-
-    server, proxy_token = start_proxy(
-        api_key, proxy_token,
-        target_host="api.openai.com",
-        inject_header="authorization",
-    )
 """
 
 import http.client
@@ -35,6 +27,7 @@ import http.server
 import logging
 import socketserver
 import threading
+from collections.abc import Callable
 from typing import Any
 
 logger = logging.getLogger("hatchery")
@@ -52,6 +45,7 @@ _HOP_BY_HOP = frozenset(
         "trailers",
         "transfer-encoding",
         "upgrade",
+        "host",
     }
 )
 
@@ -65,10 +59,11 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
     """Validates the proxy token, strips inbound auth, injects the real API key, and forwards."""
 
     # Overridden per-server-instance by start_proxy via a fresh subclass.
-    api_key: str = ""
+    # Must be a staticmethod to prevent Python's descriptor protocol from
+    # injecting `self` as the first argument when called as self.header_mutator().
+    header_mutator = staticmethod(lambda h: h)
     proxy_token: str = ""
     target_host: str = "api.anthropic.com"
-    inject_header: str = "x-api-key"  # "x-api-key" or "authorization"
     path_prefix: str = ""  # prepended to every forwarded path (e.g. "/backend-api/codex")
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
@@ -107,19 +102,17 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
             return
 
         # ── 1. Build outgoing headers ─────────────────────────────────────────
-        # Strip the inbound proxy token and inject the real API key.
-        out_headers: dict[str, str] = {}
-        for key, value in self.headers.items():
-            lower = key.lower()
-            if lower in ("x-api-key", "authorization", "host") or lower in _HOP_BY_HOP:
-                continue
-            out_headers[key] = value
+        # Strip hop-by-hop headers; delegate auth stripping + key injection to
+        # the backend mutator.
+        out_headers: dict[str, str] = {
+            k: v for k, v in self.headers.items()
+            if k.lower() not in _HOP_BY_HOP
+        }
 
-        # Inject the real API key in the format the target API expects.
-        if self.inject_header == "authorization":
-            out_headers["Authorization"] = f"Bearer {self.api_key}"
-        else:
-            out_headers["x-api-key"] = self.api_key
+        # Backend owns all auth header logic.
+        out_headers = self.header_mutator(out_headers)
+
+        # Always set host (routing concern owned by proxy).
         out_headers["host"] = self.target_host
 
         # ── 2. Read request body ──────────────────────────────────────────────
@@ -184,10 +177,9 @@ class _ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 def start_proxy(
-    api_key: str,
+    header_mutator: Callable[[dict[str, str]], dict[str, str]],
     proxy_token: str,
     target_host: str = "api.anthropic.com",
-    inject_header: str = "x-api-key",
     path_prefix: str = "",
 ) -> tuple[http.server.HTTPServer, str]:
     """Start the reverse proxy and return ``(server, proxy_token)``.
@@ -197,16 +189,16 @@ def start_proxy(
     ``Authorization: Bearer <token>``; others are rejected with 401.
     This isolates concurrent proxy instances so that containers from different
     sessions cannot route through each other's proxy.
-    The real *api_key* never leaves the host process.
+    The real credentials never leave the host process.
 
     Args:
-        api_key: The real API key to inject into outbound requests.
+        header_mutator: Callable that transforms outbound request headers.
+            Called for every proxied request with the inbound headers (hop-by-hop
+            already stripped). Must strip inbound auth headers, inject the real
+            API key in the correct format, and return the modified dict.
         proxy_token: The stable per-task token the container uses.
         target_host: Upstream API hostname (default: ``api.anthropic.com``).
             Use ``"api.openai.com"`` for OpenAI/codex.
-        inject_header: How to inject the real key outbound.
-            ``"x-api-key"`` (default) for Anthropic;
-            ``"authorization"`` for OpenAI (sends ``Authorization: Bearer <key>``).
         path_prefix: String prepended to every forwarded path (default: ``""``).
             Use ``"/backend-api/codex"`` for ChatGPT OAuth mode.
     """
@@ -216,10 +208,9 @@ def start_proxy(
     class _BoundHandler(_ProxyHandler):
         pass
 
-    _BoundHandler.api_key = api_key
+    _BoundHandler.header_mutator = staticmethod(header_mutator)
     _BoundHandler.proxy_token = proxy_token
     _BoundHandler.target_host = target_host
-    _BoundHandler.inject_header = inject_header
     _BoundHandler.path_prefix = path_prefix
 
     server = _ThreadingHTTPServer(("0.0.0.0", 0), _BoundHandler)
@@ -229,10 +220,9 @@ def start_proxy(
     thread.start()
 
     logger.debug(
-        "Proxy started on port %d (target=%s inject=%s prefix=%r)",
+        "Proxy started on port %d (target=%s prefix=%r)",
         port,
         target_host,
-        inject_header,
         path_prefix,
     )
     return server, proxy_token

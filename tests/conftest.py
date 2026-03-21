@@ -72,8 +72,12 @@ class SpyBackend(agent.AgentBackend):
 
     # ── Docker infrastructure ─────────────────────────────────────────────
 
-    def get_api_key(self) -> str | None:
-        return "spy-key"
+    def make_header_mutator(self):
+        def _mutate(headers):
+            out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")}
+            out["x-api-key"] = "spy-key"
+            return out
+        return _mutate
 
     def home_mounts(self, session_dir: Path | None) -> list[str]:
         return []
@@ -107,10 +111,6 @@ class SpyBackend(agent.AgentBackend):
 
     @property
     def dockerfile_install(self) -> str:
-        return ""
-
-    @property
-    def api_key_missing_hint(self) -> str:
         return ""
 
 

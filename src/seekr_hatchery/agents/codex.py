@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
@@ -86,10 +87,6 @@ class CodexBackend(AgentBackend):
         return None, None
 
     @staticmethod
-    def get_api_key() -> str | None:
-        return CodexBackend._read_codex_creds()[0]
-
-    @staticmethod
     def _detect_auth_source() -> Literal["API_KEY", "OAUTH"] | None:
         return CodexBackend._read_codex_creds()[1]
 
@@ -116,12 +113,23 @@ class CodexBackend(AgentBackend):
     @staticmethod
     def proxy_kwargs() -> dict:
         if CodexBackend._detect_auth_source() == "OAUTH":
-            return {
-                "target_host": "chatgpt.com",
-                "inject_header": "authorization",
-                "path_prefix": "/backend-api/codex",
-            }
-        return {"target_host": "api.openai.com", "inject_header": "authorization"}
+            return {"target_host": "chatgpt.com", "path_prefix": "/backend-api/codex"}
+        return {"target_host": "api.openai.com"}
+
+    @staticmethod
+    def make_header_mutator() -> Callable[[dict[str, str]], dict[str, str]]:
+        token, _ = CodexBackend._read_codex_creds()
+        if not token:
+            raise RuntimeError(
+                "no API token found. Set OPENAI_API_KEY or log in with `codex login` for OAuth authentication."
+            )
+
+        def _mutate(headers: dict[str, str]) -> dict[str, str]:
+            out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")}
+            out["Authorization"] = f"Bearer {token}"
+            return out
+
+        return _mutate
 
     @staticmethod
     def container_env(proxy_token: str, proxy_port: int) -> dict[str, str]:
@@ -164,5 +172,3 @@ RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm \\
 USER hatchery
 RUN npm config set prefix '{CONTAINER_HOME}/.npm-global' \\
     && npm install -g @openai/codex"""
-
-    api_key_missing_hint: str = "Set OPENAI_API_KEY or log in with `codex login` for OAuth authentication."
