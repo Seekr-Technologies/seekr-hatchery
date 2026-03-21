@@ -77,13 +77,19 @@ class AgentBackend(ABC):
 
     @staticmethod
     @abstractmethod
-    def make_header_mutator() -> Callable[[dict[str, str]], dict[str, str]]:
+    def make_header_mutator() -> Callable[..., dict[str, str]]:
         """Return a callable that transforms outbound request headers.
 
         Called once at proxy startup. The returned function is invoked for every
         proxied request with the inbound headers (hop-by-hop already stripped).
         It must strip inbound auth headers, inject the real API key in the
         correct format, and return the modified dict.
+
+        The returned callable accepts an optional ``refresh: bool = False``
+        keyword argument.  When ``refresh=True`` the backend should attempt to
+        obtain a fresh credential (e.g. by firing a short test query for OAuth
+        sources) before injecting the token into the returned headers.  For
+        ``API_KEY`` sources, ``refresh=True`` is a no-op.
 
         Raises RuntimeError (with a human-readable message) if no credentials
         are available.

@@ -92,7 +92,7 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
             return True
         return False
 
-    def _handle_request(self) -> None:
+    def _handle_request(self, *, _retried: bool = False) -> None:
         # ── 0. Validate proxy token ───────────────────────────────────────────
         # Reject requests whose token doesn't match the stable per-task proxy
         # token.  This prevents other containers (which share the host gateway
@@ -104,13 +104,13 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
         # ── 1. Build outgoing headers ─────────────────────────────────────────
         # Strip hop-by-hop headers; delegate auth stripping + key injection to
         # the backend mutator.
-        out_headers: dict[str, str] = {
+        pre_auth_headers: dict[str, str] = {
             k: v for k, v in self.headers.items()
             if k.lower() not in _HOP_BY_HOP
         }
 
         # Backend owns all auth header logic.
-        out_headers = self.header_mutator(out_headers)
+        out_headers = self.header_mutator(pre_auth_headers)
 
         # Always set host (routing concern owned by proxy).
         out_headers["host"] = self.target_host
@@ -124,6 +124,18 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
         try:
             conn.request(self.command, self.path_prefix + self.path, body=body, headers=out_headers)
             resp = conn.getresponse()
+
+            # ── 3a. 401 retry — refresh credentials once ──────────────────────
+            if resp.status == 401 and not _retried:
+                # Drain and discard the 401 body (always small).
+                resp.read()
+                conn.close()
+                # Ask the backend to refresh credentials, then retry.
+                refreshed_headers = self.header_mutator(pre_auth_headers, refresh=True)
+                refreshed_headers["host"] = self.target_host
+                conn = http.client.HTTPSConnection(self.target_host)
+                conn.request(self.command, self.path_prefix + self.path, body=body, headers=refreshed_headers)
+                resp = conn.getresponse()
 
             # Forward status + headers (strip hop-by-hop; http.client decodes
             # chunked encoding for us so transfer-encoding is no longer accurate).
@@ -177,7 +189,7 @@ class _ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 def start_proxy(
-    header_mutator: Callable[[dict[str, str]], dict[str, str]],
+    header_mutator: Callable[..., dict[str, str]],
     proxy_token: str,
     target_host: str = "api.anthropic.com",
     path_prefix: str = "",
