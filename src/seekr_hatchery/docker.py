@@ -8,6 +8,7 @@ import sys
 import tempfile
 import uuid
 from collections import deque
+from collections.abc import Callable
 from enum import Enum
 from pathlib import Path
 from typing import Literal
@@ -607,7 +608,7 @@ def _run_container(
     workdir: str,
     hatchery_repo: str,
     name: str,
-    api_key: str | None,
+    mutator: Callable[[dict[str, str]], dict[str, str]] | None,
     proxy_token: str | None,
     agent_cmd: list[str],
     backend: agent.AgentBackend = agent.CODEX,
@@ -624,14 +625,14 @@ def _run_container(
     ``backend.build_*_command(docker=True, ...)``).
 
     *proxy_token* is a stable per-task UUID used as the API key env var inside
-    the container.  It must be provided whenever *api_key* is set.
+    the container.  It must be provided whenever *mutator* is set.
     The same token is reused on resume.
     """
-    # Start the host-side proxy so the real API key never enters the container.
+    # Start the host-side proxy so the real credentials never enter the container.
     proxy_server = None
     proxy_port = None
-    if api_key is not None:
-        proxy_server, _ = proxy.start_proxy(api_key, proxy_token, **backend.proxy_kwargs())
+    if mutator is not None:
+        proxy_server, _ = proxy.start_proxy(mutator, proxy_token, **backend.proxy_kwargs())
         proxy_port = proxy_server.server_address[1]
         if proxy_token is not None:
             logger.debug("Proxy started for task; API key in container is a proxy token")
@@ -646,7 +647,7 @@ def _run_container(
     for path in backend.tmpfs_paths():
         cmd += ["--tmpfs", path]
 
-    if api_key is not None and proxy_port is not None:
+    if mutator is not None and proxy_port is not None:
         for key, val in backend.container_env(proxy_token, proxy_port).items():
             cmd += ["-e", f"{key}={val}"]
         # On Linux, Docker doesn't automatically expose host.docker.internal;
@@ -746,9 +747,10 @@ def launch_docker(
     *agent_cmd* must be the full command already built for Docker mode
     (``backend.build_*_command(docker=True, workdir=container_workdir)``).
     """
-    api_key = backend.get_api_key()
-    if not api_key:
-        ui.error(f"no API token found. {backend.api_key_missing_hint}")
+    try:
+        mutator = backend.make_header_mutator()
+    except RuntimeError as e:
+        ui.error(str(e))
         sys.exit(1)
 
     proxy_token = get_or_create_proxy_token(repo, name)
@@ -790,7 +792,7 @@ def launch_docker(
         container_worktree,
         tasks.CONTAINER_REPO_ROOT,
         name,
-        api_key,
+        mutator,
         proxy_token,
         agent_cmd,
         backend=backend,
@@ -816,9 +818,10 @@ def launch_docker_no_worktree(
     *agent_cmd* must be the full command already built for Docker mode
     (``backend.build_*_command(docker=True, workdir="/workspace")``).
     """
-    api_key = backend.get_api_key()
-    if not api_key:
-        ui.error(f"no API token found. {backend.api_key_missing_hint}")
+    try:
+        mutator = backend.make_header_mutator()
+    except RuntimeError as e:
+        ui.error(str(e))
         sys.exit(1)
 
     proxy_token = get_or_create_proxy_token(cwd, name)
@@ -840,7 +843,7 @@ def launch_docker_no_worktree(
         "/workspace",
         "/workspace",
         name,
-        api_key,
+        mutator,
         proxy_token,
         agent_cmd,
         backend=backend,
@@ -876,7 +879,7 @@ def launch_sandbox_shell(
         workdir=tasks.CONTAINER_REPO_ROOT,
         hatchery_repo=tasks.CONTAINER_REPO_ROOT,
         name="sandbox",
-        api_key=None,
+        mutator=None,
         proxy_token=None,
         agent_cmd=[],
         runtime=runtime,

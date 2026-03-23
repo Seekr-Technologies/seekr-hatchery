@@ -12,6 +12,9 @@ jobs:
     name: Compute next version
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       next_version: ${{ steps.compute.outputs.next_version }}
       skip_release: ${{ steps.compute.outputs.skip_release }}
@@ -24,7 +27,8 @@ jobs:
       - name: Compute version
         id: compute
         env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -eu
 
@@ -37,27 +41,40 @@ jobs:
           MINOR=$(echo "$LATEST_TAG" | sed 's/^v//' | cut -d. -f2)
           PATCH=$(echo "$LATEST_TAG" | sed 's/^v//' | cut -d. -f3)
 
-          # PR title is available directly from the event payload — no git log needed
-          COMMIT_TITLE="$PR_TITLE"
+          echo "Latest tag: $LATEST_TAG"
 
-          echo "Latest tag:    $LATEST_TAG"
-          echo "Commit title:  $COMMIT_TITLE"
+          # Fetch all commit subjects from the PR (paginated)
+          COMMITS=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/commits" \
+            --paginate --jq '.[].commit.message | split("\n")[0]')
 
-          # no-bump: skip release entirely
-          if echo "$COMMIT_TITLE" | grep -qE '^no-bump(\([^)]+\))?:'; then
+          echo "Commits in PR:"
+          echo "$COMMITS"
+
+          bump_level() {
+            MSG="$1"
+            if   echo "$MSG" | grep -qE '^[a-z]+(\([^)]+\))?!:';                         then echo 3
+            elif echo "$MSG" | grep -qE '^feat(\([^)]+\))?:';                             then echo 2
+            elif echo "$MSG" | grep -qE '^(fix|perf|refactor|revert|test)(\([^)]+\))?:'; then echo 1
+            else echo 0
+            fi
+          }
+
+          # no-bump escape hatch: if any commit starts with "no-bump:", skip release
+          if echo "$COMMITS" | grep -qE '^no-bump(\([^)]+\))?:'; then
             BUMP="none"
-          # Breaking change: any type with ! before the colon
-          elif echo "$COMMIT_TITLE" | grep -qE '^[a-z]+(\([^)]+\))?!:'; then
-            BUMP="major"
-          elif echo "$COMMIT_TITLE" | grep -qE '^feat(\([^)]+\))?:'; then
-            BUMP="minor"
-          elif echo "$COMMIT_TITLE" | grep -qE '^(fix|perf)(\([^)]+\))?:'; then
-            BUMP="patch"
-          elif echo "$COMMIT_TITLE" | grep -qE '^(chore|docs|style|refactor|test|build|ci|revert)(\([^)]+\))?:'; then
-            BUMP="patch"
           else
-            echo "WARNING: unrecognized commit type in '$COMMIT_TITLE', skipping release"
-            BUMP="none"
+            MAX_LEVEL=0
+            while IFS= read -r TITLE; do
+              LEVEL=$(bump_level "$TITLE")
+              [ "$LEVEL" -gt "$MAX_LEVEL" ] && MAX_LEVEL=$LEVEL
+            done <<< "$COMMITS"
+
+            case "$MAX_LEVEL" in
+              3) BUMP="major" ;;
+              2) BUMP="minor" ;;
+              1) BUMP="patch" ;;
+              0) BUMP="none"  ;;
+            esac
           fi
 
           echo "Bump type: $BUMP"
@@ -120,7 +137,7 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - uses: astral-sh/setup-uv@6ee6290f1cbc4156c0bdd66691b2c144ef8df19a # v7.4.0
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
 
       - name: Build
         run: uv build

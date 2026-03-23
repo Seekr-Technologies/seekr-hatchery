@@ -15,6 +15,24 @@ import seekr_hatchery.proxy as proxy
 _TOKEN = "test-proxy-token"
 
 
+def _make_api_key_mutator(key: str):
+    """Return a header mutator that injects x-api-key."""
+    def _mutate(headers, **kwargs):
+        out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")}
+        out["x-api-key"] = key
+        return out
+    return _mutate
+
+
+def _make_bearer_mutator(key: str):
+    """Return a header mutator that injects Authorization: Bearer."""
+    def _mutate(headers, **kwargs):
+        out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")}
+        out["Authorization"] = f"Bearer {key}"
+        return out
+    return _mutate
+
+
 class _MockHTTPSConn:
     """Minimal stand-in for http.client.HTTPSConnection that records requests."""
 
@@ -63,21 +81,21 @@ def _wait_for_port(port: int, timeout: float = 2.0) -> None:
 
 class TestProxyStartsAndStops:
     def test_port_is_positive(self):
-        server, _ = proxy.start_proxy("dummy-key", _TOKEN)
+        server, _ = proxy.start_proxy(_make_api_key_mutator("dummy-key"), _TOKEN)
         try:
             assert server.server_address[1] > 0
         finally:
             proxy.stop_proxy(server)
 
     def test_returns_same_token(self):
-        server, token = proxy.start_proxy("dummy-key", _TOKEN)
+        server, token = proxy.start_proxy(_make_api_key_mutator("dummy-key"), _TOKEN)
         try:
             assert token == _TOKEN
         finally:
             proxy.stop_proxy(server)
 
     def test_stops_cleanly(self):
-        server, _ = proxy.start_proxy("dummy-key", _TOKEN)
+        server, _ = proxy.start_proxy(_make_api_key_mutator("dummy-key"), _TOKEN)
         proxy.stop_proxy(server)
         # After stop, the port should no longer be accepting connections.
         port = server.server_address[1]
@@ -97,7 +115,7 @@ class TestProxyStartsAndStops:
 
 class TestProxyTokenValidation:
     def test_rejects_wrong_token(self):
-        server, _ = proxy.start_proxy("real-key", _TOKEN)
+        server, _ = proxy.start_proxy(_make_api_key_mutator("real-key"), _TOKEN)
         port = server.server_address[1]
         _wait_for_port(port)
         try:
@@ -109,7 +127,7 @@ class TestProxyTokenValidation:
             proxy.stop_proxy(server)
 
     def test_rejects_missing_token(self):
-        server, _ = proxy.start_proxy("real-key", _TOKEN)
+        server, _ = proxy.start_proxy(_make_api_key_mutator("real-key"), _TOKEN)
         port = server.server_address[1]
         _wait_for_port(port)
         try:
@@ -122,7 +140,7 @@ class TestProxyTokenValidation:
 
     def test_accepts_correct_token(self, monkeypatch):
         monkeypatch.setattr(http.client, "HTTPSConnection", _MockHTTPSConn)
-        server, _ = proxy.start_proxy("real-key", _TOKEN)
+        server, _ = proxy.start_proxy(_make_api_key_mutator("real-key"), _TOKEN)
         port = server.server_address[1]
         _wait_for_port(port)
         try:
@@ -151,7 +169,7 @@ class TestProxyInjectsApiKey:
 
         monkeypatch.setattr(http.client, "HTTPSConnection", _CapturingConn)
 
-        server, _ = proxy.start_proxy("real-api-key-xyz", _TOKEN)
+        server, _ = proxy.start_proxy(_make_api_key_mutator("real-api-key-xyz"), _TOKEN)
         port = server.server_address[1]
         _wait_for_port(port)
 
@@ -176,7 +194,7 @@ class TestProxyInjectsApiKey:
 
         monkeypatch.setattr(http.client, "HTTPSConnection", _CapturingConn)
 
-        server, _ = proxy.start_proxy("real-key", _TOKEN)
+        server, _ = proxy.start_proxy(_make_api_key_mutator("real-key"), _TOKEN)
         port = server.server_address[1]
         _wait_for_port(port)
 
@@ -211,7 +229,7 @@ class TestProxyOpenAIFormat:
     def test_bearer_token_accepted(self, monkeypatch):
         """Proxy must accept Authorization: Bearer <token> in addition to x-api-key."""
         monkeypatch.setattr(http.client, "HTTPSConnection", _MockHTTPSConn)
-        server, _ = proxy.start_proxy("real-key", _TOKEN, target_host="api.openai.com", inject_header="authorization")
+        server, _ = proxy.start_proxy(_make_bearer_mutator("real-key"), _TOKEN, target_host="api.openai.com")
         port = server.server_address[1]
         _wait_for_port(port)
         try:
@@ -225,7 +243,7 @@ class TestProxyOpenAIFormat:
 
     def test_wrong_bearer_rejected(self):
         """Wrong Bearer token must return 401."""
-        server, _ = proxy.start_proxy("real-key", _TOKEN, target_host="api.openai.com", inject_header="authorization")
+        server, _ = proxy.start_proxy(_make_bearer_mutator("real-key"), _TOKEN, target_host="api.openai.com")
         port = server.server_address[1]
         _wait_for_port(port)
         try:
@@ -237,7 +255,7 @@ class TestProxyOpenAIFormat:
             proxy.stop_proxy(server)
 
     def test_inject_authorization_header(self, monkeypatch):
-        """When inject_header='authorization', outbound must use Authorization: Bearer <real_key>."""
+        """Bearer mutator outbound must use Authorization: Bearer <real_key>."""
         recorded: list[dict] = []
 
         class _CapturingConn:
@@ -255,7 +273,7 @@ class TestProxyOpenAIFormat:
 
         monkeypatch.setattr(http.client, "HTTPSConnection", _CapturingConn)
         server, _ = proxy.start_proxy(
-            "my-openai-key", _TOKEN, target_host="api.openai.com", inject_header="authorization"
+            _make_bearer_mutator("my-openai-key"), _TOKEN, target_host="api.openai.com"
         )
         port = server.server_address[1]
         _wait_for_port(port)
@@ -292,7 +310,7 @@ class TestProxyOpenAIFormat:
 
         monkeypatch.setattr(http.client, "HTTPSConnection", _RecordingConn)
         server, _ = proxy.start_proxy(
-            "my-openai-key", _TOKEN, target_host="api.openai.com", inject_header="authorization"
+            _make_bearer_mutator("my-openai-key"), _TOKEN, target_host="api.openai.com"
         )
         port = server.server_address[1]
         _wait_for_port(port)
@@ -310,7 +328,7 @@ class TestProxyOpenAIFormat:
     def test_xapikey_still_accepted_for_anthropic_proxy(self, monkeypatch):
         """Default Anthropic proxy still accepts x-api-key tokens."""
         monkeypatch.setattr(http.client, "HTTPSConnection", _MockHTTPSConn)
-        server, _ = proxy.start_proxy("real-key", _TOKEN)
+        server, _ = proxy.start_proxy(_make_api_key_mutator("real-key"), _TOKEN)
         port = server.server_address[1]
         _wait_for_port(port)
         try:
@@ -334,10 +352,9 @@ class TestPathPrefix:
 
         monkeypatch.setattr(http.client, "HTTPSConnection", _CapturingConn)
         server, _ = proxy.start_proxy(
-            "api-key",
+            _make_bearer_mutator("api-key"),
             _TOKEN,
             target_host="chatgpt.com",
-            inject_header="authorization",
             path_prefix="/backend-api/codex",
         )
         port = server.server_address[1]
@@ -379,7 +396,7 @@ class TestHeaderSanitization:
                 return _MaliciousResp()
 
         monkeypatch.setattr(http.client, "HTTPSConnection", _MaliciousConn)
-        server, _ = proxy.start_proxy("real-key", _TOKEN)
+        server, _ = proxy.start_proxy(_make_api_key_mutator("real-key"), _TOKEN)
         port = server.server_address[1]
         _wait_for_port(port)
 
@@ -409,7 +426,7 @@ class TestProxyConcurrentRequests:
 
         monkeypatch.setattr(http.client, "HTTPSConnection", _SlowConn)
 
-        server, _ = proxy.start_proxy("api-key", _TOKEN)
+        server, _ = proxy.start_proxy(_make_api_key_mutator("api-key"), _TOKEN)
         port = server.server_address[1]
         _wait_for_port(port)
 
@@ -434,3 +451,209 @@ class TestProxyConcurrentRequests:
 
         assert len(results) == 2
         assert all(s == 200 for s in results)
+
+
+class TestHeaderMutatorIntegration:
+    def test_oauth_beta_header_prepended(self, monkeypatch):
+        """OAuth mutator must prepend oauth-2025-04-20 to existing anthropic-beta."""
+        recorded: list[dict] = []
+
+        class _CapturingConn(_MockHTTPSConn):
+            def request(self, method, path, body=None, headers=None):
+                recorded.append({"headers": dict(headers or {})})
+
+        monkeypatch.setattr(http.client, "HTTPSConnection", _CapturingConn)
+
+        def _oauth_mutate(headers):
+            out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")}
+            out["Authorization"] = "Bearer oauth-token"
+            existing = out.get("anthropic-beta", "")
+            out["anthropic-beta"] = ("oauth-2025-04-20," + existing) if existing else "oauth-2025-04-20"
+            return out
+
+        server, _ = proxy.start_proxy(_oauth_mutate, _TOKEN)
+        port = server.server_address[1]
+        _wait_for_port(port)
+
+        try:
+            conn = http.client.HTTPConnection("localhost", port)
+            conn.request("POST", "/v1/messages", headers={"x-api-key": _TOKEN, "anthropic-beta": "existing-beta"})
+            resp = conn.getresponse()
+            resp.read()
+        finally:
+            proxy.stop_proxy(server)
+
+        assert len(recorded) == 1
+        h = recorded[0]["headers"]
+        assert h.get("anthropic-beta") == "oauth-2025-04-20,existing-beta"
+        assert h.get("Authorization") == "Bearer oauth-token"
+        assert "x-api-key" not in {k.lower() for k in h}
+
+
+# ---------------------------------------------------------------------------
+# test_proxy_reauth_on_401
+# ---------------------------------------------------------------------------
+
+
+class TestProxyReauthOn401:
+    def test_upstream_401_triggers_refresh_and_retry(self, monkeypatch):
+        """When upstream returns 401, proxy must call mutator with refresh=True and retry."""
+        call_log: list[dict] = []
+        responses = [401, 200]
+
+        class _Resp:
+            def __init__(self, status):
+                self.status = status
+                self._data = b"{}"
+
+            def getheaders(self):
+                return [("content-type", "application/json")]
+
+            def read(self, n=None):
+                if n is None:
+                    chunk, self._data = self._data, b""
+                else:
+                    chunk, self._data = self._data[:n], self._data[n:]
+                return chunk
+
+        class _Conn:
+            def __init__(self, host):
+                self.host = host
+
+            def request(self, method, path, body=None, headers=None):
+                call_log.append({"headers": dict(headers or {})})
+
+            def getresponse(self):
+                status = responses.pop(0)
+                return _Resp(status)
+
+            def close(self):
+                pass
+
+        refresh_calls: list[bool] = []
+
+        def _mutator(headers, *, refresh: bool = False):
+            refresh_calls.append(refresh)
+            out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")}
+            out["x-api-key"] = "refreshed-key" if refresh else "original-key"
+            return out
+
+        monkeypatch.setattr(http.client, "HTTPSConnection", _Conn)
+        server, _ = proxy.start_proxy(_mutator, _TOKEN)
+        port = server.server_address[1]
+        _wait_for_port(port)
+
+        try:
+            conn = http.client.HTTPConnection("localhost", port)
+            conn.request("GET", "/v1/models", headers={"x-api-key": _TOKEN})
+            resp = conn.getresponse()
+            resp.read()
+        finally:
+            proxy.stop_proxy(server)
+
+        # Two upstream requests: first got 401, second is the retry.
+        assert len(call_log) == 2
+        # First call used original key, second used refreshed key.
+        assert call_log[0]["headers"].get("x-api-key") == "original-key"
+        assert call_log[1]["headers"].get("x-api-key") == "refreshed-key"
+        # Mutator was called with refresh=False then refresh=True.
+        assert refresh_calls == [False, True]
+        # Client sees the 200 from the retry.
+        assert resp.status == 200
+
+    def test_retry_also_401_forwarded_without_further_retry(self, monkeypatch):
+        """If the retry also returns 401, it is forwarded to the client with no further attempt."""
+        call_log: list[dict] = []
+        responses = [401, 401]
+
+        class _Resp:
+            def __init__(self, status):
+                self.status = status
+                self._data = b"Unauthorized"
+
+            def getheaders(self):
+                return [("content-type", "text/plain")]
+
+            def read(self, n=None):
+                if n is None:
+                    chunk, self._data = self._data, b""
+                else:
+                    chunk, self._data = self._data[:n], self._data[n:]
+                return chunk
+
+        class _Conn:
+            def __init__(self, host):
+                self.host = host
+
+            def request(self, method, path, body=None, headers=None):
+                call_log.append({})
+
+            def getresponse(self):
+                return _Resp(responses.pop(0))
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(http.client, "HTTPSConnection", _Conn)
+        server, _ = proxy.start_proxy(_make_api_key_mutator("key"), _TOKEN)
+        port = server.server_address[1]
+        _wait_for_port(port)
+
+        try:
+            conn = http.client.HTTPConnection("localhost", port)
+            conn.request("GET", "/v1/models", headers={"x-api-key": _TOKEN})
+            resp = conn.getresponse()
+            resp.read()
+        finally:
+            proxy.stop_proxy(server)
+
+        # Exactly two upstream attempts (original + one retry).
+        assert len(call_log) == 2
+        assert resp.status == 401
+
+    def test_non_401_error_forwarded_without_retry(self, monkeypatch):
+        """A 500 from upstream must be forwarded immediately without any retry."""
+        call_log: list[dict] = []
+
+        class _Resp:
+            status = 500
+            _data = b"Internal Server Error"
+
+            def getheaders(self):
+                return [("content-type", "text/plain")]
+
+            def read(self, n=None):
+                if n is None:
+                    chunk, self._data = self._data, b""
+                else:
+                    chunk, self._data = self._data[:n], self._data[n:]
+                return chunk
+
+        class _Conn:
+            def __init__(self, host):
+                self.host = host
+
+            def request(self, method, path, body=None, headers=None):
+                call_log.append({})
+
+            def getresponse(self):
+                return _Resp()
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(http.client, "HTTPSConnection", _Conn)
+        server, _ = proxy.start_proxy(_make_api_key_mutator("key"), _TOKEN)
+        port = server.server_address[1]
+        _wait_for_port(port)
+
+        try:
+            conn = http.client.HTTPConnection("localhost", port)
+            conn.request("GET", "/v1/models", headers={"x-api-key": _TOKEN})
+            resp = conn.getresponse()
+            resp.read()
+        finally:
+            proxy.stop_proxy(server)
+
+        assert len(call_log) == 1
+        assert resp.status == 500
