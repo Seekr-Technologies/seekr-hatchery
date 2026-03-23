@@ -557,18 +557,6 @@ def cmd_new(
     tasks.ensure_tasks_dir(repo)
     if in_repo:
         tasks.ensure_gitignore(repo)
-        df_created = docker.ensure_dockerfile(repo, backend)
-        dc_created = docker.ensure_docker_config(repo)
-        if df_created or dc_created:
-            ui.info("  Committing...")
-            tasks.run(
-                ["git", "add", str(docker.dockerfile_path(repo, backend).relative_to(repo)), str(tasks.DOCKER_CONFIG)],
-                cwd=repo,
-            )
-            tasks.run(
-                ["git", "commit", "-m", "chore: add hatchery Docker configuration"],
-                cwd=repo,
-            )
 
     name = tasks.to_name(name)
     db_path = tasks.task_db_path(repo, name)
@@ -591,41 +579,62 @@ def cmd_new(
         ui.info(f"Creating task: {name}")
         git.create_worktree(repo, branch, worktree, base)
 
-    if use_editor:
-        task_path = tasks.write_task_file(worktree, name, branch)
-        content_before = task_path.read_text()
-        click.echo("\nOpening task file for editing...")
-        tasks.open_for_editing(task_path)
-        if task_path.read_text() == content_before:
-            ui.warn("Task file unchanged — cancelled.")
-            if not no_worktree:
-                git.remove_worktree(repo, worktree)
-                git.delete_branch(repo, branch)
-            sys.exit(1)
-    else:
-        objective = _prompt_objective()
-        task_path = tasks.write_task_file(worktree, name, branch, objective=objective)
+    try:
+        if in_repo:
+            df_created = docker.ensure_dockerfile(worktree, backend)
+            dc_created = docker.ensure_docker_config(worktree)
+            if df_created or dc_created:
+                ui.info("  Committing...")
+                tasks.run(
+                    ["git", "add", str(docker.dockerfile_path(worktree, backend).relative_to(worktree)), str(tasks.DOCKER_CONFIG)],
+                    cwd=worktree,
+                )
+                tasks.run(
+                    ["git", "commit", "-m", "chore: add hatchery Docker configuration"],
+                    cwd=worktree,
+                )
 
-    if in_repo:
-        tasks.run(["git", "add", ".hatchery/"], cwd=worktree)
-        tasks.run(["git", "commit", "-m", f"task({name}): add task file"], cwd=worktree)
+        if use_editor:
+            task_path = tasks.write_task_file(worktree, name, branch)
+            content_before = task_path.read_text()
+            click.echo("\nOpening task file for editing...")
+            tasks.open_for_editing(task_path)
+            if task_path.read_text() == content_before:
+                ui.warn("Task file unchanged — cancelled.")
+                if not no_worktree:
+                    git.remove_worktree(repo, worktree)
+                    git.delete_branch(repo, branch)
+                sys.exit(1)
+        else:
+            objective = _prompt_objective()
+            task_path = tasks.write_task_file(worktree, name, branch, objective=objective)
 
-    meta = {
-        "name": name,
-        "branch": branch,
-        "worktree": str(worktree),
-        "repo": str(repo),
-        "status": "in-progress",
-        "created": datetime.now().isoformat(),
-        "session_id": session_id,  # internal only, not shown in normal output
-        "no_worktree": no_worktree,
-        "agent": backend.kind,
-    }
-    tasks.save_task(meta)
+        if in_repo:
+            tasks.run(["git", "add", ".hatchery/"], cwd=worktree)
+            tasks.run(["git", "commit", "-m", f"task({name}): add task file"], cwd=worktree)
 
-    runtime = docker.resolve_runtime(repo, worktree, no_docker, backend=backend)
-    main_branch = git.get_default_branch(repo)
-    _launch_new(repo, worktree, name, session_id, backend, runtime, branch, main_branch, no_worktree, no_cache=rebuild_sandbox)
+        meta = {
+            "name": name,
+            "branch": branch,
+            "worktree": str(worktree),
+            "repo": str(repo),
+            "status": "in-progress",
+            "created": datetime.now().isoformat(),
+            "session_id": session_id,  # internal only, not shown in normal output
+            "no_worktree": no_worktree,
+            "agent": backend.kind,
+        }
+        tasks.save_task(meta)
+
+        runtime = docker.resolve_runtime(repo, worktree, no_docker, backend=backend)
+        main_branch = git.get_default_branch(repo)
+        _launch_new(repo, worktree, name, session_id, backend, runtime, branch, main_branch, no_worktree, no_cache=rebuild_sandbox)
+    except KeyboardInterrupt:
+        if not no_worktree:
+            git.remove_worktree(repo, worktree)
+            git.delete_branch(repo, branch)
+        ui.warn("Cancelled.")
+        sys.exit(1)
 
 
 @cli.command("chat")
