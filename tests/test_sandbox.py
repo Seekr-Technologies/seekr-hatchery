@@ -126,7 +126,7 @@ def no_wt_run(
     def run(
         command: list[str],
         *,
-        api_key: str | None = None,
+        mutator: Callable[[dict], dict] | None = None,
         proxy_token: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         result = docker._run_container(
@@ -135,7 +135,7 @@ def no_wt_run(
             workdir="/workspace",
             hatchery_repo="/workspace",
             name="test-no-wt",
-            api_key=api_key,
+            mutator=mutator,
             proxy_token=proxy_token,
             agent_cmd=[],
             runtime=runtime,
@@ -259,7 +259,7 @@ def wt_run(
             workdir=CONTAINER_WORKTREE,
             hatchery_repo=tasks.CONTAINER_REPO_ROOT,
             name=task_name,
-            api_key=None,
+            mutator=None,
             proxy_token=None,
             agent_cmd=[],
             runtime=runtime,
@@ -356,7 +356,7 @@ class TestSandboxShell:
             workdir="/",
             hatchery_repo="/",
             name="test-sandbox",
-            api_key=None,
+            mutator=None,
             proxy_token=None,
             agent_cmd=[],
             runtime=runtime,
@@ -440,6 +440,9 @@ class TestContainerProxy:
         arrives.  wget keeps the connection open until the response is complete.
         """
         run, _ = no_wt_run
+        mutator = lambda headers: {k: v for k, v in headers.items()
+                                   if k.lower() not in ("x-api-key", "authorization")} \
+                                  | {"Authorization": "Bearer fake-real-key"}
         result = run(
             [
                 "sh",
@@ -448,7 +451,7 @@ class TestContainerProxy:
                 'wget -qO - -T 10 --header "Authorization: Bearer $OPENAI_API_KEY" '
                 '"http://host.docker.internal:$PORT/v1/responses" 2>&1 || true',
             ],
-            api_key="fake-real-key",
+            mutator=mutator,
             proxy_token="test-proxy-token",
         )
         assert result.returncode == 0, f"Container command failed:\n{result.stderr}"
@@ -617,7 +620,7 @@ class TestDinD:
             workdir="/",
             hatchery_repo="/",
             name="test-dind",
-            api_key=None,
+            mutator=None,
             proxy_token=None,
             agent_cmd=[],
             dind=True,
@@ -685,7 +688,7 @@ class TestDinD:
             workdir="/",
             hatchery_repo="/",
             name="test-cap",
-            api_key=None,
+            mutator=None,
             proxy_token=None,
             agent_cmd=[],
             dind=True,
