@@ -8,7 +8,6 @@ import pytest
 
 import seekr_hatchery.agents as agent
 import seekr_hatchery.docker as docker
-import seekr_hatchery.proxy as proxy_mod
 import seekr_hatchery.tasks as tasks
 
 
