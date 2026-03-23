@@ -26,7 +26,11 @@ __all__ = [
 
 CODEX: AgentBackend = CodexBackend()
 
-_REGISTRY: dict[str, AgentBackend] = {b.kind: b for b in [CODEX]}
+ALL_BACKENDS = [
+    CODEX,
+]
+
+_REGISTRY: dict[str, AgentBackend] = {b.kind: b for b in ALL_BACKENDS}
 
 
 def from_kind(kind: str) -> AgentBackend:

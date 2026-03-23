@@ -20,7 +20,7 @@ mounts:
 
 # Set to true to enable Podman-in-Podman (nested container support).
 # Also uncomment the DinD section in .hatchery/Dockerfile.
-dind: false
+dind: true
 
 # cap_add: extra Linux capabilities to grant inside the DinD container.
 # Only takes effect when dind: true. Values are validated against
