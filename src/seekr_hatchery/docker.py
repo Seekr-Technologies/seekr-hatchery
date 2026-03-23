@@ -552,6 +552,7 @@ def build_docker_image(
     name: str,
     backend: agent.AgentBackend,
     runtime: Runtime = Runtime.DOCKER,
+    no_cache: bool = False,
 ) -> None:
     """Build the sandbox image from the worktree's .hatchery/Dockerfile.<agent>.
 
@@ -566,7 +567,10 @@ def build_docker_image(
     # entire repo (or .hatchery/worktrees/) which can hang indefinitely on
     # large repositories.
     with tempfile.TemporaryDirectory(prefix="hatchery-build-") as empty_context:
-        build_cmd = [runtime.binary, "build", "-f", str(worktree_dockerfile), "-t", image, empty_context]
+        build_cmd = [runtime.binary, "build", "-f", str(worktree_dockerfile), "-t", image]
+        if no_cache:
+            build_cmd.append("--no-cache")
+        build_cmd.append(empty_context)
         logger.debug("Building %s image %r (context=%s)", runtime.binary, image, empty_context)
         logger.debug("Build command: %s", build_cmd)
 
@@ -734,6 +738,7 @@ def launch_docker(
     agent_cmd: list[str],
     config: DockerConfig,
     runtime: Runtime = Runtime.DOCKER,
+    no_cache: bool = False,
 ) -> None:
     """Replace the current process with a Docker-sandboxed agent session.
 
@@ -777,7 +782,7 @@ def launch_docker(
     # (e.g. pre-seed trust or approval in agent-specific config files).
     backend.on_before_container_start(session_dir, proxy_token, container_worktree)
 
-    build_docker_image(repo, worktree, name, backend, runtime=runtime)
+    build_docker_image(repo, worktree, name, backend, runtime=runtime, no_cache=no_cache)
     image = docker_image_name(repo, name)
     mounts = docker_mounts(repo, worktree, name, backend, session_dir, config, git_sentinels, worktree_git_ptr=git_ptr)
     logger.debug(f"Launching {runtime.binary} container for task '{name}'")
@@ -804,6 +809,7 @@ def launch_docker_no_worktree(
     agent_cmd: list[str],
     config: DockerConfig,
     runtime: Runtime = Runtime.DOCKER,
+    no_cache: bool = False,
 ) -> None:
     """Launch a Docker-sandboxed agent session with cwd mounted as /workspace.
 
@@ -827,7 +833,7 @@ def launch_docker_no_worktree(
 
     backend.on_before_container_start(session_dir, proxy_token, "/workspace")
 
-    build_docker_image(cwd, cwd, name, backend, runtime=runtime)
+    build_docker_image(cwd, cwd, name, backend, runtime=runtime, no_cache=no_cache)
     image = docker_image_name(cwd, name)
     mounts = docker_mounts_no_worktree(cwd, backend, session_dir, config=config)
     logger.debug(f"Launching {runtime.binary} container for task '{name}' (no-worktree mode)")
@@ -853,13 +859,14 @@ def launch_sandbox_shell(
     config: DockerConfig,
     runtime: Runtime,
     shell: str = "/bin/bash",
+    no_cache: bool = False,
 ) -> None:
     """Drop the user into an interactive shell inside the sandbox container.
 
     Builds the same image agents use but skips all agent/proxy/session setup.
     The repo is mounted read-only at /repo.
     """
-    build_docker_image(repo, repo, "sandbox", backend, runtime=runtime)
+    build_docker_image(repo, repo, "sandbox", backend, runtime=runtime, no_cache=no_cache)
     image = docker_image_name(repo, "sandbox")
     mounts = (
         [f"{repo}:{tasks.CONTAINER_REPO_ROOT}:rw"]
