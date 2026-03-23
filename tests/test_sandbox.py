@@ -391,6 +391,13 @@ class TestContainerEnv:
 # ---------------------------------------------------------------------------
 
 
+def _mutator(headers: dict) -> dict:
+    out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")} | {
+        "Authorization": "Bearer fake-real-key"
+    }
+    return out
+
+
 class TestContainerProxy:
     """Container can reach the host proxy and requests are forwarded to the upstream API."""
 
@@ -440,9 +447,6 @@ class TestContainerProxy:
         arrives.  wget keeps the connection open until the response is complete.
         """
         run, _ = no_wt_run
-        mutator = lambda headers: {k: v for k, v in headers.items()
-                                   if k.lower() not in ("x-api-key", "authorization")} \
-                                  | {"Authorization": "Bearer fake-real-key"}
         result = run(
             [
                 "sh",
@@ -451,7 +455,7 @@ class TestContainerProxy:
                 'wget -qO - -T 10 --header "Authorization: Bearer $OPENAI_API_KEY" '
                 '"http://host.docker.internal:$PORT/v1/responses" 2>&1 || true',
             ],
-            mutator=mutator,
+            mutator=_mutator,
             proxy_token="test-proxy-token",
         )
         assert result.returncode == 0, f"Container command failed:\n{result.stderr}"
