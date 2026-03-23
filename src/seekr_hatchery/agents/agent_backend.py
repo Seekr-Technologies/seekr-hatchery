@@ -1,6 +1,7 @@
 """AgentBackend abstract base class."""
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from pathlib import Path
 
 # Home directory of the non-root user inside every sandbox container.
@@ -76,8 +77,23 @@ class AgentBackend(ABC):
 
     @staticmethod
     @abstractmethod
-    def get_api_key() -> str | None:
-        """Return the API key for this agent, or None if not configured."""
+    def make_header_mutator() -> Callable[..., dict[str, str]]:
+        """Return a callable that transforms outbound request headers.
+
+        Called once at proxy startup. The returned function is invoked for every
+        proxied request with the inbound headers (hop-by-hop already stripped).
+        It must strip inbound auth headers, inject the real API key in the
+        correct format, and return the modified dict.
+
+        The returned callable accepts an optional ``refresh: bool = False``
+        keyword argument.  When ``refresh=True`` the backend should attempt to
+        obtain a fresh credential (e.g. by firing a short test query for OAuth
+        sources) before injecting the token into the returned headers.  For
+        ``API_KEY`` sources, ``refresh=True`` is a no-op.
+
+        Raises RuntimeError (with a human-readable message) if no credentials
+        are available.
+        """
 
     @staticmethod
     @abstractmethod
@@ -100,7 +116,11 @@ class AgentBackend(ABC):
     @staticmethod
     @abstractmethod
     def proxy_kwargs() -> dict:
-        """Return keyword arguments to pass to ``proxy.start_proxy()``."""
+        """Return keyword arguments to pass to ``proxy.start_proxy()``.
+
+        Note: does not include ``header_mutator`` — that is provided separately
+        via ``make_header_mutator()``.
+        """
 
     @staticmethod
     @abstractmethod
@@ -169,8 +189,3 @@ class AgentBackend(ABC):
     @abstractmethod
     def dockerfile_install(self) -> str:
         """Dockerfile snippet (RUN block) that installs this agent in the sandbox."""
-
-    @property
-    @abstractmethod
-    def api_key_missing_hint(self) -> str:
-        """Human-readable hint shown when the API key is not configured."""
