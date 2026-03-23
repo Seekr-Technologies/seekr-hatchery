@@ -125,6 +125,23 @@ def banner(
         click.echo(bar)
 
 
+def chat_banner(
+    name: str,
+    repo: object,
+    features: list[str] | None = None,
+) -> None:
+    """Print the launch frame banner for a chat session (always sandboxed)."""
+    lines: list[str] = [
+        f"  Chat:    {name}",
+        f"  Dir:     {repo}",
+    ]
+    if features:
+        features_str = "  ".join(click.style(f, fg="cyan", bold=True) for f in features)
+        lines.append(f"  Features: {features_str}")
+    inner = max(max(len(click.unstyle(ln)) for ln in lines) + 2, _BANNER_MIN_INNER)
+    _banner_box(lines, inner, label=" sandbox ", double=True, color="cyan")
+
+
 def task_list_table(task_list: list[dict], archived_count: int, show_all: bool) -> None:
     """Render a colored task list table to stdout."""
     if not task_list:

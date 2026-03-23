@@ -274,3 +274,29 @@ class TestMigrateDb:
         assert scoped_file.exists()
         # meta.json still says version 1
         assert json.loads(meta_path.read_text())["schema_version"] == 1
+
+
+# ---------------------------------------------------------------------------
+# sandbox_context — chat mode (no_worktree + no branch)
+# ---------------------------------------------------------------------------
+
+
+class TestSandboxContextChat:
+    def test_no_worktree_docker_no_branch(self):
+        """sandbox_context with no_worktree=True, branch='', use_docker=True
+        should describe an isolated Docker container without branch references."""
+        result = tasks.sandbox_context(
+            name="chat-1",
+            branch="",
+            worktree=Path("/repo"),
+            repo=Path("/repo"),
+            main_branch="main",
+            use_docker=True,
+            no_worktree=True,
+        )
+        assert "Docker container" in result
+        assert "/workspace/" in result
+        # Should NOT mention branches or PRs when branch is empty
+        assert "branch" not in result.lower()
+        assert "pull request" not in result.lower()
+        assert "push" not in result.lower()
