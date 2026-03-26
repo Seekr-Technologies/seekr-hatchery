@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     make \
     unzip \
     zip \
+    python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Non-root user ─────────────────────────────────────────────────────────────
@@ -29,6 +30,7 @@ ENV PATH="/home/hatchery/.npm-global/bin:/home/hatchery/.local/bin:$PATH"
 
 # ── Python / uv ───────────────────────────────────────────────────────────────
 # COPY --from=ghcr.io/astral-sh/uv:0.10.7 /uv /uvx /bin/
+# ENV UV_PROJECT_ENVIRONMENT=/home/hatchery/.venv
 
 # ── Go ────────────────────────────────────────────────────────────────────────
 # COPY --from=golang:1.24 /usr/local/go /usr/local/go
