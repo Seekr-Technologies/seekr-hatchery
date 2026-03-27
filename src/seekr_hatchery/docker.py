@@ -257,6 +257,7 @@ def ensure_dockerfile(repo: Path, backend: agent.AgentBackend = agent.CODEX) -> 
     df = dockerfile_path(repo, backend)
     if df.exists():
         return False
+    df.parent.mkdir(parents=True, exist_ok=True)
     text = _DOCKERFILE_TEMPLATE.read_text()
     text = text.replace("{{AGENT_INSTALL}}", backend.dockerfile_install)
     text = text.replace("{{DIND}}", _comment_out(DIND_DOCKERFILE_LINES))
@@ -302,6 +303,7 @@ def ensure_docker_config(repo: Path) -> bool:
     config_file = repo / tasks.DOCKER_CONFIG
     if config_file.exists():
         return False
+    config_file.parent.mkdir(parents=True, exist_ok=True)
     config_file.write_text(_DOCKER_CONFIG_TEMPLATE.read_text())
     ui.info(f"  Created {tasks.DOCKER_CONFIG}")
     answer = input("  Would you like to edit the docker config? [Y/n] ").strip().lower()
