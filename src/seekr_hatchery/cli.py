@@ -539,8 +539,20 @@ def cli(log_level: str, log_file: str | None) -> None:
     is_flag=True,
     help="Rebuild the sandbox image from scratch, ignoring the layer cache",
 )
+@click.option(
+    "--no-commit-docker",
+    "no_commit_docker",
+    is_flag=True,
+    help=(
+        "Write the generated Dockerfile and docker.yaml to the repo root instead of "
+        "the worktree branch, and skip the automatic commit. "
+        "Useful for keeping Docker config out of version control. "
+        "If you forgot this flag on your first run, use "
+        "`git rm --cached .hatchery/Dockerfile.<agent> .hatchery/docker.yaml` to undo."
+    ),
+)
 def cmd_new(
-    name: str, base: str, no_docker: bool, no_worktree: bool, editor: bool | None, agent_name: str, rebuild_sandbox: bool
+    name: str, base: str, no_docker: bool, no_worktree: bool, editor: bool | None, agent_name: str, rebuild_sandbox: bool, no_commit_docker: bool
 ) -> None:
     """Start a new task."""
     ui.hatchery_header(_version)
@@ -581,8 +593,14 @@ def cmd_new(
 
     try:
         if in_repo:
-            df_created = docker.ensure_dockerfile(worktree, backend)
-            dc_created = docker.ensure_docker_config(worktree)
+            if no_commit_docker:
+                # Generate files to the repo root so they stay uncommitted.
+                # The source=repo calls below will then copy them into the worktree
+                # for this session without committing.
+                docker.ensure_dockerfile(repo, backend)
+                docker.ensure_docker_config(repo)
+            df_created = docker.ensure_dockerfile(worktree, backend, source=repo)
+            dc_created = docker.ensure_docker_config(worktree, source=repo)
             if df_created or dc_created:
                 ui.info("  Committing...")
                 tasks.run(

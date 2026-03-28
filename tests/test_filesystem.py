@@ -462,6 +462,57 @@ class TestEnsureDockerfile:
         assert "# USER root" in content
         assert "fuse-overlayfs" in content
 
+    def test_source_copies_file_when_exists_in_source(self, tmp_path):
+        """source= copies the Dockerfile from source into repo when missing from repo."""
+        source = tmp_path / "source"
+        repo = tmp_path / "repo"
+        source.mkdir()
+        repo.mkdir()
+        (source / ".hatchery").mkdir()
+        (repo / ".hatchery").mkdir()
+        docker.dockerfile_path(source, agent.CODEX).write_text("FROM custom\n")
+        docker.ensure_dockerfile(repo, agent.CODEX, source=source)
+        assert docker.dockerfile_path(repo, agent.CODEX).read_text() == "FROM custom\n"
+
+    def test_source_returns_false_when_copied(self, tmp_path):
+        """Copying from source returns False so callers skip auto-commit."""
+        source = tmp_path / "source"
+        repo = tmp_path / "repo"
+        source.mkdir()
+        repo.mkdir()
+        (source / ".hatchery").mkdir()
+        (repo / ".hatchery").mkdir()
+        docker.dockerfile_path(source, agent.CODEX).write_text("FROM custom\n")
+        result = docker.ensure_dockerfile(repo, agent.CODEX, source=source)
+        assert result is False
+
+    def test_source_falls_through_to_template_when_not_in_source(self, tmp_path, monkeypatch):
+        """When source has no Dockerfile, the template is generated as normal."""
+        source = tmp_path / "source"
+        repo = tmp_path / "repo"
+        source.mkdir()
+        repo.mkdir()
+        (source / ".hatchery").mkdir()
+        (repo / ".hatchery").mkdir()
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+        result = docker.ensure_dockerfile(repo, agent.CODEX, source=source)
+        assert result is True
+        assert docker.dockerfile_path(repo, agent.CODEX).exists()
+
+    def test_source_ignored_when_dest_already_exists(self, tmp_path):
+        """If destination already has a Dockerfile, source= is irrelevant."""
+        source = tmp_path / "source"
+        repo = tmp_path / "repo"
+        source.mkdir()
+        repo.mkdir()
+        (source / ".hatchery").mkdir()
+        (repo / ".hatchery").mkdir()
+        docker.dockerfile_path(source, agent.CODEX).write_text("FROM source\n")
+        docker.dockerfile_path(repo, agent.CODEX).write_text("FROM existing\n")
+        result = docker.ensure_dockerfile(repo, agent.CODEX, source=source)
+        assert result is False
+        assert docker.dockerfile_path(repo, agent.CODEX).read_text() == "FROM existing\n"
+
 
 # ---------------------------------------------------------------------------
 # ensure_docker_config
@@ -537,6 +588,57 @@ class TestEnsureDockerConfig:
         content = (fake_repo / tasks.DOCKER_CONFIG).read_text()
         parsed = yaml.safe_load(content)
         assert parsed["schema_version"] == "1"
+
+    def test_source_copies_config_when_exists_in_source(self, tmp_path):
+        """source= copies docker.yaml from source into repo when missing from repo."""
+        source = tmp_path / "source"
+        repo = tmp_path / "repo"
+        source.mkdir()
+        repo.mkdir()
+        (source / ".hatchery").mkdir()
+        (repo / ".hatchery").mkdir()
+        (source / tasks.DOCKER_CONFIG).write_text("custom: true\n")
+        docker.ensure_docker_config(repo, source=source)
+        assert (repo / tasks.DOCKER_CONFIG).read_text() == "custom: true\n"
+
+    def test_source_returns_false_when_copied(self, tmp_path):
+        """Copying from source returns False so callers skip auto-commit."""
+        source = tmp_path / "source"
+        repo = tmp_path / "repo"
+        source.mkdir()
+        repo.mkdir()
+        (source / ".hatchery").mkdir()
+        (repo / ".hatchery").mkdir()
+        (source / tasks.DOCKER_CONFIG).write_text("custom: true\n")
+        result = docker.ensure_docker_config(repo, source=source)
+        assert result is False
+
+    def test_source_falls_through_to_template_when_not_in_source(self, tmp_path, monkeypatch):
+        """When source has no docker.yaml, the template is generated as normal."""
+        source = tmp_path / "source"
+        repo = tmp_path / "repo"
+        source.mkdir()
+        repo.mkdir()
+        (source / ".hatchery").mkdir()
+        (repo / ".hatchery").mkdir()
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+        result = docker.ensure_docker_config(repo, source=source)
+        assert result is True
+        assert (repo / tasks.DOCKER_CONFIG).exists()
+
+    def test_source_ignored_when_dest_already_exists(self, tmp_path):
+        """If destination already has docker.yaml, source= is irrelevant."""
+        source = tmp_path / "source"
+        repo = tmp_path / "repo"
+        source.mkdir()
+        repo.mkdir()
+        (source / ".hatchery").mkdir()
+        (repo / ".hatchery").mkdir()
+        (source / tasks.DOCKER_CONFIG).write_text("from: source\n")
+        (repo / tasks.DOCKER_CONFIG).write_text("existing: true\n")
+        result = docker.ensure_docker_config(repo, source=source)
+        assert result is False
+        assert (repo / tasks.DOCKER_CONFIG).read_text() == "existing: true\n"
 
 
 # ---------------------------------------------------------------------------

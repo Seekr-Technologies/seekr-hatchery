@@ -252,11 +252,31 @@ def detect_runtime() -> Runtime:
 # ── Setup ─────────────────────────────────────────────────────────────────────
 
 
-def ensure_dockerfile(repo: Path, backend: agent.AgentBackend = agent.CODEX) -> bool:
-    """Write a starter Dockerfile if none exists. Returns True if created."""
+def ensure_dockerfile(
+    repo: Path,
+    backend: agent.AgentBackend = agent.CODEX,
+    *,
+    source: Path | None = None,
+) -> bool:
+    """Write a starter Dockerfile if none exists. Returns True if created.
+
+    If *source* is given and the Dockerfile exists there but not in *repo*,
+    the file is copied from *source* instead of generated from the template.
+    Returns False in that case so callers do not auto-commit a file the user
+    intentionally left uncommitted.
+    """
     df = dockerfile_path(repo, backend)
     if df.exists():
         return False
+    if source is not None:
+        source_df = dockerfile_path(source, backend)
+        if source_df.exists():
+            shutil.copy2(source_df, df)
+            ui.warn(
+                f"  Copied {df.relative_to(repo)} from repo root "
+                "(uncommitted — will not be committed to this worktree branch)"
+            )
+            return False
     df.parent.mkdir(parents=True, exist_ok=True)
     text = _DOCKERFILE_TEMPLATE.read_text()
     text = text.replace("{{AGENT_INSTALL}}", backend.dockerfile_install)
@@ -295,14 +315,28 @@ def _migrate_docker_config(data: dict) -> dict:
     return data
 
 
-def ensure_docker_config(repo: Path) -> bool:
+def ensure_docker_config(repo: Path, *, source: Path | None = None) -> bool:
     """Write .hatchery/docker.yaml from template if it does not already exist.
 
     Returns True if the file was created, False if it already existed.
+
+    If *source* is given and docker.yaml exists there but not in *repo*,
+    the file is copied from *source* instead of generated from the template.
+    Returns False in that case so callers do not auto-commit a file the user
+    intentionally left uncommitted.
     """
     config_file = repo / tasks.DOCKER_CONFIG
     if config_file.exists():
         return False
+    if source is not None:
+        source_config = source / tasks.DOCKER_CONFIG
+        if source_config.exists():
+            shutil.copy2(source_config, config_file)
+            ui.warn(
+                f"  Copied {tasks.DOCKER_CONFIG} from repo root "
+                "(uncommitted — will not be committed to this worktree branch)"
+            )
+            return False
     config_file.parent.mkdir(parents=True, exist_ok=True)
     config_file.write_text(_DOCKER_CONFIG_TEMPLATE.read_text())
     ui.info(f"  Created {tasks.DOCKER_CONFIG}")
