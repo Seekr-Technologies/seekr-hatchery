@@ -1,8 +1,7 @@
 name: Release
 
 on:
-  pull_request:
-    types: [closed]
+  push:
     branches: [main]
 
 permissions: read-all
@@ -10,7 +9,7 @@ permissions: read-all
 jobs:
   compute-version:
     name: Compute next version
-    if: github.event.pull_request.merged == true
+    if: github.event.forced == false
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -28,7 +27,6 @@ jobs:
         id: compute
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -eu
 
@@ -42,6 +40,17 @@ jobs:
           PATCH=$(echo "$LATEST_TAG" | sed 's/^v//' | cut -d. -f3)
 
           echo "Latest tag: $LATEST_TAG"
+
+          # Find the PR that was merged via this push
+          PR_NUMBER=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" --jq '.[0].number')
+          echo "PR number: $PR_NUMBER"
+
+          # Skip if no PR is associated (e.g. a direct push to main)
+          if [ "$PR_NUMBER" = "null" ] || [ -z "$PR_NUMBER" ]; then
+            echo "No PR found for this push, skipping release"
+            echo "skip_release=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
           # Fetch all commit subjects from the PR (paginated)
           COMMITS=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/commits" \
