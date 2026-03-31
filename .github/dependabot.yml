@@ -14,6 +14,8 @@ updates:
       all-dependencies:
         patterns:
           - "*"
+    cooldown:
+      default-days: 7
 
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -28,3 +30,5 @@ updates:
       all-actions:
         patterns:
           - "*"
+    cooldown:
+      default-days: 7
