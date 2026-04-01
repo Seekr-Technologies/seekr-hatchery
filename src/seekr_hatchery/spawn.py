@@ -7,6 +7,8 @@ this module is a thin library with one public entry point: ``process_spawn()``.
 """
 
 import logging
+import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -75,9 +77,43 @@ def process_spawn(request: SpawnRequest, repo: Path, parent_name: str) -> bool:
         if request.source_file is not None:
             request.source_file.unlink(missing_ok=True)
 
-        ui.info(f"  Spawned task '{request.name}'. Attach with: hatchery resume {request.name}")
+        try:
+            _launch_background(repo, request.name, branch)
+        except Exception:
+            logger.warning(
+                "Failed to auto-launch background container for '%s'; use 'hatchery resume %s' to start manually.",
+                request.name,
+                request.name,
+            )
+
+        ui.info(
+            f"  Spawned task '{request.name}' — launching background container. "
+            f"Attach with: hatchery attach {request.name}"
+        )
         return True
 
     except Exception:
         logger.exception("Failed to process spawn request for '%s'", request.name)
         return False
+
+
+def _launch_background(repo: Path, name: str, branch: str) -> None:
+    """Fire-and-forget: start the background daemon subprocess."""
+    cmd = [
+        sys.executable,
+        "-m",
+        "seekr_hatchery.cli",
+        "_spawn-launch",
+        "--repo",
+        str(repo),
+        "--name",
+        name,
+        "--branch",
+        branch,
+    ]
+    subprocess.Popen(
+        cmd,
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )

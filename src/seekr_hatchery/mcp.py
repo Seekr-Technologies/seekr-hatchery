@@ -62,7 +62,7 @@ def create_app(repo: Path, parent_name: str, parent_branch: str):
         )
         ok = process_spawn(req, repo, parent_name)
         if ok:
-            return f"Spawned task '{req.name}'. The user can attach with: hatchery resume {req.name}"
+            return f"Spawned task '{req.name}' — launching background container. The user can attach with: hatchery attach {req.name}"
         return f"Failed to spawn task '{req.name}'. Check the hatchery logs for details."
 
     return mcp_app

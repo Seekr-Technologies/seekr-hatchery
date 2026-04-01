@@ -654,7 +654,9 @@ def _run_container(
     _command_override: list[str] | None = None,
     _interactive: bool = False,
     cap_add: list[str] | None = None,
-) -> subprocess.CompletedProcess[str] | None:
+    detach: bool = False,
+    container_name: str | None = None,
+) -> subprocess.CompletedProcess[str] | str | None:
     """Assemble and execute the container run command for the given agent session.
 
     *agent_cmd* is the complete command to run inside the container, including
@@ -675,7 +677,11 @@ def _run_container(
             logger.debug("Proxy started for task; API key in container is a proxy token")
 
     cmd = [runtime.binary, "run", "--rm"]
-    if _command_override is None or _interactive:
+    if detach:
+        cmd += ["-t"]
+        if container_name:
+            cmd += ["--name", container_name]
+    elif _command_override is None or _interactive:
         cmd += ["-it"]
     for mount in mounts:
         cmd += ["-v", mount]
@@ -750,6 +756,16 @@ def _run_container(
     cmd += agent_cmd
 
     logger.debug(f"Launching {runtime.binary} container image={image!r} name={name!r} workdir={workdir!r}")
+    if detach:
+        # Insert -d before the image name (last item before agent_cmd).
+        # cmd currently ends with: ... [image, *agent_cmd] — re-assemble with -d.
+        image_idx = len(cmd) - len(agent_cmd) - 1
+        cmd.insert(image_idx, "-d")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            ui.warn(f"{runtime.binary} detached container failed to start: {result.stderr.strip()}")
+        return result.stdout.strip()  # container ID
+
     try:
         result = subprocess.run(cmd)
     finally:
@@ -778,7 +794,8 @@ def launch_docker(
     branch: str = "",
     enable_mcp: bool = False,
     no_cache: bool = False,
-) -> None:
+    detach: bool = False,
+) -> tuple[str | None, "subprocess.Popen | None"] | None:
     """Replace the current process with a Docker-sandboxed agent session.
 
     Builds the image first — hits the layer cache instantly if nothing changed.
@@ -836,6 +853,28 @@ def launch_docker(
     mounts = docker_mounts(repo, worktree, name, backend, session_dir, config, git_sentinels, worktree_git_ptr=git_ptr)
     mounts.extend(mcp_extra_mounts)
     logger.debug(f"Launching {runtime.binary} container for task '{name}'")
+    container_name = f"hatchery-{name}" if detach else None
+    if detach:
+        container_id = _run_container(
+            image,
+            mounts,
+            container_worktree,
+            tasks.CONTAINER_REPO_ROOT,
+            name,
+            mutator,
+            proxy_token,
+            agent_cmd,
+            backend=backend,
+            dind=config.dind,
+            runtime=runtime,
+            cap_add=config.cap_add,
+            detach=True,
+            container_name=container_name,
+        )
+        # Return container_id and mcp_proc so the caller can block on docker wait
+        # and stop MCP when the container exits.
+        return container_id, mcp_proc
+
     try:
         return _run_container(
             image,
@@ -943,11 +982,7 @@ def launch_sandbox_shell(
     """
     build_docker_image(repo, repo, "sandbox", backend, runtime=runtime, no_cache=no_cache)
     image = docker_image_name(repo, "sandbox")
-    mounts = (
-        [f"{repo}:{tasks.CONTAINER_REPO_ROOT}:rw"]
-        + _default_home_mounts()
-        + _construct_docker_mounts(config)
-    )
+    mounts = [f"{repo}:{tasks.CONTAINER_REPO_ROOT}:rw"] + _default_home_mounts() + _construct_docker_mounts(config)
     _run_container(
         image=image,
         mounts=mounts,
