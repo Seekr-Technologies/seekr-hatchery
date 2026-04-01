@@ -33,6 +33,7 @@ class UserConfigModel(BaseModel):
     schema_version: Literal["1"] = "1"
     default_agent: str | None = None
     open_editor: bool = False
+    enable_mcp: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +162,14 @@ class UserConfig:
     def set_open_editor(self, value: bool) -> None:
         """Set the open_editor preference in memory.  Call :meth:`save` to persist."""
         self._model = self._model.model_copy(update={"open_editor": value})
+
+    @property
+    def enable_mcp(self) -> bool:
+        return self._model.enable_mcp
+
+    def set_enable_mcp(self, value: bool) -> None:
+        """Set the enable_mcp preference in memory.  Call :meth:`save` to persist."""
+        self._model = self._model.model_copy(update={"enable_mcp": value})
 
     # ── Domain methods ────────────────────────────────────────────────────────
 

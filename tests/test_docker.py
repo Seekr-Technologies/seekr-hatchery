@@ -235,10 +235,12 @@ class TestResolveRuntime:
 
 def _make_mutator(key: str = "real-secret-key"):
     """Return a simple header mutator for tests."""
+
     def _mutate(headers):
         out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")}
         out["Authorization"] = f"Bearer {key}"
         return out
+
     return _mutate
 
 
@@ -606,3 +608,69 @@ class TestStreamBuild:
         monkeypatch.setattr(docker.subprocess, "run", _mock_run)
         docker._stream_build(["echo", "hello"], cwd=_sys.modules["pathlib"].Path("."))
         assert captured_kwargs[0].get("stdin") is subprocess.DEVNULL
+
+
+# ---------------------------------------------------------------------------
+# _run_container() — detach mode
+# ---------------------------------------------------------------------------
+
+
+class TestRunContainerDetach:
+    """Verify _run_container with detach=True produces correct flags."""
+
+    def _capture_detach(self, monkeypatch, container_name: str = "hatchery-test") -> tuple[list[str], str]:
+        """Call _run_container with detach=True; return (cmd, return_value)."""
+        captured: list[list[str]] = []
+
+        def _mock_run(cmd, **kw):
+            captured.append(cmd)
+            r = MagicMock()
+            r.returncode = 0
+            r.stdout = "abc123container"
+            r.stderr = ""
+            return r
+
+        monkeypatch.setattr(docker.subprocess, "run", _mock_run)
+        ret = docker._run_container(
+            image="test-image",
+            mounts=[],
+            workdir="/workspace",
+            hatchery_repo="/repo",
+            name="test-task",
+            mutator=None,
+            proxy_token=None,
+            agent_cmd=["codex", "--resume"],
+            runtime=docker.Runtime.DOCKER,
+            detach=True,
+            container_name=container_name,
+        )
+        return captured[0], ret
+
+    def test_detach_adds_d_flag_before_image(self, monkeypatch):
+        cmd, _ = self._capture_detach(monkeypatch)
+        image_idx = cmd.index("test-image")
+        assert cmd[image_idx - 1] == "-d"
+
+    def test_detach_adds_name_flag(self, monkeypatch):
+        cmd, _ = self._capture_detach(monkeypatch, container_name="hatchery-foo")
+        assert "--name" in cmd
+        name_idx = cmd.index("--name")
+        assert cmd[name_idx + 1] == "hatchery-foo"
+
+    def test_detach_has_t_flag(self, monkeypatch):
+        cmd, _ = self._capture_detach(monkeypatch)
+        assert "-t" in cmd
+
+    def test_detach_no_i_flag(self, monkeypatch):
+        cmd, _ = self._capture_detach(monkeypatch)
+        assert "-i" not in cmd
+        assert "-it" not in cmd
+
+    def test_detach_returns_container_id(self, monkeypatch):
+        _, ret = self._capture_detach(monkeypatch)
+        assert ret == "abc123container"
+
+    def test_detach_agent_cmd_after_image(self, monkeypatch):
+        cmd, _ = self._capture_detach(monkeypatch)
+        image_idx = cmd.index("test-image")
+        assert cmd[image_idx + 1 :] == ["codex", "--resume"]

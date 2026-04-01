@@ -185,6 +185,26 @@ class AgentBackend(ABC):
         container.
         """
 
+    # ── MCP configuration ────────────────────────────────────────────────────
+    #
+    # Non-abstract with default no-op implementations.  Override per backend.
+
+    @staticmethod
+    def write_mcp_config(
+        session_dir: Path,
+        mcp_url: str,
+        workdir: str,
+    ) -> list[str]:
+        """Write MCP config pointing the agent at *mcp_url*.  Return extra mount strings.
+
+        In Docker mode the returned mount strings shadow-mount the config file
+        into the container.  In native mode the list is typically empty (the
+        config is written to the agent's standard config path on the host).
+
+        Default: no-op, returns ``[]``.  Override per backend.
+        """
+        return []
+
     @property
     @abstractmethod
     def dockerfile_install(self) -> str:
