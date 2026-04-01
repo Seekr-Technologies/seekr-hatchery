@@ -834,11 +834,9 @@ def launch_docker(
         ui.warn("dind: true is set but the Dockerfile doesn't appear to install Podman.")
         ui.info(f"  Uncomment the '── Podman-in-Podman (DinD)' block in {dockerfile_path(worktree, backend).name}.")
 
-    # Let the backend mutate its per-task config before the container starts
-    # (e.g. pre-seed trust or approval in agent-specific config files).
-    backend.on_before_container_start(session_dir, proxy_token, container_worktree)
-
     # Start MCP server so the agent can call spawn_task from inside the container.
+    # Must run before on_before_container_start so backends can incorporate the
+    # MCP URL into their config files (e.g. write it into the agent's config).
     mcp_proc = None
     mcp_extra_mounts: list[str] = []
     if enable_mcp:
@@ -847,6 +845,10 @@ def launch_docker(
         mcp_proc, mcp_port = mcp_mod.start_mcp_http(repo, name, branch)
         mcp_url = f"http://host.docker.internal:{mcp_port}"
         mcp_extra_mounts = backend.write_mcp_config(session_dir, mcp_url, container_worktree)
+
+    # Let the backend mutate its per-task config before the container starts
+    # (e.g. pre-seed trust or approval in agent-specific config files).
+    backend.on_before_container_start(session_dir, proxy_token, container_worktree)
 
     build_docker_image(repo, worktree, name, backend, runtime=runtime, no_cache=no_cache)
     image = docker_image_name(repo, name)
@@ -928,9 +930,8 @@ def launch_docker_no_worktree(
         ui.warn("dind: true is set but the Dockerfile doesn't appear to install Podman.")
         ui.info(f"  Uncomment the '── Podman-in-Podman (DinD)' block in {dockerfile_path(cwd, backend).name}.")
 
-    backend.on_before_container_start(session_dir, proxy_token, "/workspace")
-
-    # Start MCP server if enabled
+    # Must run before on_before_container_start so backends can incorporate the
+    # MCP URL into their config files.
     mcp_proc = None
     mcp_extra_mounts: list[str] = []
     if enable_mcp:
@@ -939,6 +940,8 @@ def launch_docker_no_worktree(
         mcp_proc, mcp_port = mcp_mod.start_mcp_http(cwd, name, branch)
         mcp_url = f"http://host.docker.internal:{mcp_port}"
         mcp_extra_mounts = backend.write_mcp_config(session_dir, mcp_url, "/workspace")
+
+    backend.on_before_container_start(session_dir, proxy_token, "/workspace")
 
     build_docker_image(cwd, cwd, name, backend, runtime=runtime, no_cache=no_cache)
     image = docker_image_name(cwd, name)
