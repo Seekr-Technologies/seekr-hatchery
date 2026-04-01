@@ -231,6 +231,32 @@ def _docker_context(
     return config, features, container_workdir
 
 
+def _resolve_mcp(cfg: user_config.UserConfig) -> bool:
+    """Return True if MCP should be enabled for this session."""
+    if not cfg.enable_mcp:
+        return False
+    import seekr_hatchery.mcp as mcp_mod
+
+    if not mcp_mod.mcp_available():
+        ui.note("MCP spawning disabled — install with: pip install seekr-hatchery[mcp]")
+        return False
+    return True
+
+
+def _start_mcp_native(
+    repo: Path, name: str, branch: str, backend: agent.AgentBackend,
+) -> tuple["subprocess.Popen | None", int]:
+    """Start MCP HTTP server for native mode and write agent config.  Returns (proc, port)."""
+    import seekr_hatchery.mcp as mcp_mod
+
+    proc, port = mcp_mod.start_mcp_http(repo, name, branch)
+    mcp_url = f"http://127.0.0.1:{port}"
+    session_dir = tasks.task_session_dir(repo, name)
+    session_dir.mkdir(parents=True, exist_ok=True)
+    backend.write_mcp_config(session_dir, mcp_url, "")
+    return proc, port
+
+
 def _launch_finalize(
     repo: Path,
     worktree: Path,
@@ -241,6 +267,7 @@ def _launch_finalize(
     branch: str,
     main_branch: str,
     no_worktree: bool = False,
+    enable_mcp: bool = False,
 ) -> None:
     env_ctx = tasks.sandbox_context(name, branch, worktree, repo, main_branch, bool(runtime), no_worktree)
     system_prompt = tasks.SESSION_SYSTEM + "\n" + env_ctx
@@ -249,18 +276,31 @@ def _launch_finalize(
         session_id, system_prompt, _WRAP_UP_PROMPT, docker=bool(runtime), workdir=container_workdir
     )
     ui.banner(name, repo, branch=branch, sandbox=bool(runtime), worktree=not no_worktree, features=features)
+    mcp_proc = None
     _set_task_status(repo, name, "running")
     try:
         if runtime:
             if no_worktree:
-                docker.launch_docker_no_worktree(worktree, name, backend, agent_cmd, config, runtime)
+                docker.launch_docker_no_worktree(
+                    worktree, name, backend, agent_cmd, config, runtime,
+                    branch=branch, enable_mcp=enable_mcp,
+                )
             else:
-                docker.launch_docker(repo, worktree, name, backend, agent_cmd, config, runtime)
+                docker.launch_docker(
+                    repo, worktree, name, backend, agent_cmd, config, runtime,
+                    branch=branch, enable_mcp=enable_mcp,
+                )
         else:
+            if enable_mcp and not no_worktree:
+                mcp_proc, _ = _start_mcp_native(repo, name, branch, backend)
             os.chdir(worktree)
             subprocess.run(agent_cmd, env=_session_env(name, repo))
     finally:
         _set_task_status(repo, name, "in-progress")
+        if mcp_proc is not None:
+            import seekr_hatchery.mcp as mcp_mod
+
+            mcp_mod.stop_mcp_http(mcp_proc)
     _post_exit_check(
         name, repo, worktree, branch=branch, sandbox=bool(runtime), no_worktree=no_worktree, features=features
     )
@@ -307,7 +347,12 @@ def _post_exit_check(
         backend = agent.from_kind(meta.get("agent", "CODEX"))
         runtime = docker.resolve_runtime(repo, worktree, no_docker=not sandbox, backend=backend)
         main_branch = git.get_default_branch(repo)
-        _launch_finalize(repo, worktree, name, session_id, backend, runtime, meta["branch"], main_branch, no_worktree)
+        cfg = user_config.UserConfig.load()
+        mcp_on = _resolve_mcp(cfg)
+        _launch_finalize(
+            repo, worktree, name, session_id, backend, runtime,
+            meta["branch"], main_branch, no_worktree, enable_mcp=mcp_on,
+        )
     elif choice == "x":
         meta = tasks.load_task(repo, name)
         _do_delete(name, repo, worktree, meta)
@@ -361,6 +406,7 @@ def _launch_new(
     branch: str,
     main_branch: str,
     no_worktree: bool = False,
+    enable_mcp: bool = False,
     is_chat: bool = False,
     no_cache: bool = False,
 ) -> None:
@@ -382,18 +428,31 @@ def _launch_new(
         ui.chat_banner(name, repo, features=features)
     else:
         ui.banner(name, repo, branch=branch, sandbox=bool(runtime), worktree=not no_worktree, features=features)
+    mcp_proc = None
     _set_task_status(repo, name, "running")
     try:
         if runtime:
             if no_worktree:
-                docker.launch_docker_no_worktree(worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache)
+                docker.launch_docker_no_worktree(
+                    worktree, name, backend, agent_cmd, config, runtime,
+                    branch=branch, enable_mcp=enable_mcp, no_cache=no_cache,
+                )
             else:
-                docker.launch_docker(repo, worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache)
+                docker.launch_docker(
+                    repo, worktree, name, backend, agent_cmd, config, runtime,
+                    branch=branch, enable_mcp=enable_mcp, no_cache=no_cache,
+                )
         else:
+            if enable_mcp and not no_worktree:
+                mcp_proc, _ = _start_mcp_native(repo, name, branch, backend)
             os.chdir(worktree)
             subprocess.run(agent_cmd, env=_session_env(name, repo))
     finally:
         _set_task_status(repo, name, "in-progress")
+        if mcp_proc is not None:
+            import seekr_hatchery.mcp as mcp_mod
+
+            mcp_mod.stop_mcp_http(mcp_proc)
     if is_chat:
         _chat_post_exit(name, repo)
     else:
@@ -412,6 +471,7 @@ def _launch_resume(
     branch: str,
     main_branch: str,
     no_worktree: bool = False,
+    enable_mcp: bool = False,
     is_chat: bool = False,
     no_cache: bool = False,
 ) -> None:
@@ -431,18 +491,31 @@ def _launch_resume(
         ui.chat_banner(name, repo, features=features)
     else:
         ui.banner(name, repo, branch=branch, sandbox=bool(runtime), worktree=not no_worktree, features=features)
+    mcp_proc = None
     _set_task_status(repo, name, "running")
     try:
         if runtime:
             if no_worktree:
-                docker.launch_docker_no_worktree(worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache)
+                docker.launch_docker_no_worktree(
+                    worktree, name, backend, agent_cmd, config, runtime,
+                    branch=branch, enable_mcp=enable_mcp, no_cache=no_cache,
+                )
             else:
-                docker.launch_docker(repo, worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache)
+                docker.launch_docker(
+                    repo, worktree, name, backend, agent_cmd, config, runtime,
+                    branch=branch, enable_mcp=enable_mcp, no_cache=no_cache,
+                )
         else:
+            if enable_mcp and not no_worktree:
+                mcp_proc, _ = _start_mcp_native(repo, name, branch, backend)
             os.chdir(worktree)
             subprocess.run(agent_cmd, env=_session_env(name, repo))
     finally:
         _set_task_status(repo, name, "in-progress")
+        if mcp_proc is not None:
+            import seekr_hatchery.mcp as mcp_mod
+
+            mcp_mod.stop_mcp_http(mcp_proc)
     if is_chat:
         _chat_post_exit(name, repo)
     else:
@@ -771,7 +844,13 @@ def cmd_resume(name: str, no_docker: bool, rebuild_sandbox: bool) -> None:
     is_chat = meta.get("type") == "chat"
     runtime = docker.resolve_runtime(repo, worktree, no_docker, backend=backend)
     main_branch = git.get_default_branch(repo)
-    _launch_resume(repo, worktree, name, session_id, backend, runtime, meta["branch"], main_branch, no_worktree, is_chat=is_chat, no_cache=rebuild_sandbox)
+    cfg = user_config.UserConfig.load()
+    mcp_on = _resolve_mcp(cfg)
+    _launch_resume(
+        repo, worktree, name, session_id, backend, runtime,
+        meta["branch"], main_branch, no_worktree,
+        enable_mcp=mcp_on, is_chat=is_chat, no_cache=rebuild_sandbox,
+    )
 
 
 @cli.command("sandbox")
@@ -971,6 +1050,25 @@ def cmd_self_update() -> None:
     ui.error("Could not detect uv tool installation.")
     ui.info("Run manually: uv tool upgrade seekr-hatchery")
     sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Internal commands
+# ---------------------------------------------------------------------------
+
+
+@cli.command("mcp-serve", hidden=True)
+@click.option("--repo", required=True, type=click.Path(exists=True))
+@click.option("--name", required=True)
+@click.option("--branch", required=True)
+@click.option("--host", default="127.0.0.1")
+@click.option("--port", default=0, type=int)
+def cmd_mcp_serve(repo: str, name: str, branch: str, host: str, port: int) -> None:
+    """Start the MCP server (internal — used by task launch)."""
+    from seekr_hatchery.mcp import create_app
+
+    app = create_app(Path(repo), name, branch)
+    app.run(transport="streamable-http", host=host, port=port)
 
 
 # ---------------------------------------------------------------------------

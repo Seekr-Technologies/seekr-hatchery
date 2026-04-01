@@ -493,6 +493,7 @@ def docker_mounts(
     # Must come after the worktree:rw mount so Linux VFS lets the file mount win.
     if worktree_git_ptr is not None:
         mounts.append(f"{worktree_git_ptr}:{container_worktree}/.git:rw")
+
     mounts.extend(_default_home_mounts())
     mounts.extend(backend.home_mounts(session_dir))
     mounts.extend(_construct_docker_mounts(config))
@@ -774,6 +775,8 @@ def launch_docker(
     agent_cmd: list[str],
     config: DockerConfig,
     runtime: Runtime = Runtime.DOCKER,
+    branch: str = "",
+    enable_mcp: bool = False,
     no_cache: bool = False,
 ) -> None:
     """Replace the current process with a Docker-sandboxed agent session.
@@ -818,24 +821,41 @@ def launch_docker(
     # (e.g. pre-seed trust or approval in agent-specific config files).
     backend.on_before_container_start(session_dir, proxy_token, container_worktree)
 
+    # Start MCP server so the agent can call spawn_task from inside the container.
+    mcp_proc = None
+    mcp_extra_mounts: list[str] = []
+    if enable_mcp:
+        import seekr_hatchery.mcp as mcp_mod
+
+        mcp_proc, mcp_port = mcp_mod.start_mcp_http(repo, name, branch)
+        mcp_url = f"http://host.docker.internal:{mcp_port}"
+        mcp_extra_mounts = backend.write_mcp_config(session_dir, mcp_url, container_worktree)
+
     build_docker_image(repo, worktree, name, backend, runtime=runtime, no_cache=no_cache)
     image = docker_image_name(repo, name)
     mounts = docker_mounts(repo, worktree, name, backend, session_dir, config, git_sentinels, worktree_git_ptr=git_ptr)
+    mounts.extend(mcp_extra_mounts)
     logger.debug(f"Launching {runtime.binary} container for task '{name}'")
-    return _run_container(
-        image,
-        mounts,
-        container_worktree,
-        tasks.CONTAINER_REPO_ROOT,
-        name,
-        mutator,
-        proxy_token,
-        agent_cmd,
-        backend=backend,
-        dind=config.dind,
-        runtime=runtime,
-        cap_add=config.cap_add,
-    )
+    try:
+        return _run_container(
+            image,
+            mounts,
+            container_worktree,
+            tasks.CONTAINER_REPO_ROOT,
+            name,
+            mutator,
+            proxy_token,
+            agent_cmd,
+            backend=backend,
+            dind=config.dind,
+            runtime=runtime,
+            cap_add=config.cap_add,
+        )
+    finally:
+        if mcp_proc is not None:
+            import seekr_hatchery.mcp as mcp_mod
+
+            mcp_mod.stop_mcp_http(mcp_proc)
 
 
 def launch_docker_no_worktree(
@@ -845,6 +865,8 @@ def launch_docker_no_worktree(
     agent_cmd: list[str],
     config: DockerConfig,
     runtime: Runtime = Runtime.DOCKER,
+    branch: str = "",
+    enable_mcp: bool = False,
     no_cache: bool = False,
 ) -> None:
     """Launch a Docker-sandboxed agent session with cwd mounted as /workspace.
@@ -869,24 +891,41 @@ def launch_docker_no_worktree(
 
     backend.on_before_container_start(session_dir, proxy_token, "/workspace")
 
+    # Start MCP server if enabled
+    mcp_proc = None
+    mcp_extra_mounts: list[str] = []
+    if enable_mcp:
+        import seekr_hatchery.mcp as mcp_mod
+
+        mcp_proc, mcp_port = mcp_mod.start_mcp_http(cwd, name, branch)
+        mcp_url = f"http://host.docker.internal:{mcp_port}"
+        mcp_extra_mounts = backend.write_mcp_config(session_dir, mcp_url, "/workspace")
+
     build_docker_image(cwd, cwd, name, backend, runtime=runtime, no_cache=no_cache)
     image = docker_image_name(cwd, name)
     mounts = docker_mounts_no_worktree(cwd, backend, session_dir, config=config)
+    mounts.extend(mcp_extra_mounts)
     logger.debug(f"Launching {runtime.binary} container for task '{name}' (no-worktree mode)")
-    return _run_container(
-        image,
-        mounts,
-        "/workspace",
-        "/workspace",
-        name,
-        mutator,
-        proxy_token,
-        agent_cmd,
-        backend=backend,
-        dind=config.dind,
-        runtime=runtime,
-        cap_add=config.cap_add,
-    )
+    try:
+        return _run_container(
+            image,
+            mounts,
+            "/workspace",
+            "/workspace",
+            name,
+            mutator,
+            proxy_token,
+            agent_cmd,
+            backend=backend,
+            dind=config.dind,
+            runtime=runtime,
+            cap_add=config.cap_add,
+        )
+    finally:
+        if mcp_proc is not None:
+            import seekr_hatchery.mcp as mcp_mod
+
+            mcp_mod.stop_mcp_http(mcp_proc)
 
 
 def launch_sandbox_shell(
