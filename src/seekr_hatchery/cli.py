@@ -275,6 +275,8 @@ def _launch_finalize(
     env_ctx = tasks.sandbox_context(name, branch, worktree, repo, main_branch, bool(runtime), no_worktree)
     system_prompt = tasks.SESSION_SYSTEM + "\n" + env_ctx
     config, features, container_workdir = _docker_context(runtime, None if no_worktree else worktree, repo)
+    if enable_mcp:
+        features.append("MCP")
     agent_cmd = backend.build_finalize_command(
         session_id, system_prompt, _WRAP_UP_PROMPT, docker=bool(runtime), workdir=container_workdir
     )
@@ -445,6 +447,8 @@ def _launch_new(
         system_prompt = tasks.SESSION_SYSTEM + "\n" + env_ctx
         initial_prompt = tasks.session_prompt(name, worktree)
     config, features, container_workdir = _docker_context(runtime, None if no_worktree else worktree, repo)
+    if enable_mcp:
+        features.append("MCP")
     agent_cmd = backend.build_new_command(
         session_id, system_prompt, initial_prompt, docker=bool(runtime), workdir=container_workdir
     )
@@ -523,6 +527,8 @@ def _launch_resume(
         system_prompt = tasks.SESSION_SYSTEM + "\n" + env_ctx
         initial_prompt = tasks.session_prompt(name, worktree)
     config, features, container_workdir = _docker_context(runtime, None if no_worktree else worktree, repo)
+    if enable_mcp:
+        features.append("MCP")
     agent_cmd = backend.build_resume_command(
         session_id, system_prompt, initial_prompt, docker=bool(runtime), workdir=container_workdir
     )
