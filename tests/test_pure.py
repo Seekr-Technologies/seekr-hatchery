@@ -313,14 +313,14 @@ class TestMigrate:
         assert "agent" not in result
 
     def test_other_fields_preserved(self):
-        meta = {"name": "test", "status": "in-progress", "branch": "hatchery/test"}
+        meta = {"name": "test", "status": "paused", "branch": "hatchery/test"}
         result = tasks.migrate(meta)
         assert result["name"] == "test"
-        assert result["status"] == "in-progress"
+        assert result["status"] == "paused"
         assert result["branch"] == "hatchery/test"
 
     def test_v0_without_schema_version_key(self):
-        meta = {"name": "test", "status": "in-progress"}
+        meta = {"name": "test", "status": "paused"}
         assert "schema_version" not in meta
         result = tasks.migrate(meta)
         assert result["schema_version"] == 1

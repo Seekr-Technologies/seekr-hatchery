@@ -200,6 +200,21 @@ def docker_image_name(repo: Path, name: str) -> str:
     return f"hatchery/{tasks.to_name(repo.name)}:{name}"
 
 
+def docker_container_name(repo: Path, name: str) -> str:
+    """Return a stable, human-readable Docker container name for a task."""
+    return f"hatchery-{tasks.to_name(repo.name)}-{name}"
+
+
+def _is_container_running(runtime: Runtime, container_name: str) -> bool:
+    """Return True if the named container is currently running."""
+    result = subprocess.run(
+        [runtime.binary, "inspect", "--format", "{{.State.Running}}", container_name],
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip() == "true"
+
+
 def docker_available() -> bool:
     """Return True if the Docker daemon is reachable."""
     logger.debug("Checking Docker availability")
@@ -653,6 +668,8 @@ def _run_container(
     _command_override: list[str] | None = None,
     _interactive: bool = False,
     cap_add: list[str] | None = None,
+    container_name: str | None = None,
+    on_detach: Callable[[], None] | None = None,
 ) -> subprocess.CompletedProcess[str] | None:
     """Assemble and execute the container run command for the given agent session.
 
@@ -750,20 +767,75 @@ def _run_container(
 
     logger.debug(f"Launching {runtime.binary} container image={image!r} name={name!r} workdir={workdir!r}")
     try:
-        result = subprocess.run(cmd)
+        if container_name is not None:
+            _run_container_background(cmd, runtime, container_name, image, on_detach)
+        else:
+            result = subprocess.run(cmd)
+            if result.returncode != 0:
+                ui.warn(f"{runtime.binary} container exited with code {result.returncode}")
+                if runtime == Runtime.PODMAN and result.returncode == 137:
+                    ui.info(
+                        "Hint: the container was killed (OOM). Try increasing the Podman machine memory:\n"
+                        "  podman machine stop\n"
+                        "  podman machine set --memory 8192\n"
+                        "  podman machine start"
+                    )
     finally:
         if proxy_server is not None:
             proxy.stop_proxy(proxy_server)
-    if result.returncode != 0:
-        ui.warn(f"{runtime.binary} container exited with code {result.returncode}")
-        if runtime == Runtime.PODMAN and result.returncode == 137:
-            ui.info(
-                "Hint: the container was killed (OOM). Try increasing the Podman machine memory:\n"
-                "  podman machine stop\n"
-                "  podman machine set --memory 8192\n"
-                "  podman machine start"
-            )
     return None
+
+
+def _run_container_background(
+    cmd: list[str],
+    runtime: Runtime,
+    container_name: str,
+    image: str,
+    on_detach: Callable[[], None] | None,
+) -> None:
+    """Start the container detached, attach to it, then monitor until it exits.
+
+    *cmd* is a fully-assembled ``docker run --rm -it … <image> <agent_cmd>``
+    command.  This function inserts ``-d --name <container_name>`` immediately
+    before the image so the container starts detached with a predictable name,
+    then immediately attaches via ``docker attach``.
+
+    ``docker run -d -it`` is valid: the TTY is allocated but the process is
+    detached.  ``docker attach`` then connects to that TTY.  The default detach
+    sequence is Ctrl+P, Ctrl+Q; Ctrl+C forwards SIGINT to the container.
+
+    If the user detaches while the container is still running, *on_detach* is
+    called and hatchery waits (``docker wait``) for the container to exit so
+    the host-side API proxy stays alive throughout.
+    """
+    # Insert -d and --name before the image, keeping all other flags intact.
+    image_idx = cmd.index(image)
+    run_cmd = cmd[:image_idx] + ["-d", "--name", container_name] + cmd[image_idx:]
+
+    logger.debug(f"Starting {runtime.binary} container detached: name={container_name!r}")
+    start = subprocess.run(run_cmd, capture_output=True, text=True)
+    if start.returncode != 0:
+        already_running = (
+            "already in use" in start.stderr or "already in use" in start.stdout
+        ) and _is_container_running(runtime, container_name)
+        if not already_running:
+            ui.error(f"{runtime.binary}: {start.stderr.strip() or start.stdout.strip()}")
+            return
+        logger.debug(f"Container {container_name!r} already running; attaching")
+
+    # Attach — blocks until Ctrl+P+Q detach or the container exits.
+    subprocess.run([runtime.binary, "attach", container_name])
+
+    # If the container is still alive after attach returns, enter monitor mode.
+    if _is_container_running(runtime, container_name):
+        if on_detach is not None:
+            on_detach()
+        ui.info(f"Container '{container_name}' running in the background.")
+        ui.info("Waiting for completion\u2026 (Ctrl-C to stop watching; proxy will shut down)")
+        try:
+            subprocess.run([runtime.binary, "wait", container_name])
+        except KeyboardInterrupt:
+            ui.warn("Stopped watching. Container may continue, but proxy will stop.")
 
 
 def launch_docker(
@@ -775,6 +847,7 @@ def launch_docker(
     config: DockerConfig,
     runtime: Runtime = Runtime.DOCKER,
     no_cache: bool = False,
+    on_detach: Callable[[], None] | None = None,
 ) -> None:
     """Replace the current process with a Docker-sandboxed agent session.
 
@@ -821,6 +894,7 @@ def launch_docker(
     build_docker_image(repo, worktree, name, backend, runtime=runtime, no_cache=no_cache)
     image = docker_image_name(repo, name)
     mounts = docker_mounts(repo, worktree, name, backend, session_dir, config, git_sentinels, worktree_git_ptr=git_ptr)
+    container = docker_container_name(repo, name)
     logger.debug(f"Launching {runtime.binary} container for task '{name}'")
     return _run_container(
         image,
@@ -835,6 +909,8 @@ def launch_docker(
         dind=config.dind,
         runtime=runtime,
         cap_add=config.cap_add,
+        container_name=container,
+        on_detach=on_detach,
     )
 
 
@@ -846,6 +922,7 @@ def launch_docker_no_worktree(
     config: DockerConfig,
     runtime: Runtime = Runtime.DOCKER,
     no_cache: bool = False,
+    on_detach: Callable[[], None] | None = None,
 ) -> None:
     """Launch a Docker-sandboxed agent session with cwd mounted as /workspace.
 
@@ -872,6 +949,7 @@ def launch_docker_no_worktree(
     build_docker_image(cwd, cwd, name, backend, runtime=runtime, no_cache=no_cache)
     image = docker_image_name(cwd, name)
     mounts = docker_mounts_no_worktree(cwd, backend, session_dir, config=config)
+    container = docker_container_name(cwd, name)
     logger.debug(f"Launching {runtime.binary} container for task '{name}' (no-worktree mode)")
     return _run_container(
         image,
@@ -886,6 +964,8 @@ def launch_docker_no_worktree(
         dind=config.dind,
         runtime=runtime,
         cap_add=config.cap_add,
+        container_name=container,
+        on_detach=on_detach,
     )
 
 

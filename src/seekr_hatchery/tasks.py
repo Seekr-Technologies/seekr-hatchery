@@ -356,7 +356,7 @@ def write_task_file(worktree: Path, name: str, branch: str, objective: str | Non
         body = f"""\
 # Task: {name}
 
-**Status**: in-progress
+**Status**: paused
 {branch_line}
 **Created**: {datetime.now().strftime("%Y-%m-%d %H:%M")}
 
@@ -382,7 +382,7 @@ and anything a future agent working in this repo should know.)*
         body = f"""\
 # Task: {name}
 
-**Status**: in-progress
+**Status**: paused
 {branch_line}
 **Created**: {datetime.now().strftime("%Y-%m-%d %H:%M")}
 

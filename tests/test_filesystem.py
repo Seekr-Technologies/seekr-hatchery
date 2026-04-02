@@ -53,7 +53,7 @@ class TestWriteTaskFile:
         worktree.mkdir()
         path = tasks.write_task_file(worktree, "my-task", "hatchery/my-task")
         content = path.read_text()
-        assert "in-progress" in content
+        assert "paused" in content
 
     def test_contains_task_heading(self, tmp_path):
         worktree = tmp_path / "worktree"

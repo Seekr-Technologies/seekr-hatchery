@@ -249,7 +249,7 @@ def _launch_finalize(
         session_id, system_prompt, _WRAP_UP_PROMPT, docker=bool(runtime), workdir=container_workdir
     )
     ui.banner(name, repo, branch=branch, sandbox=bool(runtime), worktree=not no_worktree, features=features)
-    _set_task_status(repo, name, "running")
+    _set_task_status(repo, name, "attached")
     try:
         if runtime:
             if no_worktree:
@@ -260,7 +260,7 @@ def _launch_finalize(
             os.chdir(worktree)
             subprocess.run(agent_cmd, env=_session_env(name, repo))
     finally:
-        _set_task_status(repo, name, "in-progress")
+        _set_task_status(repo, name, "paused")
     _post_exit_check(
         name, repo, worktree, branch=branch, sandbox=bool(runtime), no_worktree=no_worktree, features=features
     )
@@ -382,18 +382,21 @@ def _launch_new(
         ui.chat_banner(name, repo, features=features)
     else:
         ui.banner(name, repo, branch=branch, sandbox=bool(runtime), worktree=not no_worktree, features=features)
-    _set_task_status(repo, name, "running")
+    def _on_detach() -> None:
+        _set_task_status(repo, name, "background")
+
+    _set_task_status(repo, name, "attached")
     try:
         if runtime:
             if no_worktree:
-                docker.launch_docker_no_worktree(worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache)
+                docker.launch_docker_no_worktree(worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache, on_detach=_on_detach)
             else:
-                docker.launch_docker(repo, worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache)
+                docker.launch_docker(repo, worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache, on_detach=_on_detach)
         else:
             os.chdir(worktree)
             subprocess.run(agent_cmd, env=_session_env(name, repo))
     finally:
-        _set_task_status(repo, name, "in-progress")
+        _set_task_status(repo, name, "paused")
     if is_chat:
         _chat_post_exit(name, repo)
     else:
@@ -431,18 +434,21 @@ def _launch_resume(
         ui.chat_banner(name, repo, features=features)
     else:
         ui.banner(name, repo, branch=branch, sandbox=bool(runtime), worktree=not no_worktree, features=features)
-    _set_task_status(repo, name, "running")
+    def _on_detach() -> None:
+        _set_task_status(repo, name, "background")
+
+    _set_task_status(repo, name, "attached")
     try:
         if runtime:
             if no_worktree:
-                docker.launch_docker_no_worktree(worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache)
+                docker.launch_docker_no_worktree(worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache, on_detach=_on_detach)
             else:
-                docker.launch_docker(repo, worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache)
+                docker.launch_docker(repo, worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache, on_detach=_on_detach)
         else:
             os.chdir(worktree)
             subprocess.run(agent_cmd, env=_session_env(name, repo))
     finally:
-        _set_task_status(repo, name, "in-progress")
+        _set_task_status(repo, name, "paused")
     if is_chat:
         _chat_post_exit(name, repo)
     else:
@@ -476,7 +482,7 @@ def _chat_post_exit(name: str, repo: Path) -> None:
         tasks.save_task(meta)
         ui.success(f"Chat '{name}' marked complete.")
     else:
-        ui.info(f"Chat '{name}' left in-progress. Resume with: hatchery resume {name}")
+        ui.info(f"Chat '{name}' paused. Resume with: hatchery resume {name}")
 
 
 # ---------------------------------------------------------------------------
@@ -574,7 +580,7 @@ def cmd_new(
     db_path = tasks.task_db_path(repo, name)
     if db_path.exists():
         existing = json.loads(db_path.read_text())
-        if existing.get("status") in ("in-progress", "running"):
+        if existing.get("status") in ("paused", "attached", "background"):
             ui.error(f"task '{name}' is already in-progress. Choose a different name.")
             sys.exit(1)
         # completed/aborted → allow overwrite (git task file is permanent record)
@@ -636,7 +642,7 @@ def cmd_new(
             "branch": branch,
             "worktree": str(worktree),
             "repo": str(repo),
-            "status": "in-progress",
+            "status": "paused",
             "created": datetime.now().isoformat(),
             "session_id": session_id,  # internal only, not shown in normal output
             "no_worktree": no_worktree,
@@ -684,7 +690,7 @@ def cmd_chat(name: str | None, agent_name: str) -> None:
     db_path = tasks.task_db_path(repo, name)
     if db_path.exists():
         existing = json.loads(db_path.read_text())
-        if existing.get("status") in ("in-progress", "running"):
+        if existing.get("status") in ("paused", "attached", "background"):
             ui.error(f"chat '{name}' is already in-progress. Choose a different name or resume it.")
             sys.exit(1)
 
@@ -711,7 +717,7 @@ def cmd_chat(name: str | None, agent_name: str) -> None:
         "branch": "",
         "worktree": str(repo),
         "repo": str(repo),
-        "status": "in-progress",
+        "status": "paused",
         "created": datetime.now().isoformat(),
         "session_id": session_id,
         "no_worktree": True,
@@ -747,7 +753,7 @@ def cmd_resume(name: str, no_docker: bool, rebuild_sandbox: bool) -> None:
         if meta.get("status") == "archived":
             ui.info(f"Re-creating worktree for archived task '{name}'...")
             git.create_worktree(repo, meta["branch"], worktree, meta["branch"])
-            meta["status"] = "in-progress"
+            meta["status"] = "paused"
             tasks.save_task(meta)
             ui.success(f"Worktree restored: {worktree}")
         else:
@@ -765,11 +771,35 @@ def cmd_resume(name: str, no_docker: bool, rebuild_sandbox: bool) -> None:
             "starting a fresh session with the current task file as context."
         )
 
-    if meta.get("status") == "running":
-        ui.note(f"task '{name}' was marked as running — a previous session may have exited unexpectedly.")
+    if meta.get("status") == "attached":
+        ui.note(f"task '{name}' was marked as attached — a previous session may have exited unexpectedly.")
 
     is_chat = meta.get("type") == "chat"
     runtime = docker.resolve_runtime(repo, worktree, no_docker, backend=backend)
+
+    # If the task was running in the background, check whether its container is
+    # still alive.  If so, attach directly instead of launching a new session.
+    if meta.get("status") == "background" and runtime is not None:
+        container_name = docker.docker_container_name(repo, name)
+        if docker._is_container_running(runtime, container_name):
+            ui.info(f"Container '{container_name}' is still running — re-attaching…")
+            _set_task_status(repo, name, "attached")
+            try:
+                subprocess.run([runtime.binary, "attach", container_name])
+                if docker._is_container_running(runtime, container_name):
+                    _set_task_status(repo, name, "background")
+                    ui.info(f"Container '{container_name}' running in the background.")
+                    ui.info("Waiting for completion\u2026 (Ctrl-C to stop watching)")
+                    try:
+                        subprocess.run([runtime.binary, "wait", container_name])
+                    except KeyboardInterrupt:
+                        ui.warn("Stopped watching.")
+            finally:
+                _set_task_status(repo, name, "paused")
+            return
+        else:
+            ui.note(f"task '{name}': background container is no longer running — starting a new session.")
+
     main_branch = git.get_default_branch(repo)
     _launch_resume(repo, worktree, name, session_id, backend, runtime, meta["branch"], main_branch, no_worktree, is_chat=is_chat, no_cache=rebuild_sandbox)
 
@@ -875,7 +905,7 @@ def cmd_list(show_all: bool) -> None:
     archived_count = 0
     if not show_all:
         archived_count = sum(1 for t in task_list if t.get("status") == "archived")
-        task_list = [t for t in task_list if t.get("status") in ("in-progress", "running")]
+        task_list = [t for t in task_list if t.get("status") in ("paused", "attached", "background")]
 
     ui.task_list_table(task_list, archived_count, show_all)
 

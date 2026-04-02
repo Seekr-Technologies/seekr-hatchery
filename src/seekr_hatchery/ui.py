@@ -163,12 +163,14 @@ def task_list_table(task_list: list[dict], archived_count: int, show_all: bool) 
         created = t.get("created", "")[:10]
         status = t["status"]
         match status:
-            case "running":
+            case "attached":
                 status_str = click.style(f"{status:<{st_w}}", fg="cyan")
-            case "in-progress":
+            case "background":
+                status_str = click.style(f"{status:<{st_w}}", fg="yellow")
+            case "paused":
                 status_str = click.style(f"{status:<{st_w}}", fg="green")
             case "archived":
-                status_str = click.style(f"{status:<{st_w}}", fg="yellow")
+                status_str = click.style(f"{status:<{st_w}}", dim=True)
             case "complete":
                 status_str = click.style(f"{status:<{st_w}}", dim=True)
             case _:
