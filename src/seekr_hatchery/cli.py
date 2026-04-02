@@ -382,6 +382,7 @@ def _launch_new(
         ui.chat_banner(name, repo, features=features)
     else:
         ui.banner(name, repo, branch=branch, sandbox=bool(runtime), worktree=not no_worktree, features=features)
+
     def _on_detach() -> None:
         _set_task_status(repo, name, "background")
 
@@ -389,9 +390,13 @@ def _launch_new(
     try:
         if runtime:
             if no_worktree:
-                docker.launch_docker_no_worktree(worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache, on_detach=_on_detach)
+                docker.launch_docker_no_worktree(
+                    worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache, on_detach=_on_detach
+                )
             else:
-                docker.launch_docker(repo, worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache, on_detach=_on_detach)
+                docker.launch_docker(
+                    repo, worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache, on_detach=_on_detach
+                )
         else:
             os.chdir(worktree)
             subprocess.run(agent_cmd, env=_session_env(name, repo))
@@ -434,6 +439,7 @@ def _launch_resume(
         ui.chat_banner(name, repo, features=features)
     else:
         ui.banner(name, repo, branch=branch, sandbox=bool(runtime), worktree=not no_worktree, features=features)
+
     def _on_detach() -> None:
         _set_task_status(repo, name, "background")
 
@@ -441,9 +447,13 @@ def _launch_resume(
     try:
         if runtime:
             if no_worktree:
-                docker.launch_docker_no_worktree(worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache, on_detach=_on_detach)
+                docker.launch_docker_no_worktree(
+                    worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache, on_detach=_on_detach
+                )
             else:
-                docker.launch_docker(repo, worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache, on_detach=_on_detach)
+                docker.launch_docker(
+                    repo, worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache, on_detach=_on_detach
+                )
         else:
             os.chdir(worktree)
             subprocess.run(agent_cmd, env=_session_env(name, repo))
@@ -558,7 +568,14 @@ def cli(log_level: str, log_file: str | None) -> None:
     ),
 )
 def cmd_new(
-    name: str, base: str, no_docker: bool, no_worktree: bool, editor: bool | None, agent_name: str, rebuild_sandbox: bool, no_commit_docker: bool
+    name: str,
+    base: str,
+    no_docker: bool,
+    no_worktree: bool,
+    editor: bool | None,
+    agent_name: str,
+    rebuild_sandbox: bool,
+    no_commit_docker: bool,
 ) -> None:
     """Start a new task."""
     ui.hatchery_header(_version)
@@ -610,7 +627,12 @@ def cmd_new(
             if df_created or dc_created:
                 ui.info("  Committing...")
                 tasks.run(
-                    ["git", "add", str(docker.dockerfile_path(worktree, backend).relative_to(worktree)), str(tasks.DOCKER_CONFIG)],
+                    [
+                        "git",
+                        "add",
+                        str(docker.dockerfile_path(worktree, backend).relative_to(worktree)),
+                        str(tasks.DOCKER_CONFIG),
+                    ],
                     cwd=worktree,
                 )
                 tasks.run(
@@ -652,7 +674,18 @@ def cmd_new(
 
         runtime = docker.resolve_runtime(repo, worktree, no_docker, backend=backend)
         main_branch = git.get_default_branch(repo)
-        _launch_new(repo, worktree, name, session_id, backend, runtime, branch, main_branch, no_worktree, no_cache=rebuild_sandbox)
+        _launch_new(
+            repo,
+            worktree,
+            name,
+            session_id,
+            backend,
+            runtime,
+            branch,
+            main_branch,
+            no_worktree,
+            no_cache=rebuild_sandbox,
+        )
     except KeyboardInterrupt:
         if not no_worktree:
             git.remove_worktree(repo, worktree)
@@ -801,7 +834,19 @@ def cmd_resume(name: str, no_docker: bool, rebuild_sandbox: bool) -> None:
             ui.note(f"task '{name}': background container is no longer running — starting a new session.")
 
     main_branch = git.get_default_branch(repo)
-    _launch_resume(repo, worktree, name, session_id, backend, runtime, meta["branch"], main_branch, no_worktree, is_chat=is_chat, no_cache=rebuild_sandbox)
+    _launch_resume(
+        repo,
+        worktree,
+        name,
+        session_id,
+        backend,
+        runtime,
+        meta["branch"],
+        main_branch,
+        no_worktree,
+        is_chat=is_chat,
+        no_cache=rebuild_sandbox,
+    )
 
 
 @cli.command("sandbox")

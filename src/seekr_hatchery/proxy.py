@@ -104,10 +104,7 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
         # ── 1. Build outgoing headers ─────────────────────────────────────────
         # Strip hop-by-hop headers; delegate auth stripping + key injection to
         # the backend mutator.
-        pre_auth_headers: dict[str, str] = {
-            k: v for k, v in self.headers.items()
-            if k.lower() not in _HOP_BY_HOP
-        }
+        pre_auth_headers: dict[str, str] = {k: v for k, v in self.headers.items() if k.lower() not in _HOP_BY_HOP}
 
         # Backend owns all auth header logic.
         out_headers = self.header_mutator(pre_auth_headers)

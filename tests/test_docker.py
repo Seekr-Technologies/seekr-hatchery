@@ -236,10 +236,12 @@ class TestResolveRuntime:
 
 def _make_mutator(key: str = "real-secret-key"):
     """Return a simple header mutator for tests."""
+
     def _mutate(headers):
         out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")}
         out["Authorization"] = f"Bearer {key}"
         return out
+
     return _mutate
 
 
@@ -725,9 +727,7 @@ class TestRunContainerBackground:
             self._make_cmd(), docker.Runtime.DOCKER, "hatchery-proj-task", "test-image", None
         )
 
-        assert any(
-            cmd[:3] == ["docker", "attach", "hatchery-proj-task"] for cmd in calls
-        )
+        assert any(cmd[:3] == ["docker", "attach", "hatchery-proj-task"] for cmd in calls)
 
     def test_calls_on_detach_when_container_still_running(self, monkeypatch):
         calls: list[list[str]] = []
@@ -754,7 +754,10 @@ class TestRunContainerBackground:
         monkeypatch.setattr(docker, "_is_container_running", _is_running)
 
         docker._run_container_background(
-            self._make_cmd(), docker.Runtime.DOCKER, "hatchery-proj-task", "test-image",
+            self._make_cmd(),
+            docker.Runtime.DOCKER,
+            "hatchery-proj-task",
+            "test-image",
             on_detach=lambda: detached.__setitem__(0, True),
         )
 
@@ -776,7 +779,10 @@ class TestRunContainerBackground:
 
         detached = [False]
         docker._run_container_background(
-            self._make_cmd(), docker.Runtime.DOCKER, "hatchery-proj-task", "test-image",
+            self._make_cmd(),
+            docker.Runtime.DOCKER,
+            "hatchery-proj-task",
+            "test-image",
             on_detach=lambda: detached.__setitem__(0, True),
         )
         assert detached[0] is False
@@ -808,9 +814,7 @@ class TestRunContainerBackground:
         )
 
         # Should still have attached
-        assert any(
-            cmd[:2] == ["docker", "attach"] for cmd in calls
-        )
+        assert any(cmd[:2] == ["docker", "attach"] for cmd in calls)
 
 
 # ---------------------------------------------------------------------------

@@ -984,11 +984,7 @@ def launch_sandbox_shell(
     """
     build_docker_image(repo, repo, "sandbox", backend, runtime=runtime, no_cache=no_cache)
     image = docker_image_name(repo, "sandbox")
-    mounts = (
-        [f"{repo}:{tasks.CONTAINER_REPO_ROOT}:rw"]
-        + _default_home_mounts()
-        + _construct_docker_mounts(config)
-    )
+    mounts = [f"{repo}:{tasks.CONTAINER_REPO_ROOT}:rw"] + _default_home_mounts() + _construct_docker_mounts(config)
     _run_container(
         image=image,
         mounts=mounts,
