@@ -17,13 +17,13 @@ _REPO = Path("/my/repo")
 
 class TestSaveTask:
     def test_creates_json_file(self, fake_tasks_db):
-        meta = {"name": "my-task", "repo": str(_REPO), "status": "in-progress"}
+        meta = {"name": "my-task", "repo": str(_REPO), "status": "paused"}
         tasks.save_task(meta)
         path = fake_tasks_db / tasks.repo_id(_REPO) / "my-task" / "meta.json"
         assert path.exists()
 
     def test_stamps_schema_version(self, fake_tasks_db):
-        meta = {"name": "my-task", "repo": str(_REPO), "status": "in-progress"}
+        meta = {"name": "my-task", "repo": str(_REPO), "status": "paused"}
         tasks.save_task(meta)
         path = fake_tasks_db / tasks.repo_id(_REPO) / "my-task" / "meta.json"
         saved = json.loads(path.read_text())
@@ -32,19 +32,19 @@ class TestSaveTask:
     def test_creates_parent_dirs(self, tmp_path, monkeypatch):
         db = tmp_path / "deep" / "nested" / "tasks"
         monkeypatch.setattr(tasks, "TASKS_DB_DIR", db)
-        meta = {"name": "task1", "repo": str(_REPO), "status": "in-progress"}
+        meta = {"name": "task1", "repo": str(_REPO), "status": "paused"}
         tasks.save_task(meta)
         assert (db / tasks.repo_id(_REPO) / "task1" / "meta.json").exists()
 
     def test_file_is_valid_json(self, fake_tasks_db):
-        meta = {"name": "test", "repo": str(_REPO), "status": "in-progress", "branch": "hatchery/test"}
+        meta = {"name": "test", "repo": str(_REPO), "status": "paused", "branch": "hatchery/test"}
         tasks.save_task(meta)
         path = fake_tasks_db / tasks.repo_id(_REPO) / "test" / "meta.json"
         loaded = json.loads(path.read_text())
         assert isinstance(loaded, dict)
 
     def test_overwrites_on_second_save(self, fake_tasks_db):
-        meta = {"name": "task", "repo": str(_REPO), "status": "in-progress"}
+        meta = {"name": "task", "repo": str(_REPO), "status": "paused"}
         tasks.save_task(meta)
         meta["status"] = "complete"
         tasks.save_task(meta)
@@ -58,7 +58,7 @@ class TestSaveTask:
             "branch": "hatchery/full-task",
             "worktree": "/some/path",
             "repo": "/my/repo",
-            "status": "in-progress",
+            "status": "paused",
             "created": "2026-01-01T00:00:00",
             "session_id": "uuid-1234",
         }
@@ -79,13 +79,13 @@ class TestLoadTask:
         meta = {
             "name": "round-trip",
             "repo": str(_REPO),
-            "status": "in-progress",
+            "status": "paused",
             "branch": "hatchery/round-trip",
         }
         tasks.save_task(meta)
         loaded = tasks.load_task(_REPO, "round-trip")
         assert loaded["name"] == "round-trip"
-        assert loaded["status"] == "in-progress"
+        assert loaded["status"] == "paused"
 
     def test_exits_when_not_found(self, fake_tasks_db):
         with pytest.raises(SystemExit) as exc_info:
@@ -106,7 +106,7 @@ class TestLoadTask:
         loaded = tasks.load_task(Path("/some/repo"), "my-task")
         assert loaded["name"] == "my-task"
         assert loaded["branch"] == "hatchery/my-task"
-        assert loaded["status"] == "in-progress"
+        assert loaded["status"] == "paused"
 
 
 # ---------------------------------------------------------------------------
@@ -133,14 +133,14 @@ class TestRepoTasksForCurrentRepo:
         task1 = {
             "name": "task1",
             "repo": "/my/repo",
-            "status": "in-progress",
+            "status": "paused",
             "created": "2026-01-01T10:00:00",
         }
         # Task for a different repo (scoped)
         task2 = {
             "name": "task2",
             "repo": "/other/repo",
-            "status": "in-progress",
+            "status": "paused",
             "created": "2026-01-01T09:00:00",
         }
         _write_scoped(fake_tasks_db, task1)
@@ -221,7 +221,7 @@ class TestMigrateDb:
         db = fake_hatchery_dir / "tasks"
         repo_subdir = db / "my-repo-abcd1234"
         repo_subdir.mkdir()
-        task_data = {"name": "my-task", "repo": "/my/repo", "status": "in-progress"}
+        task_data = {"name": "my-task", "repo": "/my/repo", "status": "paused"}
         scoped_file = repo_subdir / "my-task.json"
         scoped_file.write_text(json.dumps(task_data))
 

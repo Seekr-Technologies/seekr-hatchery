@@ -17,19 +17,23 @@ _TOKEN = "test-proxy-token"
 
 def _make_api_key_mutator(key: str):
     """Return a header mutator that injects x-api-key."""
+
     def _mutate(headers, **kwargs):
         out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")}
         out["x-api-key"] = key
         return out
+
     return _mutate
 
 
 def _make_bearer_mutator(key: str):
     """Return a header mutator that injects Authorization: Bearer."""
+
     def _mutate(headers, **kwargs):
         out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")}
         out["Authorization"] = f"Bearer {key}"
         return out
+
     return _mutate
 
 
@@ -272,9 +276,7 @@ class TestProxyOpenAIFormat:
                 pass
 
         monkeypatch.setattr(http.client, "HTTPSConnection", _CapturingConn)
-        server, _ = proxy.start_proxy(
-            _make_bearer_mutator("my-openai-key"), _TOKEN, target_host="api.openai.com"
-        )
+        server, _ = proxy.start_proxy(_make_bearer_mutator("my-openai-key"), _TOKEN, target_host="api.openai.com")
         port = server.server_address[1]
         _wait_for_port(port)
 
@@ -309,9 +311,7 @@ class TestProxyOpenAIFormat:
                 pass
 
         monkeypatch.setattr(http.client, "HTTPSConnection", _RecordingConn)
-        server, _ = proxy.start_proxy(
-            _make_bearer_mutator("my-openai-key"), _TOKEN, target_host="api.openai.com"
-        )
+        server, _ = proxy.start_proxy(_make_bearer_mutator("my-openai-key"), _TOKEN, target_host="api.openai.com")
         port = server.server_address[1]
         _wait_for_port(port)
 

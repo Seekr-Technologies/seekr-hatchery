@@ -89,6 +89,7 @@ Your workflow:
    This file will be merged into main as the permanent record of this task.
 """
 
+
 def sandbox_context(
     name: str,
     branch: str,
@@ -356,7 +357,7 @@ def write_task_file(worktree: Path, name: str, branch: str, objective: str | Non
         body = f"""\
 # Task: {name}
 
-**Status**: in-progress
+**Status**: paused
 {branch_line}
 **Created**: {datetime.now().strftime("%Y-%m-%d %H:%M")}
 
@@ -382,7 +383,7 @@ and anything a future agent working in this repo should know.)*
         body = f"""\
 # Task: {name}
 
-**Status**: in-progress
+**Status**: paused
 {branch_line}
 **Created**: {datetime.now().strftime("%Y-%m-%d %H:%M")}
 

@@ -93,7 +93,6 @@ class TestHelp:
 def _new_patches():
     """Common context managers for cmd_new tests."""
 
-
     return [
         patch("seekr_hatchery.cli.git.git_root_or_cwd"),
         patch("seekr_hatchery.cli.tasks.ensure_gitignore"),
@@ -115,7 +114,6 @@ def _new_patches():
 
 class TestCliNew:
     def _setup_mocks(self, mocks):
-
 
         (
             mock_root,
@@ -143,7 +141,6 @@ class TestCliNew:
 
     def test_new_dispatches_with_name(self):
         runner = CliRunner()
-    
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -155,7 +152,6 @@ class TestCliNew:
 
     def test_new_default_base_is_head(self):
         runner = CliRunner()
-    
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -169,7 +165,6 @@ class TestCliNew:
 
     def test_new_with_from_flag(self):
         runner = CliRunner()
-    
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -181,7 +176,6 @@ class TestCliNew:
 
     def test_new_with_no_docker(self):
         runner = CliRunner()
-    
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -194,7 +188,6 @@ class TestCliNew:
 
     def test_no_editor_skips_open_for_editing(self):
         runner = CliRunner()
-    
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -215,7 +208,6 @@ class TestCliNew:
                 _,
                 mock_prompt,
             ) = mocks
-    
 
             mock_root.return_value = (Path("/repo"), True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
@@ -236,7 +228,6 @@ class TestCliNew:
     def test_default_uses_prompt_not_editor(self):
         """With no --editor/--no-editor flag, default config (open_editor=False) uses prompt."""
         runner = CliRunner()
-    
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -257,7 +248,6 @@ class TestCliNew:
                 _,
                 mock_prompt,
             ) = mocks
-    
 
             mock_root.return_value = (Path("/repo"), True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
@@ -273,8 +263,6 @@ class TestCliNew:
     def test_editor_flag_opens_editor(self, tmp_path):
         """--editor flag explicitly opens the editor."""
         runner = CliRunner()
-    
-
 
         # Create a real task file; open_for_editing mock will modify it
         task_file = tmp_path / "task.md"
@@ -316,8 +304,6 @@ class TestCliNew:
     def test_editor_unchanged_cancels(self, tmp_path):
         """When editor mode produces no changes, task is cancelled."""
         runner = CliRunner()
-    
-
 
         # Create a real task file so read_text() returns consistent content
         task_file = tmp_path / "task.md"
@@ -361,8 +347,6 @@ class TestCliNew:
     def test_dockerfile_checked_against_worktree_not_repo(self):
         """ensure_dockerfile/config are called with the worktree path, not repo root."""
         runner = CliRunner()
-    
-
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -399,8 +383,6 @@ class TestCliNew:
     def test_keyboard_interrupt_cleans_up_worktree(self):
         """Ctrl-C after worktree creation removes the worktree and branch."""
         runner = CliRunner()
-    
-
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -438,8 +420,6 @@ class TestCliNew:
     def test_keyboard_interrupt_no_worktree_skips_cleanup(self):
         """Ctrl-C with --no-worktree does not attempt to remove any worktree."""
         runner = CliRunner()
-    
-
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -483,8 +463,6 @@ class TestCliNew:
     def test_no_commit_docker_generates_to_repo_root_first(self):
         """--no-commit-docker calls ensure_dockerfile with repo path before worktree path."""
         runner = CliRunner()
-    
-
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -530,8 +508,6 @@ class TestCliNew:
     def test_no_commit_docker_skips_dockerfile_commit(self):
         """--no-commit-docker does not git-commit the Dockerfile even if ensure returns True."""
         runner = CliRunner()
-    
-
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -565,7 +541,8 @@ class TestCliNew:
 
         assert result.exit_code == 0
         dockerfile_commits = [
-            c for c in mock_run.call_args_list
+            c
+            for c in mock_run.call_args_list
             if c[0][0] == ["git", "commit", "-m", "chore: add hatchery Docker configuration"]
         ]
         assert len(dockerfile_commits) == 0
@@ -573,8 +550,6 @@ class TestCliNew:
     def test_no_commit_docker_false_default_commits_when_created(self):
         """Without the flag, a newly generated Dockerfile is committed as normal."""
         runner = CliRunner()
-    
-
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -609,7 +584,8 @@ class TestCliNew:
         # ensure_dockerfile called exactly once (no --no-commit-docker)
         assert mock_ensure_df.call_count == 1
         dockerfile_commits = [
-            c for c in mock_run.call_args_list
+            c
+            for c in mock_run.call_args_list
             if c[0][0] == ["git", "commit", "-m", "chore: add hatchery Docker configuration"]
         ]
         assert len(dockerfile_commits) == 1
@@ -737,8 +713,6 @@ class TestCliResume:
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch_resume") as mock_launch,
         ):
-    
-
             worktree = MagicMock(spec=Path)
             worktree.exists.return_value = True
             mock_load.return_value = {
@@ -765,8 +739,6 @@ class TestCliResume:
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch_resume"),
         ):
-    
-
             worktree = MagicMock(spec=Path)
             worktree.exists.return_value = True
             mock_load.return_value = {
@@ -881,7 +853,7 @@ class TestCmdList:
         task_list = [
             {
                 "name": "my-task",
-                "status": "in-progress",
+                "status": "paused",
                 "created": "2026-01-15T10:00:00",
             }
         ]
@@ -894,7 +866,7 @@ class TestCmdList:
             result = runner.invoke(cli, ["list"])
         assert result.exit_code == 0
         assert "my-task" in result.output
-        assert "in-progress" in result.output
+        assert "paused" in result.output
         assert "NAME" in result.output
 
     def test_created_truncated_to_10_chars(self, monkeypatch, fake_tasks_db):
@@ -902,7 +874,7 @@ class TestCmdList:
         task_list = [
             {
                 "name": "my-task",
-                "status": "in-progress",
+                "status": "paused",
                 "created": "2026-01-15T10:00:00",
             }
         ]
@@ -919,7 +891,7 @@ class TestCmdList:
     def test_multiple_tasks_all_flag(self, monkeypatch, fake_tasks_db):
         runner = CliRunner()
         task_list = [
-            {"name": "task-one", "status": "in-progress", "created": "2026-01-02"},
+            {"name": "task-one", "status": "paused", "created": "2026-01-02"},
             {"name": "task-two", "status": "complete", "created": "2026-01-01"},
         ]
         with (
@@ -935,7 +907,7 @@ class TestCmdList:
     def test_default_filters_to_in_progress(self, monkeypatch, fake_tasks_db):
         runner = CliRunner()
         task_list = [
-            {"name": "task-one", "status": "in-progress", "created": "2026-01-02"},
+            {"name": "task-one", "status": "paused", "created": "2026-01-02"},
             {"name": "task-two", "status": "complete", "created": "2026-01-01"},
         ]
         with (
@@ -950,7 +922,7 @@ class TestCmdList:
 
     def test_columns_present_in_header(self, monkeypatch, fake_tasks_db):
         runner = CliRunner()
-        task_list = [{"name": "t", "status": "in-progress", "created": "2026-01-01"}]
+        task_list = [{"name": "t", "status": "paused", "created": "2026-01-01"}]
         with (
             patch("seekr_hatchery.cli.git.git_root_or_cwd") as mock_root,
             patch("seekr_hatchery.cli.tasks.repo_tasks_for_current_repo") as mock_tasks,
@@ -978,7 +950,7 @@ class TestCmdStatus:
             "branch": "hatchery/test-task",
             "worktree": str(worktree_path or "/nonexistent/worktree"),
             "repo": str(_STATUS_REPO),
-            "status": "in-progress",
+            "status": "paused",
             "created": "2026-01-15T10:30:00",
             "session_id": "session-uuid-abc",
         }
@@ -1001,7 +973,7 @@ class TestCmdStatus:
         runner = CliRunner()
         self._make_task_meta(fake_tasks_db)
         result = self._invoke(runner, ["status", "test-task"])
-        assert "in-progress" in result.output
+        assert "paused" in result.output
 
     def test_shows_branch(self, fake_tasks_db):
         runner = CliRunner()
@@ -1073,7 +1045,6 @@ class TestCliNoWorktree:
 
     def _setup_no_worktree_mocks(self, mocks, in_repo: bool = True):
 
-
         (
             mock_root,
             _,
@@ -1100,7 +1071,6 @@ class TestCliNoWorktree:
 
     def test_no_worktree_flag_skips_create_worktree(self):
         runner = CliRunner()
-    
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -1112,7 +1082,6 @@ class TestCliNoWorktree:
 
     def test_no_worktree_flag_stores_no_worktree_in_metadata(self):
         runner = CliRunner()
-    
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -1125,8 +1094,6 @@ class TestCliNoWorktree:
 
     def test_no_worktree_with_dockerfile_uses_launch_docker_no_worktree(self):
         runner = CliRunner()
-    
-    
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -1148,7 +1115,6 @@ class TestCliNoWorktree:
     def test_auto_enable_when_not_in_repo(self):
         """When git_root_or_cwd returns in_repo=False, no_worktree is auto-enabled."""
         runner = CliRunner()
-    
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -1165,7 +1131,6 @@ class TestCliNoWorktree:
 
     def test_auto_enable_prints_note_when_not_in_repo(self):
         runner = CliRunner()
-    
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -1195,8 +1160,6 @@ class TestCliNoWorktree:
             }
             # Even though Path("/some/dir") may not exist, no error should occur
             with patch("seekr_hatchery.cli.Path") as mock_path_cls:
-        
-
                 mock_wt = MagicMock(spec=Path)
                 mock_wt.exists.return_value = False  # worktree doesn't exist
                 mock_path_cls.return_value = mock_wt
@@ -1288,7 +1251,7 @@ class TestLaunchHooks:
             patch("seekr_hatchery.cli.subprocess.run"),
             patch(
                 "seekr_hatchery.cli.tasks.load_task",
-                return_value={"name": "t", "status": "in-progress", "branch": "b"},
+                return_value={"name": "t", "status": "paused", "branch": "b"},
             ),
             patch("seekr_hatchery.cli.tasks.save_task"),
             patch("seekr_hatchery.cli._post_exit_check"),
@@ -1296,7 +1259,6 @@ class TestLaunchHooks:
         ]
 
     def test_launch_new_hook_order(self, spy_backend):
-    
 
         with ExitStack() as stack:
             for p in self._patches():
@@ -1324,7 +1286,6 @@ class TestLaunchHooks:
         assert workdir == ""
 
     def test_launch_resume_hook_order(self, spy_backend):
-    
 
         with ExitStack() as stack:
             for p in self._patches():
@@ -1350,7 +1311,6 @@ class TestLaunchHooks:
         assert workdir == ""
 
     def test_launch_finalize_no_hooks(self, spy_backend):
-    
 
         with ExitStack() as stack:
             for p in self._patches():
@@ -1383,7 +1343,7 @@ class TestLaunchHooks:
 class TestRunningState:
     def test_running_task_appears_in_default_list(self, monkeypatch, fake_tasks_db):
         runner = CliRunner()
-        task_list = [{"name": "active-task", "status": "running", "created": "2026-01-15T10:00:00"}]
+        task_list = [{"name": "active-task", "status": "attached", "created": "2026-01-15T10:00:00"}]
         with (
             patch("seekr_hatchery.cli.git.git_root_or_cwd") as mock_root,
             patch("seekr_hatchery.cli.tasks.repo_tasks_for_current_repo") as mock_tasks,
@@ -1393,11 +1353,11 @@ class TestRunningState:
             result = runner.invoke(cli, ["list"])
         assert result.exit_code == 0
         assert "active-task" in result.output
-        assert "running" in result.output
+        assert "attached" in result.output
 
     def test_in_progress_still_appears_in_default_list(self, monkeypatch, fake_tasks_db):
         runner = CliRunner()
-        task_list = [{"name": "paused-task", "status": "in-progress", "created": "2026-01-15T10:00:00"}]
+        task_list = [{"name": "paused-task", "status": "paused", "created": "2026-01-15T10:00:00"}]
         with (
             patch("seekr_hatchery.cli.git.git_root_or_cwd") as mock_root,
             patch("seekr_hatchery.cli.tasks.repo_tasks_for_current_repo") as mock_tasks,
@@ -1410,8 +1370,6 @@ class TestRunningState:
 
     def test_running_state_blocked_by_new_duplicate_check(self):
         runner = CliRunner()
-    
-
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -1420,18 +1378,46 @@ class TestRunningState:
             mock_root.return_value = (Path("/repo"), True)
             db_mock = MagicMock()
             db_mock.exists.return_value = True
-            db_mock.read_text.return_value = json.dumps({"status": "running"})
+            db_mock.read_text.return_value = json.dumps({"status": "attached"})
             mock_db_path.return_value = db_mock
             result = runner.invoke(cli, ["new", "my-task"])
 
         assert result.exit_code == 1
 
+    def test_background_task_appears_in_default_list(self, monkeypatch, fake_tasks_db):
+        runner = CliRunner()
+        task_list = [{"name": "bg-task", "status": "background", "created": "2026-01-15T10:00:00"}]
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd") as mock_root,
+            patch("seekr_hatchery.cli.tasks.repo_tasks_for_current_repo") as mock_tasks,
+        ):
+            mock_root.return_value = (Path("/my/repo"), True)
+            mock_tasks.return_value = task_list
+            result = runner.invoke(cli, ["list"])
+        assert result.exit_code == 0
+        assert "bg-task" in result.output
+        assert "background" in result.output
+
+    def test_background_state_blocked_by_new_duplicate_check(self):
+        runner = CliRunner()
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in _new_patches()]
+            mock_root = mocks[0]
+            mock_db_path = mocks[5]
+            mock_root.return_value = (Path("/repo"), True)
+            db_mock = MagicMock()
+            db_mock.exists.return_value = True
+            db_mock.read_text.return_value = json.dumps({"status": "background"})
+            mock_db_path.return_value = db_mock
+            result = runner.invoke(cli, ["new", "my-task"])
+        assert result.exit_code == 1
+
     def test_launch_new_sets_running_then_restores_in_progress(self, spy_backend):
-        """After _launch_new exits, status should go running then in-progress."""
+        """After _launch_new exits, status should go attached then paused."""
         statuses_saved: list[str] = []
 
         def fake_load_task(repo: Path, name: str) -> dict:
-            return {"name": name, "status": "in-progress", "branch": "hatchery/x"}
+            return {"name": name, "status": "paused", "branch": "hatchery/x"}
 
         def fake_save_task(meta: dict) -> None:
             statuses_saved.append(meta["status"])
@@ -1458,7 +1444,54 @@ class TestRunningState:
                 main_branch="main",
             )
 
-        assert statuses_saved == ["running", "in-progress"]
+        assert statuses_saved == ["attached", "paused"]
+
+    def test_on_detach_sets_background_status(self, spy_backend):
+        """When on_detach is called, status transitions to background."""
+        statuses_saved: list[str] = []
+        captured_on_detach: list = []
+
+        def fake_load_task(repo: Path, name: str) -> dict:
+            return {"name": name, "status": "paused", "branch": "hatchery/x"}
+
+        def fake_save_task(meta: dict) -> None:
+            statuses_saved.append(meta["status"])
+
+        def fake_launch_docker(
+            repo, worktree, name, backend, agent_cmd, config, runtime, no_cache=False, on_detach=None
+        ):
+            # Simulate user detach: call on_detach, then return normally
+            if on_detach is not None:
+                captured_on_detach.append(on_detach)
+                on_detach()
+
+        import seekr_hatchery.docker as docker_mod
+
+        with (
+            patch("seekr_hatchery.cli.tasks.task_session_dir", return_value=Path("/session")),
+            patch("seekr_hatchery.cli.tasks.sandbox_context", return_value="ctx"),
+            patch("seekr_hatchery.cli.tasks.SESSION_SYSTEM", "sys"),
+            patch("seekr_hatchery.cli.tasks.session_prompt", return_value="prompt"),
+            patch("seekr_hatchery.cli.docker.launch_docker", side_effect=fake_launch_docker),
+            patch("seekr_hatchery.cli.tasks.load_task", side_effect=fake_load_task),
+            patch("seekr_hatchery.cli.tasks.save_task", side_effect=fake_save_task),
+            patch("seekr_hatchery.cli._post_exit_check"),
+            patch("seekr_hatchery.cli._docker_context", return_value=(MagicMock(), [], "/workdir")),
+        ):
+            _launch_new(
+                repo=Path("/repo"),
+                worktree=Path("/worktree"),
+                name="my-task",
+                session_id="sid-123",
+                backend=spy_backend,
+                runtime=docker_mod.Runtime.DOCKER,
+                branch="hatchery/my-task",
+                main_branch="main",
+            )
+
+        # on_detach was called → background appears in the status sequence
+        assert "background" in statuses_saved
+        assert statuses_saved[-1] == "paused"  # always ends paused
 
 
 # ---------------------------------------------------------------------------
@@ -1555,7 +1588,7 @@ class TestLaunchNewChat:
             patch("seekr_hatchery.cli.subprocess.run"),
             patch(
                 "seekr_hatchery.cli.tasks.load_task",
-                return_value={"name": "t", "status": "in-progress", "branch": ""},
+                return_value={"name": "t", "status": "paused", "branch": ""},
             ),
             patch("seekr_hatchery.cli.tasks.save_task"),
             patch("seekr_hatchery.cli._post_exit_check"),
@@ -1564,7 +1597,6 @@ class TestLaunchNewChat:
         ]
 
     def test_launch_new_chat_empty_system_prompt(self, spy_backend):
-    
 
         with ExitStack() as stack:
             for p in self._patches():
@@ -1587,7 +1619,6 @@ class TestLaunchNewChat:
         assert system_prompt == ""
 
     def test_launch_new_chat_empty_initial_prompt(self, spy_backend):
-    
 
         with ExitStack() as stack:
             for p in self._patches():
@@ -1610,7 +1641,6 @@ class TestLaunchNewChat:
         assert initial_prompt == ""
 
     def test_launch_new_chat_calls_chat_post_exit(self, spy_backend):
-    
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in self._patches()]
@@ -1634,7 +1664,6 @@ class TestLaunchNewChat:
 
     def test_launch_new_task_calls_post_exit_check(self, spy_backend):
         """Non-chat launch should still use _post_exit_check."""
-    
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in self._patches()]
@@ -1667,7 +1696,7 @@ class TestLaunchResumeChat:
             patch("seekr_hatchery.cli.subprocess.run"),
             patch(
                 "seekr_hatchery.cli.tasks.load_task",
-                return_value={"name": "t", "status": "in-progress", "branch": ""},
+                return_value={"name": "t", "status": "paused", "branch": ""},
             ),
             patch("seekr_hatchery.cli.tasks.save_task"),
             patch("seekr_hatchery.cli._post_exit_check"),
@@ -1676,7 +1705,6 @@ class TestLaunchResumeChat:
         ]
 
     def test_launch_resume_chat_empty_system_prompt(self, spy_backend):
-    
 
         with ExitStack() as stack:
             for p in self._patches():
@@ -1699,7 +1727,6 @@ class TestLaunchResumeChat:
         assert system_prompt == ""
 
     def test_launch_resume_chat_calls_chat_post_exit(self, spy_backend):
-    
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in self._patches()]
@@ -1747,8 +1774,6 @@ class TestCmdChatDispatch:
             patch("seekr_hatchery.cli._launch_new"),
             patch("seekr_hatchery.cli.tasks.task_db_path") as mock_db_path,
         ):
-    
-
             mock_db_path.return_value = MagicMock(exists=lambda: False)
             result = runner.invoke(cli, ["chat"])
 
@@ -1772,8 +1797,6 @@ class TestCmdChatDispatch:
             patch("seekr_hatchery.cli._launch_new"),
             patch("seekr_hatchery.cli.tasks.task_db_path") as mock_db_path,
         ):
-    
-
             mock_db_path.return_value = MagicMock(exists=lambda: False)
             result = runner.invoke(cli, ["chat", "my-session"])
 
@@ -1795,8 +1818,6 @@ class TestCmdChatDispatch:
             patch("seekr_hatchery.cli._launch_new") as mock_launch,
             patch("seekr_hatchery.cli.tasks.task_db_path") as mock_db_path,
         ):
-    
-
             mock_db_path.return_value = MagicMock(exists=lambda: False)
             runner.invoke(cli, ["chat"])
 
@@ -1819,7 +1840,7 @@ class TestCmdStatusShowsType:
             "branch": "",
             "worktree": "/nonexistent",
             "repo": "/my/repo",
-            "status": "in-progress",
+            "status": "paused",
             "created": "2026-01-15T10:00:00",
             "session_id": "sid",
             "no_worktree": True,
@@ -1837,7 +1858,7 @@ class TestCmdStatusShowsType:
             "branch": "hatchery/my-task",
             "worktree": "/nonexistent",
             "repo": "/my/repo",
-            "status": "in-progress",
+            "status": "paused",
             "created": "2026-01-15T10:00:00",
             "session_id": "sid",
         }
@@ -1860,8 +1881,6 @@ class TestResumeChat:
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch_resume") as mock_launch,
         ):
-    
-
             worktree = MagicMock(spec=Path)
             worktree.exists.return_value = True
             mock_load.return_value = {
@@ -1894,8 +1913,6 @@ class TestResumeChat:
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch_resume") as mock_launch,
         ):
-    
-
             worktree = MagicMock(spec=Path)
             worktree.exists.return_value = True
             mock_load.return_value = {

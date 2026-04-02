@@ -235,10 +235,12 @@ class TestResolveRuntime:
 
 def _make_mutator(key: str = "real-secret-key"):
     """Return a simple header mutator for tests."""
+
     def _mutate(headers):
         out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")}
         out["Authorization"] = f"Bearer {key}"
         return out
+
     return _mutate
 
 
@@ -606,3 +608,275 @@ class TestStreamBuild:
         monkeypatch.setattr(docker.subprocess, "run", _mock_run)
         docker._stream_build(["echo", "hello"], cwd=_sys.modules["pathlib"].Path("."))
         assert captured_kwargs[0].get("stdin") is subprocess.DEVNULL
+
+
+# ---------------------------------------------------------------------------
+# docker_container_name()
+# ---------------------------------------------------------------------------
+
+
+class TestDockerContainerName:
+    def test_basic_name(self, tmp_path):
+        repo = tmp_path / "my-repo"
+        assert docker.docker_container_name(repo, "my-task") == "hatchery-my-repo-my-task"
+
+    def test_name_is_slugified(self, tmp_path):
+        repo = tmp_path / "My Repo!"
+        result = docker.docker_container_name(repo, "some-task")
+        assert result.startswith("hatchery-")
+        assert " " not in result
+        assert "!" not in result
+
+    def test_task_name_preserved(self, tmp_path):
+        repo = tmp_path / "proj"
+        assert docker.docker_container_name(repo, "fix-auth") == "hatchery-proj-fix-auth"
+
+
+# ---------------------------------------------------------------------------
+# _is_container_running()
+# ---------------------------------------------------------------------------
+
+
+class TestIsContainerRunning:
+    def test_returns_true_when_running(self, monkeypatch):
+        mock_result = MagicMock()
+        mock_result.stdout = "true\n"
+        mock_result.returncode = 0
+        monkeypatch.setattr(docker.subprocess, "run", lambda *a, **kw: mock_result)
+        assert docker._is_container_running(docker.Runtime.DOCKER, "hatchery-proj-task") is True
+
+    def test_returns_false_when_not_running(self, monkeypatch):
+        mock_result = MagicMock()
+        mock_result.stdout = "false\n"
+        mock_result.returncode = 0
+        monkeypatch.setattr(docker.subprocess, "run", lambda *a, **kw: mock_result)
+        assert docker._is_container_running(docker.Runtime.DOCKER, "hatchery-proj-task") is False
+
+    def test_returns_false_when_inspect_fails(self, monkeypatch):
+        mock_result = MagicMock()
+        mock_result.stdout = ""
+        mock_result.returncode = 1
+        monkeypatch.setattr(docker.subprocess, "run", lambda *a, **kw: mock_result)
+        assert docker._is_container_running(docker.Runtime.DOCKER, "nonexistent") is False
+
+    def test_passes_correct_inspect_args(self, monkeypatch):
+        captured: list[list[str]] = []
+
+        def _mock(cmd, **kw):
+            captured.append(cmd)
+            r = MagicMock()
+            r.stdout = "false"
+            return r
+
+        monkeypatch.setattr(docker.subprocess, "run", _mock)
+        docker._is_container_running(docker.Runtime.DOCKER, "mycontainer")
+        assert captured[0] == ["docker", "inspect", "--format", "{{.State.Running}}", "mycontainer"]
+
+
+# ---------------------------------------------------------------------------
+# _run_container_background()
+# ---------------------------------------------------------------------------
+
+
+class TestRunContainerBackground:
+    """Tests for the background launch path in _run_container_background."""
+
+    def _make_cmd(self) -> list[str]:
+        return ["docker", "run", "--rm", "-it", "-e", "FOO=bar", "test-image", "agent", "--flag"]
+
+    def test_inserts_d_and_name_before_image(self, monkeypatch):
+        calls: list[list[str]] = []
+
+        def _mock_run(cmd, **kw):
+            calls.append(cmd)
+            r = MagicMock()
+            r.returncode = 0
+            r.stderr = ""
+            r.stdout = "container-id\n"
+            return r
+
+        monkeypatch.setattr(docker.subprocess, "run", _mock_run)
+        monkeypatch.setattr(docker, "_is_container_running", lambda *a: False)
+
+        docker._run_container_background(
+            self._make_cmd(), docker.Runtime.DOCKER, "hatchery-proj-task", "test-image", None
+        )
+
+        run_cmd = calls[0]
+        image_idx = run_cmd.index("test-image")
+        assert "-d" in run_cmd[:image_idx]
+        assert "--name" in run_cmd[:image_idx]
+        assert run_cmd[run_cmd.index("--name") + 1] == "hatchery-proj-task"
+
+    def test_attaches_after_start(self, monkeypatch):
+        calls: list[list[str]] = []
+
+        def _mock_run(cmd, **kw):
+            calls.append(cmd)
+            r = MagicMock()
+            r.returncode = 0
+            r.stderr = ""
+            r.stdout = ""
+            return r
+
+        monkeypatch.setattr(docker.subprocess, "run", _mock_run)
+        monkeypatch.setattr(docker, "_is_container_running", lambda *a: False)
+
+        docker._run_container_background(
+            self._make_cmd(), docker.Runtime.DOCKER, "hatchery-proj-task", "test-image", None
+        )
+
+        assert any(cmd[:3] == ["docker", "attach", "hatchery-proj-task"] for cmd in calls)
+
+    def test_calls_on_detach_when_container_still_running(self, monkeypatch):
+        calls: list[list[str]] = []
+        call_count = [0]
+
+        def _mock_run(cmd, **kw):
+            calls.append(cmd)
+            r = MagicMock()
+            r.returncode = 0
+            r.stderr = ""
+            r.stdout = ""
+            return r
+
+        def _is_running(runtime, name):
+            # Still running after attach returns
+            if any(c[:2] == ["docker", "attach"] for c in calls):
+                call_count[0] += 1
+                return call_count[0] == 1  # True first check, False for wait
+            return False
+
+        detached = [False]
+
+        monkeypatch.setattr(docker.subprocess, "run", _mock_run)
+        monkeypatch.setattr(docker, "_is_container_running", _is_running)
+
+        docker._run_container_background(
+            self._make_cmd(),
+            docker.Runtime.DOCKER,
+            "hatchery-proj-task",
+            "test-image",
+            on_detach=lambda: detached.__setitem__(0, True),
+        )
+
+        assert detached[0] is True
+
+    def test_no_on_detach_call_when_container_exited(self, monkeypatch):
+        calls: list[list[str]] = []
+
+        def _mock_run(cmd, **kw):
+            calls.append(cmd)
+            r = MagicMock()
+            r.returncode = 0
+            r.stderr = ""
+            r.stdout = ""
+            return r
+
+        monkeypatch.setattr(docker.subprocess, "run", _mock_run)
+        monkeypatch.setattr(docker, "_is_container_running", lambda *a: False)
+
+        detached = [False]
+        docker._run_container_background(
+            self._make_cmd(),
+            docker.Runtime.DOCKER,
+            "hatchery-proj-task",
+            "test-image",
+            on_detach=lambda: detached.__setitem__(0, True),
+        )
+        assert detached[0] is False
+
+    def test_attaches_to_already_running_container(self, monkeypatch):
+        """If docker run fails with 'already in use' and container is running, attach anyway."""
+        calls: list[list[str]] = []
+        run_count = [0]
+
+        def _mock_run(cmd, **kw):
+            calls.append(cmd)
+            run_count[0] += 1
+            r = MagicMock()
+            if cmd[1] == "run":
+                r.returncode = 1
+                r.stderr = "Error: Conflict. The container name already in use by container abc123"
+                r.stdout = ""
+            else:
+                r.returncode = 0
+                r.stderr = ""
+                r.stdout = ""
+            return r
+
+        monkeypatch.setattr(docker.subprocess, "run", _mock_run)
+        monkeypatch.setattr(docker, "_is_container_running", lambda *a: True)
+
+        docker._run_container_background(
+            self._make_cmd(), docker.Runtime.DOCKER, "hatchery-proj-task", "test-image", None
+        )
+
+        # Should still have attached
+        assert any(cmd[:2] == ["docker", "attach"] for cmd in calls)
+
+
+# ---------------------------------------------------------------------------
+# _run_container() — background path integration
+# ---------------------------------------------------------------------------
+
+
+class TestRunContainerBackgroundPath:
+    """Verify _run_container delegates to _run_container_background when container_name is set."""
+
+    def test_uses_background_path_when_container_name_given(self, monkeypatch):
+        background_called = [False]
+
+        def _mock_background(cmd, runtime, container_name, image, on_detach):
+            background_called[0] = True
+
+        monkeypatch.setattr(docker, "_run_container_background", _mock_background)
+
+        # Patch proxy so it doesn't try to start
+        proxy_server = MagicMock()
+        proxy_server.server_address = ("", 9999)
+        monkeypatch.setattr(docker.proxy, "start_proxy", lambda *a, **kw: (proxy_server, None))
+        monkeypatch.setattr(docker.proxy, "stop_proxy", lambda *a: None)
+
+        docker._run_container(
+            image="test-image",
+            mounts=[],
+            workdir="/workspace",
+            hatchery_repo="/repo",
+            name="test-task",
+            mutator=None,
+            proxy_token=None,
+            agent_cmd=["agent"],
+            runtime=docker.Runtime.DOCKER,
+            container_name="hatchery-proj-test-task",
+        )
+
+        assert background_called[0] is True
+
+    def test_uses_foreground_path_when_no_container_name(self, monkeypatch):
+        subprocess_calls: list[list[str]] = []
+
+        def _mock_run(cmd, **kw):
+            subprocess_calls.append(cmd)
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(docker.subprocess, "run", _mock_run)
+        monkeypatch.setattr(docker.proxy, "start_proxy", lambda *a, **kw: (MagicMock(server_address=("", 0)), None))
+        monkeypatch.setattr(docker.proxy, "stop_proxy", lambda *a: None)
+
+        docker._run_container(
+            image="test-image",
+            mounts=[],
+            workdir="/workspace",
+            hatchery_repo="/repo",
+            name="test-task",
+            mutator=None,
+            proxy_token=None,
+            agent_cmd=["agent"],
+            runtime=docker.Runtime.DOCKER,
+            container_name=None,
+        )
+
+        # Should have called subprocess.run directly (no docker attach)
+        assert any(cmd[1] == "run" for cmd in subprocess_calls)
+        assert not any("attach" in cmd for cmd in subprocess_calls)

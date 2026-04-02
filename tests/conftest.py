@@ -77,6 +77,7 @@ class SpyBackend(agent.AgentBackend):
             out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")}
             out["x-api-key"] = "spy-key"
             return out
+
         return _mutate
 
     def home_mounts(self, session_dir: Path | None) -> list[str]:
@@ -169,7 +170,7 @@ def sample_meta(fake_tasks_db: Path) -> dict:
         "branch": "hatchery/my-task",
         "worktree": "/some/repo/.hatchery/worktrees/my-task",
         "repo": "/some/repo",
-        "status": "in-progress",
+        "status": "paused",
         "created": "2026-01-15T10:00:00",
         "session_id": "abc-123",
         "schema_version": 1,

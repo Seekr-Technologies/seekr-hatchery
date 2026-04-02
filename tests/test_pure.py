@@ -13,11 +13,14 @@ import seekr_hatchery.tasks as tasks
 
 def _make_mutator(key: str = "test-key"):
     """Return a simple header mutator for tests."""
+
     def _mutate(headers):
         out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")}
         out["Authorization"] = f"Bearer {key}"
         return out
+
     return _mutate
+
 
 # ---------------------------------------------------------------------------
 # find_task_file
@@ -313,14 +316,14 @@ class TestMigrate:
         assert "agent" not in result
 
     def test_other_fields_preserved(self):
-        meta = {"name": "test", "status": "in-progress", "branch": "hatchery/test"}
+        meta = {"name": "test", "status": "paused", "branch": "hatchery/test"}
         result = tasks.migrate(meta)
         assert result["name"] == "test"
-        assert result["status"] == "in-progress"
+        assert result["status"] == "paused"
         assert result["branch"] == "hatchery/test"
 
     def test_v0_without_schema_version_key(self):
-        meta = {"name": "test", "status": "in-progress"}
+        meta = {"name": "test", "status": "paused"}
         assert "schema_version" not in meta
         result = tasks.migrate(meta)
         assert result["schema_version"] == 1
@@ -663,9 +666,11 @@ class TestDindCapMerge:
         args = {**self._COMMON, **kwargs}
         mock_server = MagicMock()
         mock_server.server_address = ("0.0.0.0", 9999)
-        with patch("seekr_hatchery.docker.subprocess.run") as mock_run, \
-             patch("seekr_hatchery.proxy.start_proxy", return_value=(mock_server, "tok")), \
-             patch("seekr_hatchery.proxy.stop_proxy"):
+        with (
+            patch("seekr_hatchery.docker.subprocess.run") as mock_run,
+            patch("seekr_hatchery.proxy.start_proxy", return_value=(mock_server, "tok")),
+            patch("seekr_hatchery.proxy.stop_proxy"),
+        ):
             docker._run_container(**args)
         return mock_run.call_args[0][0]
 
@@ -743,9 +748,11 @@ class TestRunContainerDindFlags:
         args = {**self._COMMON, **kwargs}
         mock_server = MagicMock()
         mock_server.server_address = ("0.0.0.0", 9999)
-        with patch("seekr_hatchery.docker.subprocess.run") as mock_run, \
-             patch("seekr_hatchery.proxy.start_proxy", return_value=(mock_server, "tok")), \
-             patch("seekr_hatchery.proxy.stop_proxy"):
+        with (
+            patch("seekr_hatchery.docker.subprocess.run") as mock_run,
+            patch("seekr_hatchery.proxy.start_proxy", return_value=(mock_server, "tok")),
+            patch("seekr_hatchery.proxy.stop_proxy"),
+        ):
             docker._run_container(**args)
         return mock_run.call_args[0][0]
 
