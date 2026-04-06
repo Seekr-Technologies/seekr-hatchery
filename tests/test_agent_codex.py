@@ -104,7 +104,9 @@ class TestMakeHeaderMutator:
     def test_strips_inbound_auth_headers(self, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "real-key")
         mutator = agent.CODEX.make_header_mutator()
-        result = mutator({"x-api-key": "proxy-tok", "authorization": "Bearer proxy-tok", "content-type": "application/json"})
+        result = mutator(
+            {"x-api-key": "proxy-tok", "authorization": "Bearer proxy-tok", "content-type": "application/json"}
+        )
         assert result.get("Authorization") == "Bearer real-key"
         assert result.get("content-type") == "application/json"
         lower_keys = {k.lower() for k in result}
