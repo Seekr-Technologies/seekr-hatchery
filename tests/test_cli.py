@@ -50,7 +50,7 @@ class TestHelp:
         runner = CliRunner()
         result = runner.invoke(cli, ["--help"])
         assert result.exit_code == 0
-        for cmd in ("new", "chat", "resume", "done", "sandbox", "archive", "delete", "list", "status", "config"):
+        for cmd in ("new", "chat", "resume", "done", "sandbox", "exec", "archive", "delete", "list", "status", "config"):
             assert cmd in result.output
 
     def test_new_help_shows_from_option(self):
@@ -1917,3 +1917,33 @@ class TestResumeChat:
         # is_chat should be False (default)
         is_chat = kwargs.get("is_chat", False) if kwargs else (args[9] if len(args) > 9 else False)
         assert is_chat is False
+
+
+# ---------------------------------------------------------------------------
+# CLI dispatch — exec
+# ---------------------------------------------------------------------------
+
+
+class TestExec:
+    def test_exec_dispatches_to_exec_task_shell(self, tmp_path):
+        runner = CliRunner()
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(tmp_path, True)),
+            patch("seekr_hatchery.cli.docker.detect_runtime", return_value=docker.Runtime.DOCKER),
+            patch("seekr_hatchery.cli.docker.exec_task_shell") as mock_exec,
+        ):
+            result = runner.invoke(cli, ["exec", "my-task"])
+        assert result.exit_code == 0, result.output
+        assert mock_exec.called
+        mock_exec.assert_called_once_with("my-task", docker.Runtime.DOCKER, tmp_path, shell="/bin/bash")
+
+    def test_exec_custom_shell(self, tmp_path):
+        runner = CliRunner()
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(tmp_path, True)),
+            patch("seekr_hatchery.cli.docker.detect_runtime", return_value=docker.Runtime.DOCKER),
+            patch("seekr_hatchery.cli.docker.exec_task_shell") as mock_exec,
+        ):
+            result = runner.invoke(cli, ["exec", "my-task", "--shell", "/bin/sh"])
+        assert result.exit_code == 0, result.output
+        mock_exec.assert_called_once_with("my-task", docker.Runtime.DOCKER, tmp_path, shell="/bin/sh")

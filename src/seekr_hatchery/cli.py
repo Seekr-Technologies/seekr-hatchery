@@ -805,6 +805,16 @@ def cmd_sandbox(shell: str, rebuild_sandbox: bool) -> None:
     docker.launch_sandbox_shell(repo, backend, config, runtime, shell=shell, no_cache=rebuild_sandbox)
 
 
+@cli.command("exec")
+@click.argument("name")
+@click.option("--shell", default="/bin/bash", help="Shell to launch (default: /bin/bash)")
+def cmd_exec(name: str, shell: str) -> None:
+    """Exec an interactive shell into a running task's container."""
+    repo, _ = git.git_root_or_cwd()
+    runtime = docker.detect_runtime()
+    docker.exec_task_shell(name, runtime, repo, shell=shell)
+
+
 @cli.command("done")
 @click.argument("name")
 def cmd_done(name: str) -> None:

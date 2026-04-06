@@ -200,6 +200,15 @@ def docker_image_name(repo: Path, name: str) -> str:
     return f"hatchery/{tasks.to_name(repo.name)}:{name}"
 
 
+def task_container_name(repo: Path, name: str) -> str:
+    """Return the deterministic container name for a task.
+
+    Uses repo_id (basename + path hash) rather than bare basename to avoid
+    collisions between repos with the same directory name at different paths.
+    """
+    return f"hatchery-{tasks.repo_id(repo)}-{name}"
+
+
 def docker_available() -> bool:
     """Return True if the Docker daemon is reachable."""
     logger.debug("Checking Docker availability")
@@ -653,6 +662,7 @@ def _run_container(
     _command_override: list[str] | None = None,
     _interactive: bool = False,
     cap_add: list[str] | None = None,
+    container_name: str | None = None,
 ) -> subprocess.CompletedProcess[str] | None:
     """Assemble and execute the container run command for the given agent session.
 
@@ -693,6 +703,8 @@ def _run_container(
 
     cmd += ["-e", f"HATCHERY_TASK={name}"]
     cmd += ["-e", f"HATCHERY_REPO={hatchery_repo}"]
+    if container_name is not None:
+        cmd += ["--name", container_name]
     # Podman-specific outer-container flags for proper rootless mount permissions.
     # --userns=keep-id maps the calling user to the same UID inside the container
     # so bind-mounted host files (owned by the calling user) are writable by the
@@ -835,6 +847,7 @@ def launch_docker(
         dind=config.dind,
         runtime=runtime,
         cap_add=config.cap_add,
+        container_name=task_container_name(repo, name),
     )
 
 
@@ -886,6 +899,7 @@ def launch_docker_no_worktree(
         dind=config.dind,
         runtime=runtime,
         cap_add=config.cap_add,
+        container_name=task_container_name(cwd, name),
     )
 
 
@@ -922,6 +936,16 @@ def launch_sandbox_shell(
         _command_override=[shell],
         _interactive=True,
     )
+
+
+def exec_task_shell(name: str, runtime: Runtime, repo: Path, shell: str = "/bin/bash") -> None:
+    """Exec an interactive shell into the running container for task *name*.
+
+    The container name is derived deterministically via ``task_container_name``
+    — the same name assigned at launch — so no ``docker ps`` lookup is needed.
+    Docker/Podman will return a clear error if the container is not running.
+    """
+    subprocess.run([runtime.binary, "exec", "-it", task_container_name(repo, name), shell])
 
 
 def resolve_runtime(
