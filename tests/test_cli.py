@@ -50,7 +50,7 @@ class TestHelp:
         runner = CliRunner()
         result = runner.invoke(cli, ["--help"])
         assert result.exit_code == 0
-        for cmd in ("new", "chat", "resume", "done", "sandbox", "archive", "delete", "list", "status", "config"):
+        for cmd in ("new", "chat", "resume", "done", "sandbox", "archive", "delete", "list", "status", "shell", "config"):
             assert cmd in result.output
 
     def test_new_help_shows_from_option(self):
@@ -1061,6 +1061,72 @@ class TestCmdStatus:
         tasks.save_task(meta)
         result = self._invoke(runner, ["status", "done-task"])
         assert "2026-01-16T14:00" in result.output
+
+
+# ---------------------------------------------------------------------------
+# shell command
+# ---------------------------------------------------------------------------
+
+_SHELL_REPO = Path("/my/repo")
+
+
+class TestCmdShell:
+    def _make_task_meta(self, fake_tasks_db, worktree_path):
+        meta = {
+            "name": "my-task",
+            "branch": "hatchery/my-task",
+            "worktree": str(worktree_path),
+            "repo": str(_SHELL_REPO),
+            "status": "paused",
+            "created": "2026-01-15T10:30:00",
+            "session_id": "session-uuid-xyz",
+        }
+        tasks.save_task(meta)
+        return meta
+
+    def _invoke(self, runner, args):
+        with patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(_SHELL_REPO, True)):
+            return runner.invoke(cli, args)
+
+    def test_shell_in_help(self):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["shell", "--help"])
+        assert result.exit_code == 0
+        assert "worktree" in result.output.lower()
+
+    def test_spawns_shell_in_worktree(self, tmp_path, fake_tasks_db):
+        runner = CliRunner()
+        worktree = tmp_path / "my-task"
+        worktree.mkdir()
+        self._make_task_meta(fake_tasks_db, worktree)
+        with (
+            patch("seekr_hatchery.cli.subprocess.run") as mock_run,
+            patch.dict("os.environ", {"SHELL": "/bin/zsh"}),
+        ):
+            result = self._invoke(runner, ["shell", "my-task"])
+        assert result.exit_code == 0
+        mock_run.assert_called_once_with(["/bin/zsh"], cwd=worktree)
+
+    def test_falls_back_to_bash_when_shell_unset(self, tmp_path, fake_tasks_db):
+        runner = CliRunner()
+        worktree = tmp_path / "my-task"
+        worktree.mkdir()
+        self._make_task_meta(fake_tasks_db, worktree)
+        with (
+            patch("seekr_hatchery.cli.subprocess.run") as mock_run,
+            patch.dict("os.environ", {}, clear=True),
+        ):
+            result = self._invoke(runner, ["shell", "my-task"])
+        assert result.exit_code == 0
+        shell_used = mock_run.call_args[0][0][0]
+        assert shell_used == "bash"
+
+    def test_error_when_worktree_missing(self, tmp_path, fake_tasks_db):
+        runner = CliRunner()
+        self._make_task_meta(fake_tasks_db, tmp_path / "nonexistent")
+        result = self._invoke(runner, ["shell", "my-task"])
+        assert result.exit_code == 1
+        assert "Worktree not found" in result.output
 
 
 # ---------------------------------------------------------------------------

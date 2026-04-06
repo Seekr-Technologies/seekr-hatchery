@@ -909,6 +909,21 @@ def cmd_status(name: str) -> None:
         click.echo("\n(Task file not accessible — worktree may have been removed)")
 
 
+@cli.command("shell")
+@click.argument("name")
+def cmd_shell(name: str) -> None:
+    """Open a native shell in the task's worktree."""
+    repo, _ = git.git_root_or_cwd()
+    meta = tasks.load_task(repo, name)
+    worktree = Path(meta["worktree"])
+    if not worktree.exists():
+        ui.error(f"Worktree not found: {worktree}")
+        sys.exit(1)
+    shell = os.environ.get("SHELL", "bash")
+    ui.note(f"Opening shell in {worktree}  (exit with Ctrl-D or 'exit')")
+    subprocess.run([shell], cwd=worktree)
+
+
 # ---------------------------------------------------------------------------
 # Config command group
 # ---------------------------------------------------------------------------
