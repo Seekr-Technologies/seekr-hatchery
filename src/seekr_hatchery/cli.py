@@ -231,6 +231,35 @@ def _docker_context(
     return config, features, container_workdir
 
 
+def _resolve_mcp(cfg: user_config.UserConfig) -> bool:
+    """Return True if MCP should be enabled for this session."""
+    if not cfg.enable_mcp:
+        return False
+    import seekr_hatchery.mcp as mcp_mod
+
+    if not mcp_mod.mcp_available():
+        ui.note("MCP spawning disabled — install with: pip install seekr-hatchery[mcp]")
+        return False
+    return True
+
+
+def _start_mcp_native(
+    repo: Path,
+    name: str,
+    branch: str,
+    backend: agent.AgentBackend,
+) -> tuple["subprocess.Popen | None", int]:
+    """Start MCP HTTP server for native mode and write agent config.  Returns (proc, port)."""
+    import seekr_hatchery.mcp as mcp_mod
+
+    proc, port = mcp_mod.start_mcp_http(repo, name, branch)
+    mcp_url = f"http://127.0.0.1:{port}"
+    session_dir = tasks.task_session_dir(repo, name)
+    session_dir.mkdir(parents=True, exist_ok=True)
+    backend.write_mcp_config(session_dir, mcp_url, "")
+    return proc, port
+
+
 def _launch_finalize(
     repo: Path,
     worktree: Path,
@@ -241,26 +270,55 @@ def _launch_finalize(
     branch: str,
     main_branch: str,
     no_worktree: bool = False,
+    enable_mcp: bool = False,
 ) -> None:
     env_ctx = tasks.sandbox_context(name, branch, worktree, repo, main_branch, bool(runtime), no_worktree)
     system_prompt = tasks.SESSION_SYSTEM + "\n" + env_ctx
     config, features, container_workdir = _docker_context(runtime, None if no_worktree else worktree, repo)
+    if enable_mcp:
+        features.append("MCP")
     agent_cmd = backend.build_finalize_command(
         session_id, system_prompt, _WRAP_UP_PROMPT, docker=bool(runtime), workdir=container_workdir
     )
     ui.banner(name, repo, branch=branch, sandbox=bool(runtime), worktree=not no_worktree, features=features)
+    mcp_proc = None
     _set_task_status(repo, name, "running")
     try:
         if runtime:
             if no_worktree:
-                docker.launch_docker_no_worktree(worktree, name, backend, agent_cmd, config, runtime)
+                docker.launch_docker_no_worktree(
+                    worktree,
+                    name,
+                    backend,
+                    agent_cmd,
+                    config,
+                    runtime,
+                    branch=branch,
+                    enable_mcp=enable_mcp,
+                )
             else:
-                docker.launch_docker(repo, worktree, name, backend, agent_cmd, config, runtime)
+                docker.launch_docker(
+                    repo,
+                    worktree,
+                    name,
+                    backend,
+                    agent_cmd,
+                    config,
+                    runtime,
+                    branch=branch,
+                    enable_mcp=enable_mcp,
+                )
         else:
+            if enable_mcp and not no_worktree:
+                mcp_proc, _ = _start_mcp_native(repo, name, branch, backend)
             os.chdir(worktree)
             subprocess.run(agent_cmd, env=_session_env(name, repo))
     finally:
         _set_task_status(repo, name, "in-progress")
+        if mcp_proc is not None:
+            import seekr_hatchery.mcp as mcp_mod
+
+            mcp_mod.stop_mcp_http(mcp_proc)
     _post_exit_check(
         name, repo, worktree, branch=branch, sandbox=bool(runtime), no_worktree=no_worktree, features=features
     )
@@ -307,7 +365,20 @@ def _post_exit_check(
         backend = agent.from_kind(meta.get("agent", "CODEX"))
         runtime = docker.resolve_runtime(repo, worktree, no_docker=not sandbox, backend=backend)
         main_branch = git.get_default_branch(repo)
-        _launch_finalize(repo, worktree, name, session_id, backend, runtime, meta["branch"], main_branch, no_worktree)
+        cfg = user_config.UserConfig.load()
+        mcp_on = _resolve_mcp(cfg)
+        _launch_finalize(
+            repo,
+            worktree,
+            name,
+            session_id,
+            backend,
+            runtime,
+            meta["branch"],
+            main_branch,
+            no_worktree,
+            enable_mcp=mcp_on,
+        )
     elif choice == "x":
         meta = tasks.load_task(repo, name)
         _do_delete(name, repo, worktree, meta)
@@ -361,6 +432,7 @@ def _launch_new(
     branch: str,
     main_branch: str,
     no_worktree: bool = False,
+    enable_mcp: bool = False,
     is_chat: bool = False,
     no_cache: bool = False,
 ) -> None:
@@ -375,6 +447,8 @@ def _launch_new(
         system_prompt = tasks.SESSION_SYSTEM + "\n" + env_ctx
         initial_prompt = tasks.session_prompt(name, worktree)
     config, features, container_workdir = _docker_context(runtime, None if no_worktree else worktree, repo)
+    if enable_mcp:
+        features.append("MCP")
     agent_cmd = backend.build_new_command(
         session_id, system_prompt, initial_prompt, docker=bool(runtime), workdir=container_workdir
     )
@@ -382,18 +456,46 @@ def _launch_new(
         ui.chat_banner(name, repo, features=features)
     else:
         ui.banner(name, repo, branch=branch, sandbox=bool(runtime), worktree=not no_worktree, features=features)
+    mcp_proc = None
     _set_task_status(repo, name, "running")
     try:
         if runtime:
             if no_worktree:
-                docker.launch_docker_no_worktree(worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache)
+                docker.launch_docker_no_worktree(
+                    worktree,
+                    name,
+                    backend,
+                    agent_cmd,
+                    config,
+                    runtime,
+                    branch=branch,
+                    enable_mcp=enable_mcp,
+                    no_cache=no_cache,
+                )
             else:
-                docker.launch_docker(repo, worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache)
+                docker.launch_docker(
+                    repo,
+                    worktree,
+                    name,
+                    backend,
+                    agent_cmd,
+                    config,
+                    runtime,
+                    branch=branch,
+                    enable_mcp=enable_mcp,
+                    no_cache=no_cache,
+                )
         else:
+            if enable_mcp and not no_worktree:
+                mcp_proc, _ = _start_mcp_native(repo, name, branch, backend)
             os.chdir(worktree)
             subprocess.run(agent_cmd, env=_session_env(name, repo))
     finally:
         _set_task_status(repo, name, "in-progress")
+        if mcp_proc is not None:
+            import seekr_hatchery.mcp as mcp_mod
+
+            mcp_mod.stop_mcp_http(mcp_proc)
     if is_chat:
         _chat_post_exit(name, repo)
     else:
@@ -412,6 +514,7 @@ def _launch_resume(
     branch: str,
     main_branch: str,
     no_worktree: bool = False,
+    enable_mcp: bool = False,
     is_chat: bool = False,
     no_cache: bool = False,
 ) -> None:
@@ -424,6 +527,8 @@ def _launch_resume(
         system_prompt = tasks.SESSION_SYSTEM + "\n" + env_ctx
         initial_prompt = tasks.session_prompt(name, worktree)
     config, features, container_workdir = _docker_context(runtime, None if no_worktree else worktree, repo)
+    if enable_mcp:
+        features.append("MCP")
     agent_cmd = backend.build_resume_command(
         session_id, system_prompt, initial_prompt, docker=bool(runtime), workdir=container_workdir
     )
@@ -431,18 +536,46 @@ def _launch_resume(
         ui.chat_banner(name, repo, features=features)
     else:
         ui.banner(name, repo, branch=branch, sandbox=bool(runtime), worktree=not no_worktree, features=features)
+    mcp_proc = None
     _set_task_status(repo, name, "running")
     try:
         if runtime:
             if no_worktree:
-                docker.launch_docker_no_worktree(worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache)
+                docker.launch_docker_no_worktree(
+                    worktree,
+                    name,
+                    backend,
+                    agent_cmd,
+                    config,
+                    runtime,
+                    branch=branch,
+                    enable_mcp=enable_mcp,
+                    no_cache=no_cache,
+                )
             else:
-                docker.launch_docker(repo, worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache)
+                docker.launch_docker(
+                    repo,
+                    worktree,
+                    name,
+                    backend,
+                    agent_cmd,
+                    config,
+                    runtime,
+                    branch=branch,
+                    enable_mcp=enable_mcp,
+                    no_cache=no_cache,
+                )
         else:
+            if enable_mcp and not no_worktree:
+                mcp_proc, _ = _start_mcp_native(repo, name, branch, backend)
             os.chdir(worktree)
             subprocess.run(agent_cmd, env=_session_env(name, repo))
     finally:
         _set_task_status(repo, name, "in-progress")
+        if mcp_proc is not None:
+            import seekr_hatchery.mcp as mcp_mod
+
+            mcp_mod.stop_mcp_http(mcp_proc)
     if is_chat:
         _chat_post_exit(name, repo)
     else:
@@ -552,7 +685,14 @@ def cli(log_level: str, log_file: str | None) -> None:
     ),
 )
 def cmd_new(
-    name: str, base: str, no_docker: bool, no_worktree: bool, editor: bool | None, agent_name: str, rebuild_sandbox: bool, no_commit_docker: bool
+    name: str,
+    base: str,
+    no_docker: bool,
+    no_worktree: bool,
+    editor: bool | None,
+    agent_name: str,
+    rebuild_sandbox: bool,
+    no_commit_docker: bool,
 ) -> None:
     """Start a new task."""
     ui.hatchery_header(_version)
@@ -604,7 +744,12 @@ def cmd_new(
             if df_created or dc_created:
                 ui.info("  Committing...")
                 tasks.run(
-                    ["git", "add", str(docker.dockerfile_path(worktree, backend).relative_to(worktree)), str(tasks.DOCKER_CONFIG)],
+                    [
+                        "git",
+                        "add",
+                        str(docker.dockerfile_path(worktree, backend).relative_to(worktree)),
+                        str(tasks.DOCKER_CONFIG),
+                    ],
                     cwd=worktree,
                 )
                 tasks.run(
@@ -646,7 +791,18 @@ def cmd_new(
 
         runtime = docker.resolve_runtime(repo, worktree, no_docker, backend=backend)
         main_branch = git.get_default_branch(repo)
-        _launch_new(repo, worktree, name, session_id, backend, runtime, branch, main_branch, no_worktree, no_cache=rebuild_sandbox)
+        _launch_new(
+            repo,
+            worktree,
+            name,
+            session_id,
+            backend,
+            runtime,
+            branch,
+            main_branch,
+            no_worktree,
+            no_cache=rebuild_sandbox,
+        )
     except KeyboardInterrupt:
         if not no_worktree:
             git.remove_worktree(repo, worktree)
@@ -765,13 +921,33 @@ def cmd_resume(name: str, no_docker: bool, rebuild_sandbox: bool) -> None:
             "starting a fresh session with the current task file as context."
         )
 
+    if meta.get("status") == "detached":
+        ui.error(f"Task '{name}' has a background container already running.")
+        ui.info(f"Attach with: hatchery attach {name}")
+        sys.exit(1)
+
     if meta.get("status") == "running":
         ui.note(f"task '{name}' was marked as running — a previous session may have exited unexpectedly.")
 
     is_chat = meta.get("type") == "chat"
     runtime = docker.resolve_runtime(repo, worktree, no_docker, backend=backend)
     main_branch = git.get_default_branch(repo)
-    _launch_resume(repo, worktree, name, session_id, backend, runtime, meta["branch"], main_branch, no_worktree, is_chat=is_chat, no_cache=rebuild_sandbox)
+    cfg = user_config.UserConfig.load()
+    mcp_on = _resolve_mcp(cfg)
+    _launch_resume(
+        repo,
+        worktree,
+        name,
+        session_id,
+        backend,
+        runtime,
+        meta["branch"],
+        main_branch,
+        no_worktree,
+        enable_mcp=mcp_on,
+        is_chat=is_chat,
+        no_cache=rebuild_sandbox,
+    )
 
 
 @cli.command("sandbox")
@@ -875,7 +1051,7 @@ def cmd_list(show_all: bool) -> None:
     archived_count = 0
     if not show_all:
         archived_count = sum(1 for t in task_list if t.get("status") == "archived")
-        task_list = [t for t in task_list if t.get("status") in ("in-progress", "running")]
+        task_list = [t for t in task_list if t.get("status") in ("in-progress", "running", "detached")]
 
     ui.task_list_table(task_list, archived_count, show_all)
 
@@ -986,6 +1162,153 @@ def cmd_self_update() -> None:
     ui.error("Could not detect uv tool installation.")
     ui.info("Run manually: uv tool upgrade seekr-hatchery")
     sys.exit(1)
+
+
+@cli.command("attach")
+@click.argument("name")
+def cmd_attach(name: str) -> None:
+    """Attach to a running background task container."""
+    repo, _ = git.git_root_or_cwd()
+    meta = tasks.load_task(repo, name)
+    if not meta:
+        ui.error(f"Task '{name}' not found.")
+        sys.exit(1)
+    status = meta.get("status")
+    container = meta.get("container_name")
+    if status != "detached" or not container:
+        ui.error(f"Task '{name}' is not running in the background (status={status!r}).")
+        ui.info("Use `hatchery resume` to start a new session.")
+        sys.exit(1)
+    runtime = docker.detect_runtime()
+    os.execvp(runtime.binary, [runtime.binary, "attach", container])
+
+
+# ---------------------------------------------------------------------------
+# Internal commands
+# ---------------------------------------------------------------------------
+
+
+@cli.command("mcp-serve", hidden=True)
+@click.option("--repo", required=True, type=click.Path(exists=True))
+@click.option("--name", required=True)
+@click.option("--branch", required=True)
+@click.option("--host", default="127.0.0.1")
+@click.option("--port", default=0, type=int)
+def cmd_mcp_serve(repo: str, name: str, branch: str, host: str, port: int) -> None:
+    """Start the MCP server (internal — used by task launch)."""
+    from seekr_hatchery.mcp import create_app
+
+    app = create_app(Path(repo), name, branch)
+    app.run(transport="streamable-http", host=host, port=port)
+
+
+@cli.command("_spawn-launch", hidden=True)
+@click.option("--repo", required=True, type=click.Path(exists=True))
+@click.option("--name", required=True)
+@click.option("--branch", required=True)
+def cmd_spawn_launch(repo: str, name: str, branch: str) -> None:
+    """Daemon: launch a spawned task as a detached Docker container."""
+    import logging
+
+    repo_path = Path(repo)
+    log_dir = tasks.task_session_dir(repo_path, name)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "spawn-launch.log"
+
+    # Configure logging to file only (don't pollute parent agent terminal).
+    handler = logging.FileHandler(log_file)
+    handler.setFormatter(logging.Formatter("%(asctime)s  %(levelname)-8s  %(message)s"))
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+
+    logger.info("_spawn-launch started for task %r", name)
+
+    meta = tasks.load_task(repo_path, name)
+    worktree = Path(meta["worktree"])
+
+    backend = agent.from_kind(meta.get("agent", "CODEX"))
+    runtime = docker.resolve_runtime(repo_path, worktree, no_docker=False, backend=backend)
+    if runtime is None:
+        logger.error("No container runtime available; cannot launch detached container for %r", name)
+        return
+
+    cfg = user_config.UserConfig.load()
+    mcp_on = _resolve_mcp(cfg)
+    main_branch = git.get_default_branch(repo_path)
+
+    session_id = meta.get("session_id", "")
+    env_ctx = tasks.sandbox_context(name, branch, worktree, repo_path, main_branch, True, False)
+    system_prompt = tasks.SESSION_SYSTEM + "\n" + env_ctx
+    initial_prompt = tasks.session_prompt(name, worktree)
+    config, _, container_workdir = _docker_context(runtime, worktree, repo_path)
+
+    backend.on_new_task(tasks.task_session_dir(repo_path, name))
+    backend.on_before_launch(worktree)
+
+    agent_cmd = backend.build_new_command(
+        session_id, system_prompt, initial_prompt, docker=True, workdir=container_workdir
+    )
+
+    container_name = f"hatchery-{name}"
+
+    # Remove any existing stopped container with the same name.
+    _remove_existing_container(runtime, container_name)
+
+    result = docker.launch_docker(
+        repo_path,
+        worktree,
+        name,
+        backend,
+        agent_cmd,
+        config,
+        runtime,
+        branch=branch,
+        enable_mcp=mcp_on,
+        detach=True,
+    )
+    if result is None or not isinstance(result, tuple):
+        logger.error("launch_docker returned unexpected value for detach mode")
+        return
+    container_id, mcp_proc = result
+    if not container_id:
+        logger.error("Failed to start detached container for %r", name)
+        return
+
+    logger.info("Container %s started (id=%s)", container_name, container_id[:12])
+
+    # Update metadata: detached status + container name.
+    meta["status"] = "detached"
+    meta["container_name"] = container_name
+    tasks.save_task(meta)
+
+    try:
+        # Block until the container exits.
+        subprocess.run([runtime.binary, "wait", container_name], check=False)
+        logger.info("Container %s exited", container_name)
+    finally:
+        if mcp_proc is not None:
+            import seekr_hatchery.mcp as mcp_mod
+
+            mcp_mod.stop_mcp_http(mcp_proc)
+        # Restore status so the task can be resumed.
+        meta = tasks.load_task(repo_path, name)
+        meta["status"] = "in-progress"
+        meta.pop("container_name", None)
+        tasks.save_task(meta)
+        logger.info("Task %r status restored to in-progress", name)
+
+
+def _remove_existing_container(runtime: docker.Runtime, container_name: str) -> None:
+    """Stop and remove a container with the given name if it exists."""
+    result = subprocess.run(
+        [runtime.binary, "ps", "-aq", "--filter", f"name=^{container_name}$"],
+        capture_output=True,
+        text=True,
+    )
+    cid = result.stdout.strip()
+    if cid:
+        logger.info("Removing existing container %s (%s)", container_name, cid[:12])
+        subprocess.run([runtime.binary, "rm", "-f", cid], capture_output=True)
 
 
 # ---------------------------------------------------------------------------

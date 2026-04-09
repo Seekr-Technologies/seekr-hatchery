@@ -18,6 +18,7 @@ class TestUserConfigModelDefaults:
             "schema_version": "1",
             "default_agent": None,
             "open_editor": False,
+            "enable_mcp": True,
         }
 
     def test_invalid_schema_version_rejected(self):

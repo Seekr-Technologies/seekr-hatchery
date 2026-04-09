@@ -162,6 +162,11 @@ def sandbox_context(
             "",
             f"When creating commits or pull requests, target `{main_branch}`. You may push to `{branch}` only.",
         ]
+    if not no_worktree:
+        lines += [
+            "",
+            "A hatchery MCP server is available — use the spawn_task tool to split off sub-tasks.",
+        ]
     return "\n".join(lines)
 
 
@@ -434,25 +439,26 @@ patterns, and gotchas before starting new work.
 
 
 def ensure_gitignore(repo: Path) -> None:
-    """Make sure .hatchery/worktrees/ is gitignored.
+    """Make sure transient .hatchery/ subdirs are gitignored.
 
     Without this, git status in the main repo will show every file inside every
     worktree as untracked, which is very noisy.
     """
-    gitignore = repo / ".gitignore"
     entry = str(WORKTREES_SUBDIR) + "/"
+    gitignore = repo / ".gitignore"
 
     if gitignore.exists():
-        lines = gitignore.read_text().splitlines()
-        if any(line.strip() == entry for line in lines):
-            logger.debug("gitignore entry '%s' already present", entry)
-            return  # already present
-        content = gitignore.read_text()
-        sep = "" if content.endswith("\n") else "\n"
-        gitignore.write_text(content + sep + entry + "\n")
+        existing = gitignore.read_text().splitlines()
+        present = {line.strip() for line in existing}
+        if entry in present:
+            logger.debug("Gitignore entry already present")
+            return
     else:
-        gitignore.write_text(entry + "\n")
+        existing = []
 
+    content = gitignore.read_text() if gitignore.exists() else ""
+    sep = "" if content.endswith("\n") or not content else "\n"
+    gitignore.write_text(content + sep + entry + "\n")
     ui.info(f"  Added {entry} to .gitignore")
 
 

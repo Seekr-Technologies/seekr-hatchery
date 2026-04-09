@@ -493,6 +493,7 @@ def docker_mounts(
     # Must come after the worktree:rw mount so Linux VFS lets the file mount win.
     if worktree_git_ptr is not None:
         mounts.append(f"{worktree_git_ptr}:{container_worktree}/.git:rw")
+
     mounts.extend(_default_home_mounts())
     mounts.extend(backend.home_mounts(session_dir))
     mounts.extend(_construct_docker_mounts(config))
@@ -653,7 +654,9 @@ def _run_container(
     _command_override: list[str] | None = None,
     _interactive: bool = False,
     cap_add: list[str] | None = None,
-) -> subprocess.CompletedProcess[str] | None:
+    detach: bool = False,
+    container_name: str | None = None,
+) -> subprocess.CompletedProcess[str] | str | None:
     """Assemble and execute the container run command for the given agent session.
 
     *agent_cmd* is the complete command to run inside the container, including
@@ -674,7 +677,11 @@ def _run_container(
             logger.debug("Proxy started for task; API key in container is a proxy token")
 
     cmd = [runtime.binary, "run", "--rm"]
-    if _command_override is None or _interactive:
+    if detach:
+        cmd += ["-t"]
+        if container_name:
+            cmd += ["--name", container_name]
+    elif _command_override is None or _interactive:
         cmd += ["-it"]
     for mount in mounts:
         cmd += ["-v", mount]
@@ -749,6 +756,16 @@ def _run_container(
     cmd += agent_cmd
 
     logger.debug(f"Launching {runtime.binary} container image={image!r} name={name!r} workdir={workdir!r}")
+    if detach:
+        # Insert -d before the image name (last item before agent_cmd).
+        # cmd currently ends with: ... [image, *agent_cmd] — re-assemble with -d.
+        image_idx = len(cmd) - len(agent_cmd) - 1
+        cmd.insert(image_idx, "-d")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            ui.warn(f"{runtime.binary} detached container failed to start: {result.stderr.strip()}")
+        return result.stdout.strip()  # container ID
+
     try:
         result = subprocess.run(cmd)
     finally:
@@ -774,8 +791,11 @@ def launch_docker(
     agent_cmd: list[str],
     config: DockerConfig,
     runtime: Runtime = Runtime.DOCKER,
+    branch: str = "",
+    enable_mcp: bool = False,
     no_cache: bool = False,
-) -> None:
+    detach: bool = False,
+) -> tuple[str | None, "subprocess.Popen | None"] | None:
     """Replace the current process with a Docker-sandboxed agent session.
 
     Builds the image first — hits the layer cache instantly if nothing changed.
@@ -814,6 +834,18 @@ def launch_docker(
         ui.warn("dind: true is set but the Dockerfile doesn't appear to install Podman.")
         ui.info(f"  Uncomment the '── Podman-in-Podman (DinD)' block in {dockerfile_path(worktree, backend).name}.")
 
+    # Start MCP server so the agent can call spawn_task from inside the container.
+    # Must run before on_before_container_start so backends can incorporate the
+    # MCP URL into their config files (e.g. write it into the agent's config).
+    mcp_proc = None
+    mcp_extra_mounts: list[str] = []
+    if enable_mcp:
+        import seekr_hatchery.mcp as mcp_mod
+
+        mcp_proc, mcp_port = mcp_mod.start_mcp_http(repo, name, branch)
+        mcp_url = f"http://host.docker.internal:{mcp_port}"
+        mcp_extra_mounts = backend.write_mcp_config(session_dir, mcp_url, container_worktree)
+
     # Let the backend mutate its per-task config before the container starts
     # (e.g. pre-seed trust or approval in agent-specific config files).
     backend.on_before_container_start(session_dir, proxy_token, container_worktree)
@@ -821,21 +853,50 @@ def launch_docker(
     build_docker_image(repo, worktree, name, backend, runtime=runtime, no_cache=no_cache)
     image = docker_image_name(repo, name)
     mounts = docker_mounts(repo, worktree, name, backend, session_dir, config, git_sentinels, worktree_git_ptr=git_ptr)
+    mounts.extend(mcp_extra_mounts)
     logger.debug(f"Launching {runtime.binary} container for task '{name}'")
-    return _run_container(
-        image,
-        mounts,
-        container_worktree,
-        tasks.CONTAINER_REPO_ROOT,
-        name,
-        mutator,
-        proxy_token,
-        agent_cmd,
-        backend=backend,
-        dind=config.dind,
-        runtime=runtime,
-        cap_add=config.cap_add,
-    )
+    container_name = f"hatchery-{name}" if detach else None
+    if detach:
+        container_id = _run_container(
+            image,
+            mounts,
+            container_worktree,
+            tasks.CONTAINER_REPO_ROOT,
+            name,
+            mutator,
+            proxy_token,
+            agent_cmd,
+            backend=backend,
+            dind=config.dind,
+            runtime=runtime,
+            cap_add=config.cap_add,
+            detach=True,
+            container_name=container_name,
+        )
+        # Return container_id and mcp_proc so the caller can block on docker wait
+        # and stop MCP when the container exits.
+        return container_id, mcp_proc
+
+    try:
+        return _run_container(
+            image,
+            mounts,
+            container_worktree,
+            tasks.CONTAINER_REPO_ROOT,
+            name,
+            mutator,
+            proxy_token,
+            agent_cmd,
+            backend=backend,
+            dind=config.dind,
+            runtime=runtime,
+            cap_add=config.cap_add,
+        )
+    finally:
+        if mcp_proc is not None:
+            import seekr_hatchery.mcp as mcp_mod
+
+            mcp_mod.stop_mcp_http(mcp_proc)
 
 
 def launch_docker_no_worktree(
@@ -845,6 +906,8 @@ def launch_docker_no_worktree(
     agent_cmd: list[str],
     config: DockerConfig,
     runtime: Runtime = Runtime.DOCKER,
+    branch: str = "",
+    enable_mcp: bool = False,
     no_cache: bool = False,
 ) -> None:
     """Launch a Docker-sandboxed agent session with cwd mounted as /workspace.
@@ -867,26 +930,44 @@ def launch_docker_no_worktree(
         ui.warn("dind: true is set but the Dockerfile doesn't appear to install Podman.")
         ui.info(f"  Uncomment the '── Podman-in-Podman (DinD)' block in {dockerfile_path(cwd, backend).name}.")
 
+    # Must run before on_before_container_start so backends can incorporate the
+    # MCP URL into their config files.
+    mcp_proc = None
+    mcp_extra_mounts: list[str] = []
+    if enable_mcp:
+        import seekr_hatchery.mcp as mcp_mod
+
+        mcp_proc, mcp_port = mcp_mod.start_mcp_http(cwd, name, branch)
+        mcp_url = f"http://host.docker.internal:{mcp_port}"
+        mcp_extra_mounts = backend.write_mcp_config(session_dir, mcp_url, "/workspace")
+
     backend.on_before_container_start(session_dir, proxy_token, "/workspace")
 
     build_docker_image(cwd, cwd, name, backend, runtime=runtime, no_cache=no_cache)
     image = docker_image_name(cwd, name)
     mounts = docker_mounts_no_worktree(cwd, backend, session_dir, config=config)
+    mounts.extend(mcp_extra_mounts)
     logger.debug(f"Launching {runtime.binary} container for task '{name}' (no-worktree mode)")
-    return _run_container(
-        image,
-        mounts,
-        "/workspace",
-        "/workspace",
-        name,
-        mutator,
-        proxy_token,
-        agent_cmd,
-        backend=backend,
-        dind=config.dind,
-        runtime=runtime,
-        cap_add=config.cap_add,
-    )
+    try:
+        return _run_container(
+            image,
+            mounts,
+            "/workspace",
+            "/workspace",
+            name,
+            mutator,
+            proxy_token,
+            agent_cmd,
+            backend=backend,
+            dind=config.dind,
+            runtime=runtime,
+            cap_add=config.cap_add,
+        )
+    finally:
+        if mcp_proc is not None:
+            import seekr_hatchery.mcp as mcp_mod
+
+            mcp_mod.stop_mcp_http(mcp_proc)
 
 
 def launch_sandbox_shell(
@@ -904,11 +985,7 @@ def launch_sandbox_shell(
     """
     build_docker_image(repo, repo, "sandbox", backend, runtime=runtime, no_cache=no_cache)
     image = docker_image_name(repo, "sandbox")
-    mounts = (
-        [f"{repo}:{tasks.CONTAINER_REPO_ROOT}:rw"]
-        + _default_home_mounts()
-        + _construct_docker_mounts(config)
-    )
+    mounts = [f"{repo}:{tasks.CONTAINER_REPO_ROOT}:rw"] + _default_home_mounts() + _construct_docker_mounts(config)
     _run_container(
         image=image,
         mounts=mounts,

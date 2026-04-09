@@ -25,6 +25,9 @@ dependencies = [
     "pydantic>=2",
 ]
 
+[project.optional-dependencies]
+mcp = ["mcp>=1.0"]
+
 [project.urls]
 Repository = "https://github.com/Seekr-Technologies/seekr-hatchery"
 

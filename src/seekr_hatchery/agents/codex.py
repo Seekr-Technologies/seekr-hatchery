@@ -207,6 +207,19 @@ class CodexBackend(AgentBackend):
         fake_auth = {"auth_mode": "apikey", "OPENAI_API_KEY": proxy_token, "tokens": None}
         (session_dir / "codex_auth.json").write_text(json.dumps(fake_auth))
 
+    # ── MCP configuration ─────────────────────────────────────────────────
+
+    @staticmethod
+    def write_mcp_config(
+        session_dir: Path,
+        mcp_url: str,
+        workdir: str,
+    ) -> list[str]:
+        content = f'[hatchery]\ntype = "url"\nurl = "{mcp_url}"\n'
+        config_file = session_dir / "mcp.json"
+        config_file.write_text(content)
+        return [f"{config_file}:{CONTAINER_HOME}/.codex/mcp.json:ro"]
+
     dockerfile_install: str = f"""\
 # ── OpenAI Codex CLI ──────────────────────────────────────────────────────────
 USER root
