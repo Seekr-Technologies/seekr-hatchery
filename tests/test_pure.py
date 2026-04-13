@@ -807,3 +807,95 @@ class TestSeccompResource:
 
         data = json.loads(docker._SECCOMP.read_text())
         assert "syscalls" in data
+
+
+# ---------------------------------------------------------------------------
+# _run_container container name
+# ---------------------------------------------------------------------------
+
+
+class TestRunContainerName:
+    """Verify _run_container passes --name when container_name is provided."""
+
+    _COMMON = dict(
+        image="test-image:task",
+        mounts=[],
+        workdir="/repo/.hatchery/worktrees/task",
+        hatchery_repo="/repo",
+        name="my-task",
+        mutator=None,
+        proxy_token=None,
+        agent_cmd=["codex"],
+        backend=agent.CODEX,
+    )
+
+    def _run(self, **kwargs) -> list[str]:
+        args = {**self._COMMON, **kwargs}
+        with patch("seekr_hatchery.docker.subprocess.run") as mock_run:
+            docker._run_container(**args)
+        return mock_run.call_args[0][0]
+
+    def test_name_injected_when_provided(self):
+        cmd = self._run(container_name="hatchery-myrepo-my-task")
+        name_values = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--name"]
+        assert name_values == ["hatchery-myrepo-my-task"]
+
+    def test_name_absent_when_not_provided(self):
+        cmd = self._run()
+        assert "--name" not in cmd
+
+
+# ---------------------------------------------------------------------------
+# task_container_name
+# ---------------------------------------------------------------------------
+
+
+class TestTaskContainerName:
+    """Verify task_container_name produces the expected deterministic name."""
+
+    def test_format(self, tmp_path):
+        repo = tmp_path / "my-project"
+        repo.mkdir()
+        expected = f"hatchery-{tasks.repo_id(repo)}-my-task"
+        assert docker.task_container_name(repo, "my-task") == expected
+
+    def test_different_paths_same_name_differ(self, tmp_path):
+        repo_a = tmp_path / "a" / "myrepo"
+        repo_b = tmp_path / "b" / "myrepo"
+        repo_a.mkdir(parents=True)
+        repo_b.mkdir(parents=True)
+        assert docker.task_container_name(repo_a, "t") != docker.task_container_name(repo_b, "t")
+
+
+# ---------------------------------------------------------------------------
+# exec_task_shell
+# ---------------------------------------------------------------------------
+
+
+class TestExecTaskShell:
+    """Verify exec_task_shell execs directly into the named container."""
+
+    def test_calls_docker_exec_with_container_name(self, tmp_path):
+        repo = tmp_path / "myrepo"
+        repo.mkdir()
+        with patch("seekr_hatchery.docker.subprocess.run") as mock_run:
+            docker.exec_task_shell("my-task", docker.Runtime.DOCKER, repo)
+        cmd = mock_run.call_args[0][0]
+        expected_name = docker.task_container_name(repo, "my-task")
+        assert cmd == ["docker", "exec", "-it", expected_name, "/bin/bash"]
+
+    def test_custom_shell_passed_to_exec(self, tmp_path):
+        repo = tmp_path / "myrepo"
+        repo.mkdir()
+        with patch("seekr_hatchery.docker.subprocess.run") as mock_run:
+            docker.exec_task_shell("my-task", docker.Runtime.DOCKER, repo, shell="/bin/sh")
+        cmd = mock_run.call_args[0][0]
+        assert cmd[-1] == "/bin/sh"
+
+    def test_uses_podman_binary_for_podman_runtime(self, tmp_path):
+        repo = tmp_path / "myrepo"
+        repo.mkdir()
+        with patch("seekr_hatchery.docker.subprocess.run") as mock_run:
+            docker.exec_task_shell("my-task", docker.Runtime.PODMAN, repo)
+        cmd = mock_run.call_args[0][0]
+        assert cmd[0] == "podman"
