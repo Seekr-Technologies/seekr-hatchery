@@ -50,8 +50,28 @@ class TestHelp:
         runner = CliRunner()
         result = runner.invoke(cli, ["--help"])
         assert result.exit_code == 0
-        for cmd in ("new", "chat", "resume", "done", "sandbox", "exec", "archive", "delete", "list", "status", "config"):
-            assert cmd in result.output
+
+        expected_commands = {
+            "archive",
+            "chat",
+            "config",
+            "delete",
+            "done",
+            "exec",
+            "list",
+            "new",
+            "resume",
+            "sandbox",
+            "self",
+            "shell",
+            "status",
+        }
+
+        commands = result.output.split("Commands:\n")[-1]
+        commands = commands.split("\n")
+        actual_commands = set([line.split()[0] for line in commands if line])
+
+        assert expected_commands == actual_commands
 
     def test_new_help_shows_from_option(self):
         runner = CliRunner()
@@ -93,7 +113,6 @@ class TestHelp:
 def _new_patches():
     """Common context managers for cmd_new tests."""
 
-
     return [
         patch("seekr_hatchery.cli.git.git_root_or_cwd"),
         patch("seekr_hatchery.cli.tasks.ensure_gitignore"),
@@ -115,7 +134,6 @@ def _new_patches():
 
 class TestCliNew:
     def _setup_mocks(self, mocks):
-
 
         (
             mock_root,
@@ -143,7 +161,6 @@ class TestCliNew:
 
     def test_new_dispatches_with_name(self):
         runner = CliRunner()
-    
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -155,7 +172,6 @@ class TestCliNew:
 
     def test_new_default_base_is_head(self):
         runner = CliRunner()
-    
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -169,7 +185,6 @@ class TestCliNew:
 
     def test_new_with_from_flag(self):
         runner = CliRunner()
-    
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -181,7 +196,6 @@ class TestCliNew:
 
     def test_new_with_no_docker(self):
         runner = CliRunner()
-    
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -194,7 +208,6 @@ class TestCliNew:
 
     def test_no_editor_skips_open_for_editing(self):
         runner = CliRunner()
-    
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -215,7 +228,6 @@ class TestCliNew:
                 _,
                 mock_prompt,
             ) = mocks
-    
 
             mock_root.return_value = (Path("/repo"), True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
@@ -236,7 +248,6 @@ class TestCliNew:
     def test_default_uses_prompt_not_editor(self):
         """With no --editor/--no-editor flag, default config (open_editor=False) uses prompt."""
         runner = CliRunner()
-    
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -257,7 +268,6 @@ class TestCliNew:
                 _,
                 mock_prompt,
             ) = mocks
-    
 
             mock_root.return_value = (Path("/repo"), True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
@@ -273,8 +283,6 @@ class TestCliNew:
     def test_editor_flag_opens_editor(self, tmp_path):
         """--editor flag explicitly opens the editor."""
         runner = CliRunner()
-    
-
 
         # Create a real task file; open_for_editing mock will modify it
         task_file = tmp_path / "task.md"
@@ -316,8 +324,6 @@ class TestCliNew:
     def test_editor_unchanged_cancels(self, tmp_path):
         """When editor mode produces no changes, task is cancelled."""
         runner = CliRunner()
-    
-
 
         # Create a real task file so read_text() returns consistent content
         task_file = tmp_path / "task.md"
@@ -361,8 +367,6 @@ class TestCliNew:
     def test_dockerfile_checked_against_worktree_not_repo(self):
         """ensure_dockerfile/config are called with the worktree path, not repo root."""
         runner = CliRunner()
-    
-
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -399,8 +403,6 @@ class TestCliNew:
     def test_keyboard_interrupt_cleans_up_worktree(self):
         """Ctrl-C after worktree creation removes the worktree and branch."""
         runner = CliRunner()
-    
-
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -438,8 +440,6 @@ class TestCliNew:
     def test_keyboard_interrupt_no_worktree_skips_cleanup(self):
         """Ctrl-C with --no-worktree does not attempt to remove any worktree."""
         runner = CliRunner()
-    
-
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -483,8 +483,6 @@ class TestCliNew:
     def test_no_commit_docker_generates_to_repo_root_first(self):
         """--no-commit-docker calls ensure_dockerfile with repo path before worktree path."""
         runner = CliRunner()
-    
-
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -530,8 +528,6 @@ class TestCliNew:
     def test_no_commit_docker_skips_dockerfile_commit(self):
         """--no-commit-docker does not git-commit the Dockerfile even if ensure returns True."""
         runner = CliRunner()
-    
-
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -565,7 +561,8 @@ class TestCliNew:
 
         assert result.exit_code == 0
         dockerfile_commits = [
-            c for c in mock_run.call_args_list
+            c
+            for c in mock_run.call_args_list
             if c[0][0] == ["git", "commit", "-m", "chore: add hatchery Docker configuration"]
         ]
         assert len(dockerfile_commits) == 0
@@ -573,8 +570,6 @@ class TestCliNew:
     def test_no_commit_docker_false_default_commits_when_created(self):
         """Without the flag, a newly generated Dockerfile is committed as normal."""
         runner = CliRunner()
-    
-
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -609,7 +604,8 @@ class TestCliNew:
         # ensure_dockerfile called exactly once (no --no-commit-docker)
         assert mock_ensure_df.call_count == 1
         dockerfile_commits = [
-            c for c in mock_run.call_args_list
+            c
+            for c in mock_run.call_args_list
             if c[0][0] == ["git", "commit", "-m", "chore: add hatchery Docker configuration"]
         ]
         assert len(dockerfile_commits) == 1
@@ -737,8 +733,6 @@ class TestCliResume:
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch_resume") as mock_launch,
         ):
-    
-
             worktree = MagicMock(spec=Path)
             worktree.exists.return_value = True
             mock_load.return_value = {
@@ -765,8 +759,6 @@ class TestCliResume:
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch_resume"),
         ):
-    
-
             worktree = MagicMock(spec=Path)
             worktree.exists.return_value = True
             mock_load.return_value = {
@@ -1064,6 +1056,72 @@ class TestCmdStatus:
 
 
 # ---------------------------------------------------------------------------
+# shell command
+# ---------------------------------------------------------------------------
+
+_SHELL_REPO = Path("/my/repo")
+
+
+class TestCmdShell:
+    def _make_task_meta(self, fake_tasks_db, worktree_path):
+        meta = {
+            "name": "my-task",
+            "branch": "hatchery/my-task",
+            "worktree": str(worktree_path),
+            "repo": str(_SHELL_REPO),
+            "status": "paused",
+            "created": "2026-01-15T10:30:00",
+            "session_id": "session-uuid-xyz",
+        }
+        tasks.save_task(meta)
+        return meta
+
+    def _invoke(self, runner, args):
+        with patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(_SHELL_REPO, True)):
+            return runner.invoke(cli, args)
+
+    def test_shell_in_help(self):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["shell", "--help"])
+        assert result.exit_code == 0
+        assert "worktree" in result.output.lower()
+
+    def test_spawns_shell_in_worktree(self, tmp_path, fake_tasks_db):
+        runner = CliRunner()
+        worktree = tmp_path / "my-task"
+        worktree.mkdir()
+        self._make_task_meta(fake_tasks_db, worktree)
+        with (
+            patch("seekr_hatchery.cli.subprocess.run") as mock_run,
+            patch.dict("os.environ", {"SHELL": "/bin/zsh"}),
+        ):
+            result = self._invoke(runner, ["shell", "my-task"])
+        assert result.exit_code == 0
+        mock_run.assert_called_once_with(["/bin/zsh"], cwd=worktree)
+
+    def test_falls_back_to_bash_when_shell_unset(self, tmp_path, fake_tasks_db):
+        runner = CliRunner()
+        worktree = tmp_path / "my-task"
+        worktree.mkdir()
+        self._make_task_meta(fake_tasks_db, worktree)
+        with (
+            patch("seekr_hatchery.cli.subprocess.run") as mock_run,
+            patch.dict("os.environ", {}, clear=True),
+        ):
+            result = self._invoke(runner, ["shell", "my-task"])
+        assert result.exit_code == 0
+        shell_used = mock_run.call_args[0][0][0]
+        assert shell_used == "bash"
+
+    def test_error_when_worktree_missing(self, tmp_path, fake_tasks_db):
+        runner = CliRunner()
+        self._make_task_meta(fake_tasks_db, tmp_path / "nonexistent")
+        result = self._invoke(runner, ["shell", "my-task"])
+        assert result.exit_code == 1
+        assert "Worktree not found" in result.output
+
+
+# ---------------------------------------------------------------------------
 # --no-worktree
 # ---------------------------------------------------------------------------
 
@@ -1072,7 +1130,6 @@ class TestCliNoWorktree:
     """Tests for the --no-worktree flag and auto-enable in non-repo directories."""
 
     def _setup_no_worktree_mocks(self, mocks, in_repo: bool = True):
-
 
         (
             mock_root,
@@ -1100,7 +1157,6 @@ class TestCliNoWorktree:
 
     def test_no_worktree_flag_skips_create_worktree(self):
         runner = CliRunner()
-    
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -1112,7 +1168,6 @@ class TestCliNoWorktree:
 
     def test_no_worktree_flag_stores_no_worktree_in_metadata(self):
         runner = CliRunner()
-    
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -1125,8 +1180,6 @@ class TestCliNoWorktree:
 
     def test_no_worktree_with_dockerfile_uses_launch_docker_no_worktree(self):
         runner = CliRunner()
-    
-    
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -1148,7 +1201,6 @@ class TestCliNoWorktree:
     def test_auto_enable_when_not_in_repo(self):
         """When git_root_or_cwd returns in_repo=False, no_worktree is auto-enabled."""
         runner = CliRunner()
-    
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -1165,7 +1217,6 @@ class TestCliNoWorktree:
 
     def test_auto_enable_prints_note_when_not_in_repo(self):
         runner = CliRunner()
-    
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -1195,8 +1246,6 @@ class TestCliNoWorktree:
             }
             # Even though Path("/some/dir") may not exist, no error should occur
             with patch("seekr_hatchery.cli.Path") as mock_path_cls:
-        
-
                 mock_wt = MagicMock(spec=Path)
                 mock_wt.exists.return_value = False  # worktree doesn't exist
                 mock_path_cls.return_value = mock_wt
@@ -1296,7 +1345,6 @@ class TestLaunchHooks:
         ]
 
     def test_launch_new_hook_order(self, spy_backend):
-    
 
         with ExitStack() as stack:
             for p in self._patches():
@@ -1324,7 +1372,6 @@ class TestLaunchHooks:
         assert workdir == ""
 
     def test_launch_resume_hook_order(self, spy_backend):
-    
 
         with ExitStack() as stack:
             for p in self._patches():
@@ -1350,7 +1397,6 @@ class TestLaunchHooks:
         assert workdir == ""
 
     def test_launch_finalize_no_hooks(self, spy_backend):
-    
 
         with ExitStack() as stack:
             for p in self._patches():
@@ -1410,8 +1456,6 @@ class TestRunningState:
 
     def test_running_state_blocked_by_new_duplicate_check(self):
         runner = CliRunner()
-    
-
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
@@ -1564,7 +1608,6 @@ class TestLaunchNewChat:
         ]
 
     def test_launch_new_chat_empty_system_prompt(self, spy_backend):
-    
 
         with ExitStack() as stack:
             for p in self._patches():
@@ -1587,7 +1630,6 @@ class TestLaunchNewChat:
         assert system_prompt == ""
 
     def test_launch_new_chat_empty_initial_prompt(self, spy_backend):
-    
 
         with ExitStack() as stack:
             for p in self._patches():
@@ -1610,7 +1652,6 @@ class TestLaunchNewChat:
         assert initial_prompt == ""
 
     def test_launch_new_chat_calls_chat_post_exit(self, spy_backend):
-    
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in self._patches()]
@@ -1634,7 +1675,6 @@ class TestLaunchNewChat:
 
     def test_launch_new_task_calls_post_exit_check(self, spy_backend):
         """Non-chat launch should still use _post_exit_check."""
-    
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in self._patches()]
@@ -1676,7 +1716,6 @@ class TestLaunchResumeChat:
         ]
 
     def test_launch_resume_chat_empty_system_prompt(self, spy_backend):
-    
 
         with ExitStack() as stack:
             for p in self._patches():
@@ -1699,7 +1738,6 @@ class TestLaunchResumeChat:
         assert system_prompt == ""
 
     def test_launch_resume_chat_calls_chat_post_exit(self, spy_backend):
-    
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in self._patches()]
@@ -1747,8 +1785,6 @@ class TestCmdChatDispatch:
             patch("seekr_hatchery.cli._launch_new"),
             patch("seekr_hatchery.cli.tasks.task_db_path") as mock_db_path,
         ):
-    
-
             mock_db_path.return_value = MagicMock(exists=lambda: False)
             result = runner.invoke(cli, ["chat"])
 
@@ -1772,8 +1808,6 @@ class TestCmdChatDispatch:
             patch("seekr_hatchery.cli._launch_new"),
             patch("seekr_hatchery.cli.tasks.task_db_path") as mock_db_path,
         ):
-    
-
             mock_db_path.return_value = MagicMock(exists=lambda: False)
             result = runner.invoke(cli, ["chat", "my-session"])
 
@@ -1795,8 +1829,6 @@ class TestCmdChatDispatch:
             patch("seekr_hatchery.cli._launch_new") as mock_launch,
             patch("seekr_hatchery.cli.tasks.task_db_path") as mock_db_path,
         ):
-    
-
             mock_db_path.return_value = MagicMock(exists=lambda: False)
             runner.invoke(cli, ["chat"])
 
@@ -1860,8 +1892,6 @@ class TestResumeChat:
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch_resume") as mock_launch,
         ):
-    
-
             worktree = MagicMock(spec=Path)
             worktree.exists.return_value = True
             mock_load.return_value = {
@@ -1894,8 +1924,6 @@ class TestResumeChat:
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch_resume") as mock_launch,
         ):
-    
-
             worktree = MagicMock(spec=Path)
             worktree.exists.return_value = True
             mock_load.return_value = {
