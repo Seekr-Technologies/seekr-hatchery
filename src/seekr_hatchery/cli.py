@@ -179,33 +179,36 @@ _WRAP_UP_PROMPT = (
 )
 
 
-def _do_delete(name: str, repo: Path, worktree: Path, meta: dict) -> None:
+def _do_delete(name: str, repo: Path, worktree: Path, meta: dict, *, confirmed: bool = False) -> None:
     branch = meta["branch"]
     no_worktree = meta.get("no_worktree", False)
 
     if not no_worktree:
         if worktree.exists():
             if git.has_uncommitted_changes(worktree):
-                ui.warn("there are uncommitted changes in the worktree.")
-            answer = input(f"Delete task '{name}' (worktree + branch + metadata)? [y/N] ").strip().lower()
-            if answer != "y":
-                ui.info("Aborted.")
-                return
+                ui.warn(f"Task '{name}': there are uncommitted changes in the worktree.")
+            if not confirmed:
+                answer = input(f"Delete task '{name}' (worktree + branch + metadata)? [y/N] ").strip().lower()
+                if answer != "y":
+                    ui.info("Aborted.")
+                    return
             git.remove_worktree(repo, worktree, force=True)
         else:
-            answer = input(f"Delete task '{name}' (branch + metadata)? [y/N] ").strip().lower()
-            if answer != "y":
-                ui.info("Aborted.")
-                return
+            if not confirmed:
+                answer = input(f"Delete task '{name}' (branch + metadata)? [y/N] ").strip().lower()
+                if answer != "y":
+                    ui.info("Aborted.")
+                    return
         if git.delete_branch(repo, branch):
             ui.info(f"Branch deleted: {branch}")
         else:
             ui.info(f"Could not delete branch {branch} (may already be gone)")
     else:
-        answer = input(f"Delete task '{name}' (metadata only)? [y/N] ").strip().lower()
-        if answer != "y":
-            ui.info("Aborted.")
-            return
+        if not confirmed:
+            answer = input(f"Delete task '{name}' (metadata only)? [y/N] ").strip().lower()
+            if answer != "y":
+                ui.info("Aborted.")
+                return
 
     tasks.task_db_path(repo, name).unlink(missing_ok=True)
     ui.success(f"Task '{name}' deleted.")
@@ -484,7 +487,46 @@ def _chat_post_exit(name: str, repo: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+class AliasedGroup(click.Group):
+    """Click Group subclass that supports short aliases shown in --help."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        # alias -> primary command name
+        self._aliases: dict[str, str] = {}
+
+    def add_alias(self, alias: str, target: str) -> None:
+        self._aliases[alias] = target
+
+    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
+        return super().get_command(ctx, self._aliases.get(cmd_name, cmd_name))
+
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        # Include aliases in tab-completion
+        return sorted(list(self.commands) + list(self._aliases))
+
+    def format_commands(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        # Build reverse map: primary -> sorted aliases
+        primary_to_aliases: dict[str, list[str]] = {}
+        for alias, primary in self._aliases.items():
+            primary_to_aliases.setdefault(primary, []).append(alias)
+
+        commands = []
+        for name in self.commands:
+            cmd = self.commands[name]
+            if cmd.hidden:
+                continue
+            aliases = sorted(primary_to_aliases.get(name, []))
+            parts = aliases + [name] if aliases else [name]
+            display = " | ".join(parts)
+            commands.append((display, cmd.get_short_help_str(limit=formatter.width)))
+
+        if commands:
+            with formatter.section("Commands"):
+                formatter.write_dl(commands)
+
+
+@click.group(cls=AliasedGroup, context_settings={"help_option_names": ["-h", "--help"]})
 @click.version_option(version=_version, prog_name="hatchery")
 @click.option(
     "--log-level",
@@ -817,13 +859,13 @@ def cmd_exec(name: str, shell: str) -> None:
 
 
 @cli.command("done")
-@click.argument("name")
-def cmd_done(name: str) -> None:
+@click.argument("names", nargs=-1, required=True)
+def cmd_done(names: tuple[str, ...]) -> None:
     """Mark complete and remove worktree."""
     repo, _ = git.git_root_or_cwd()
-    meta = tasks.load_task(repo, name)
-    worktree = Path(meta["worktree"])
-    _do_mark_done(meta["name"], Path(meta["repo"]), worktree)
+    for name in names:
+        meta = tasks.load_task(repo, name)
+        _do_mark_done(meta["name"], Path(meta["repo"]), Path(meta["worktree"]))
 
 
 @cli.command("abort", hidden=True)
@@ -835,49 +877,60 @@ def cmd_abort(name: str) -> None:
 
 
 @cli.command("archive")
-@click.argument("name")
-def cmd_archive(name: str) -> None:
+@click.argument("names", nargs=-1, required=True)
+def cmd_archive(names: tuple[str, ...]) -> None:
     """Park a task: remove worktree, keep branch for later resumption."""
     repo, _ = git.git_root_or_cwd()
-    meta = tasks.load_task(repo, name)
-    worktree = Path(meta["worktree"])
-    repo = Path(meta["repo"])
-    no_worktree = meta.get("no_worktree", False)
+    for name in names:
+        meta = tasks.load_task(repo, name)
+        worktree = Path(meta["worktree"])
+        task_repo = Path(meta["repo"])
+        no_worktree = meta.get("no_worktree", False)
 
-    if no_worktree:
-        ui.note("no-worktree task — no worktree or branch to remove.")
-    else:
-        if worktree.exists():
-            if git.has_uncommitted_changes(worktree):
-                ui.warn("there are uncommitted changes in the worktree.")
-                ui.info(git.uncommitted_changes_summary(worktree))
-                answer = input("Commit them as a checkpoint before archiving? [Y/n] ").strip().lower()
-                if answer != "n":
-                    tasks.run(["git", "add", "-A"], cwd=worktree)
-                    tasks.run(["git", "commit", "-m", f"task({name}): checkpoint before archive"], cwd=worktree)
-            git.remove_worktree(repo, worktree)
-            ui.info(f"Worktree removed: {worktree}")
+        if no_worktree:
+            ui.note(f"Task '{name}': no-worktree task — no worktree or branch to remove.")
         else:
-            ui.info("Worktree not found (may already be removed).")
-        ui.info(f"Branch retained: {meta['branch']}")
+            if worktree.exists():
+                if git.has_uncommitted_changes(worktree):
+                    ui.warn(f"Task '{name}': there are uncommitted changes in the worktree.")
+                    ui.info(git.uncommitted_changes_summary(worktree))
+                    answer = input("Commit them as a checkpoint before archiving? [Y/n] ").strip().lower()
+                    if answer != "n":
+                        tasks.run(["git", "add", "-A"], cwd=worktree)
+                        tasks.run(["git", "commit", "-m", f"task({name}): checkpoint before archive"], cwd=worktree)
+                git.remove_worktree(task_repo, worktree)
+                ui.info(f"Worktree removed: {worktree}")
+            else:
+                ui.info(f"Task '{name}': worktree not found (may already be removed).")
+            ui.info(f"Branch retained: {meta['branch']}")
 
-    meta["status"] = "archived"
-    tasks.save_task(meta)
-    ui.success(f"Task '{name}' archived. Resume with: hatchery resume {name}")
+        meta["status"] = "archived"
+        tasks.save_task(meta)
+        ui.success(f"Task '{name}' archived. Resume with: hatchery resume {name}")
 
 
 @cli.command("delete")
-@click.argument("name")
-def cmd_delete(name: str) -> None:
+@click.argument("names", nargs=-1, required=True)
+@click.option("-f", "--force", is_flag=True, help="Skip confirmation prompt.")
+def cmd_delete(names: tuple[str, ...], force: bool) -> None:
     """Delete task, branch, and all metadata."""
     repo, _ = git.git_root_or_cwd()
-    meta = tasks.load_task(repo, name)
-    worktree = Path(meta["worktree"])
-    _do_delete(meta["name"], repo, worktree, meta)
+    if len(names) > 1:
+        metas = [tasks.load_task(repo, n) for n in names]
+        if not force:
+            answer = input(f"Delete {len(names)} tasks ({', '.join(names)})? [y/N] ").strip().lower()
+            if answer != "y":
+                ui.info("Aborted.")
+                return
+        for meta in metas:
+            _do_delete(meta["name"], repo, Path(meta["worktree"]), meta, confirmed=True)
+    else:
+        meta = tasks.load_task(repo, names[0])
+        _do_delete(meta["name"], repo, Path(meta["worktree"]), meta, confirmed=force)
 
 
 @cli.command("list")
-@click.option("--all", "show_all", is_flag=True, help="Show all tasks, including completed and aborted")
+@click.option("-a", "--all", "show_all", is_flag=True, help="Show all tasks, including completed and aborted")
 def cmd_list(show_all: bool) -> None:
     """List tasks for current repo."""
     repo, _ = git.git_root_or_cwd()
@@ -889,6 +942,8 @@ def cmd_list(show_all: bool) -> None:
         task_list = [t for t in task_list if t.get("status") in ("in-progress", "running")]
 
     ui.task_list_table(task_list, archived_count, show_all)
+
+
 
 
 @cli.command("status")
@@ -918,6 +973,7 @@ def cmd_status(name: str) -> None:
         click.echo(task_path.read_text())
     else:
         click.echo("\n(Task file not accessible — worktree may have been removed)")
+
 
 
 @cli.command("shell")
@@ -997,6 +1053,14 @@ def cmd_self_update() -> None:
     ui.error("Could not detect uv tool installation.")
     ui.info("Run manually: uv tool upgrade seekr-hatchery")
     sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Aliases (shown as name|alias in --help, resolved in AliasedGroup)
+# ---------------------------------------------------------------------------
+
+cli.add_alias("ls", "list")
+cli.add_alias("st", "status")
 
 
 # ---------------------------------------------------------------------------
