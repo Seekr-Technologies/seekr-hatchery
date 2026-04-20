@@ -59,18 +59,24 @@ class TestHelp:
             "delete",
             "done",
             "exec",
-            "list",
+            "ls | list",
             "new",
             "resume",
             "sandbox",
             "self",
             "shell",
-            "status",
+            "st | status",
         }
 
         commands = result.output.split("Commands:\n")[-1]
         commands = commands.split("\n")
-        actual_commands = set([line.split()[0] for line in commands if line])
+        # Each line may show "alias | command  help text"; collect all pipe-separated names.
+        actual_commands: set[str] = set()
+        for line in commands:
+            if not line:
+                continue
+            name_part = line.split("  ")[1]  # strip help text
+            actual_commands.update({name_part})
 
         assert expected_commands == actual_commands
 
