@@ -11,6 +11,7 @@ import seekr_hatchery.docker as docker
 import seekr_hatchery.tasks as tasks
 from seekr_hatchery.cli import (
     _WRAP_UP_PROMPT,
+    TaskNameType,
     _launch_finalize,
     _launch_new,
     _launch_resume,
@@ -1991,3 +1992,91 @@ class TestExec:
             result = runner.invoke(cli, ["exec", "my-task", "--shell", "/bin/sh"])
         assert result.exit_code == 0, result.output
         mock_exec.assert_called_once_with("my-task", docker.Runtime.DOCKER, tmp_path, shell="/bin/sh")
+
+
+# ---------------------------------------------------------------------------
+# Shell completion
+# ---------------------------------------------------------------------------
+
+
+class TestCompletion:
+    def test_task_name_type_empty_on_no_tasks(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+
+        t = TaskNameType()
+        with patch("seekr_hatchery.tasks.TASKS_DB_DIR", tmp_path / "nonexistent"):
+            result = t.shell_complete(MagicMock(), MagicMock(), "")
+        assert result == []
+
+    def test_task_name_type_silent_on_error(self):
+
+        t = TaskNameType()
+        with patch("seekr_hatchery.git.git_root_or_cwd", side_effect=RuntimeError("boom")):
+            result = t.shell_complete(MagicMock(), MagicMock(), "")
+        assert result == []
+
+    def test_task_name_type_returns_matching(self, tmp_path):
+
+        t = TaskNameType()
+        fake_tasks = [
+            {"name": "my-feature", "status": "in-progress"},
+            {"name": "my-bug", "status": "archived"},
+            {"name": "other-task", "status": "in-progress"},
+        ]
+        with (
+            patch("seekr_hatchery.git.git_root_or_cwd", return_value=(tmp_path, True)),
+            patch("seekr_hatchery.tasks.repo_tasks_for_current_repo", return_value=fake_tasks),
+        ):
+            result = t.shell_complete(MagicMock(), MagicMock(), "my")
+        assert len(result) == 2
+        names = {item.value for item in result}
+        assert names == {"my-feature", "my-bug"}
+
+
+# ---------------------------------------------------------------------------
+# hatchery self completions
+# ---------------------------------------------------------------------------
+
+
+class TestSelfCompletions:
+    def test_installs_bash_completion(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SHELL", "/bin/bash")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(cli, ["self", "completions"])
+        assert result.exit_code == 0
+        rc = (tmp_path / ".bashrc").read_text()
+        assert "_HATCHERY_COMPLETE=bash_source hatchery" in rc
+
+    def test_installs_zsh_completion(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(cli, ["self", "completions"])
+        assert result.exit_code == 0
+        rc = (tmp_path / ".zshrc").read_text()
+        assert "_HATCHERY_COMPLETE=zsh_source hatchery" in rc
+
+    def test_fish_creates_config_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SHELL", "/usr/bin/fish")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(cli, ["self", "completions"])
+        assert result.exit_code == 0
+        rc = (tmp_path / ".config" / "fish" / "config.fish").read_text()
+        assert "_HATCHERY_COMPLETE=fish_source hatchery" in rc
+
+    def test_idempotent(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SHELL", "/bin/bash")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        runner = CliRunner()
+        runner.invoke(cli, ["self", "completions"])
+        runner.invoke(cli, ["self", "completions"])
+        rc = (tmp_path / ".bashrc").read_text()
+        assert rc.count("_HATCHERY_COMPLETE") == 1
+
+    def test_unsupported_shell(self, monkeypatch):
+        monkeypatch.setenv("SHELL", "/bin/tcsh")
+        runner = CliRunner()
+        result = runner.invoke(cli, ["self", "completions"])
+        assert result.exit_code == 1
