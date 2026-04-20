@@ -65,7 +65,6 @@ class TestHelp:
             "self",
             "shell",
             "st | status",
-            "status",
         }
 
         commands = result.output.split("Commands:\n")[-1]
@@ -75,8 +74,8 @@ class TestHelp:
         for line in commands:
             if not line:
                 continue
-            name_part = line.split("  ")[0]  # strip help text
-            actual_commands.update(part.strip() for part in name_part.split("|"))
+            name_part = line.split("  ")[1]  # strip help text
+            actual_commands.update({name_part})
 
         assert expected_commands == actual_commands
 
