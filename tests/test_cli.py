@@ -566,6 +566,16 @@ class TestCliNew:
             if c[0][0] == ["git", "commit", "-m", "chore: add hatchery Docker configuration"]
         ]
         assert len(dockerfile_commits) == 0
+        # The task-file commit must use .hatchery/tasks/ (not .hatchery/) so the
+        # copied-but-uncommitted Docker files are not swept into the staging area.
+        task_file_adds = [
+            c for c in mock_run.call_args_list if c[0][0] == ["git", "add", ".hatchery/tasks/"]
+        ]
+        assert len(task_file_adds) == 1
+        full_hatchery_adds = [
+            c for c in mock_run.call_args_list if c[0][0] == ["git", "add", ".hatchery/"]
+        ]
+        assert len(full_hatchery_adds) == 0
 
     def test_no_commit_docker_false_default_commits_when_created(self):
         """Without the flag, a newly generated Dockerfile is committed as normal."""
