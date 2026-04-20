@@ -17,19 +17,23 @@ _TOKEN = "test-proxy-token"
 
 def _make_api_key_mutator(key: str):
     """Return a header mutator that injects x-api-key."""
+
     def _mutate(headers, **kwargs):
         out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")}
         out["x-api-key"] = key
         return out
+
     return _mutate
 
 
 def _make_bearer_mutator(key: str):
     """Return a header mutator that injects Authorization: Bearer."""
+
     def _mutate(headers, **kwargs):
         out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")}
         out["Authorization"] = f"Bearer {key}"
         return out
+
     return _mutate
 
 
@@ -272,9 +276,7 @@ class TestProxyOpenAIFormat:
                 pass
 
         monkeypatch.setattr(http.client, "HTTPSConnection", _CapturingConn)
-        server, _ = proxy.start_proxy(
-            _make_bearer_mutator("my-openai-key"), _TOKEN, target_host="api.openai.com"
-        )
+        server, _ = proxy.start_proxy(_make_bearer_mutator("my-openai-key"), _TOKEN, target_host="api.openai.com")
         port = server.server_address[1]
         _wait_for_port(port)
 
@@ -309,9 +311,7 @@ class TestProxyOpenAIFormat:
                 pass
 
         monkeypatch.setattr(http.client, "HTTPSConnection", _RecordingConn)
-        server, _ = proxy.start_proxy(
-            _make_bearer_mutator("my-openai-key"), _TOKEN, target_host="api.openai.com"
-        )
+        server, _ = proxy.start_proxy(_make_bearer_mutator("my-openai-key"), _TOKEN, target_host="api.openai.com")
         port = server.server_address[1]
         _wait_for_port(port)
 
@@ -657,3 +657,82 @@ class TestProxyReauthOn401:
 
         assert len(call_log) == 1
         assert resp.status == 500
+
+
+# ---------------------------------------------------------------------------
+# test_proxy_websocket_relay
+# ---------------------------------------------------------------------------
+
+
+class TestProxyWebSocketRelay:
+    def test_101_forwarded_with_websocket_headers(self, monkeypatch):
+        """Proxy must forward 101 with Connection/Upgrade headers intact and relay bytes."""
+        import socket as _socket
+
+        # Build a real socket pair so we can test actual byte relay.
+        client_sock, proxy_side = _socket.socketpair()
+
+        class _WSResp:
+            status = 101
+            fp = None  # set after construction
+
+            def getheaders(self):
+                return [
+                    ("upgrade", "websocket"),
+                    ("connection", "Upgrade"),
+                    ("sec-websocket-accept", "abc123=="),
+                ]
+
+            def read(self, n=None):
+                return b""
+
+        class _WSConn:
+            def __init__(self, host):
+                self.host = host
+                # upstream_sock is the other end of a second socketpair
+                self._upstream, self._downstream = _socket.socketpair()
+                self.sock = self._upstream
+
+            def request(self, method, path, body=None, headers=None):
+                resp = _WSResp()
+                # Give resp.fp a reader that reads from downstream end
+
+                resp.fp = self._downstream.makefile("rb")
+                self._resp = resp
+
+            def getresponse(self):
+                return self._resp
+
+            def close(self):
+                # Only close if sock is still ours (relay detaches it)
+                if self.sock is not None:
+                    self.sock.close()
+
+        monkeypatch.setattr(http.client, "HTTPSConnection", _WSConn)
+        server, _ = proxy.start_proxy(_make_bearer_mutator("real-key"), _TOKEN)
+        port = server.server_address[1]
+        _wait_for_port(port)
+
+        try:
+            conn = http.client.HTTPConnection("localhost", port)
+            conn.request(
+                "GET",
+                "/ws",
+                headers={
+                    "Authorization": f"Bearer {_TOKEN}",
+                    "Upgrade": "websocket",
+                    "Connection": "Upgrade",
+                    "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+                    "Sec-WebSocket-Version": "13",
+                },
+            )
+            resp = conn.getresponse()
+            # Proxy must return 101 with the WebSocket headers
+            assert resp.status == 101
+            headers_lower = {k.lower(): v for k, v in resp.getheaders()}
+            assert headers_lower.get("upgrade", "").lower() == "websocket"
+            assert headers_lower.get("sec-websocket-accept") == "abc123=="
+        finally:
+            proxy.stop_proxy(server)
+            client_sock.close()
+            proxy_side.close()

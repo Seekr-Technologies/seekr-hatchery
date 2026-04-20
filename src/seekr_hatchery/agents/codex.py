@@ -23,6 +23,18 @@ class CodexBackend(AgentBackend):
 
     # ── Command construction ───────────────────────────────────────────────────
 
+    # codex (as of v0.121) ignores the OPENAI_BASE_URL environment variable.
+    # The only supported mechanism for a custom base URL is openai_base_url in
+    # config.toml or --config openai_base_url='"..."' at the CLI.  When running
+    # in Docker mode we inject the proxy URL via --config at launch, reading it
+    # from the OPENAI_BASE_URL env var that container_env() has already set in
+    # the container.  The sh wrapper expands the env var at container startup
+    # so the proxy port (ephemeral, unknown at command-build time) is resolved
+    # correctly.
+    _DOCKER_WRAPPER: str = (
+        'exec codex --config "openai_base_url=\\"$OPENAI_BASE_URL\\"" --dangerously-bypass-approvals-and-sandbox "$@"'
+    )
+
     @staticmethod
     def build_new_command(
         session_id: str,
@@ -35,6 +47,8 @@ class CodexBackend(AgentBackend):
         # Combine system and initial prompts — codex has no separate system
         # prompt flag so we prepend the context directly.
         prompt = f"{system_prompt}\n\n{initial_prompt}".strip()
+        if docker:
+            return ["sh", "-c", CodexBackend._DOCKER_WRAPPER, "sh", prompt]
         return ["codex", "--dangerously-bypass-approvals-and-sandbox", prompt]
 
     @staticmethod
@@ -49,6 +63,8 @@ class CodexBackend(AgentBackend):
         # session_id unused — codex has no resume support.
         # Re-run with combined context so the agent knows what to continue.
         prompt = f"{system_prompt}\n\n{initial_prompt}".strip()
+        if docker:
+            return ["sh", "-c", CodexBackend._DOCKER_WRAPPER, "sh", prompt]
         return ["codex", "--dangerously-bypass-approvals-and-sandbox", prompt]
 
     @staticmethod
@@ -61,6 +77,8 @@ class CodexBackend(AgentBackend):
         workdir: str = "",
     ) -> list[str]:
         # session_id unused.
+        if docker:
+            return ["sh", "-c", CodexBackend._DOCKER_WRAPPER, "sh", wrap_up_prompt]
         return ["codex", "--dangerously-bypass-approvals-and-sandbox", wrap_up_prompt]
 
     # ── Docker infrastructure ─────────────────────────────────────────────────
@@ -68,25 +86,46 @@ class CodexBackend(AgentBackend):
     @staticmethod
     def _read_codex_creds() -> tuple[str | None, Literal["API_KEY", "OAUTH"] | None]:
         """Return (credential, source) from env or ~/.codex/auth.json. Single read."""
-        key = os.environ.get("OPENAI_API_KEY")
-        if key:
-            logger.debug("Using OPENAI_API_KEY from environment")
-            return key, "API_KEY"
         auth_file = Path.home() / ".codex" / "auth.json"
+        data: dict = {}
         if auth_file.exists():
             try:
                 data = json.loads(auth_file.read_text())
             except (json.JSONDecodeError, OSError):
                 logger.debug("Failed to parse ~/.codex/auth.json")
-                return None, None
-            if data.get("OPENAI_API_KEY"):
-                logger.debug("Using OPENAI_API_KEY from ~/.codex/auth.json")
-                return data["OPENAI_API_KEY"], "API_KEY"
+
+        auth_mode = data.get("auth_mode", "")
+
+        # Explicit OAuth login ("oauth" or "chatgpt" auth_mode): use the OAuth
+        # access_token and ignore any OPENAI_API_KEY env var or file field.
+        # An env var set before the user switched to OAuth would otherwise shadow
+        # the OAuth tokens and force API-key mode, causing the proxy to target
+        # api.openai.com instead of chatgpt.com.
+        if auth_mode in ("oauth", "chatgpt"):
             tokens = data.get("tokens") or {}
             access_token = tokens.get("access_token")
             if access_token:
-                logger.debug("Using OAuth access_token from ~/.codex/auth.json")
+                logger.debug("Using OAuth access_token from ~/.codex/auth.json (auth_mode=%s)", auth_mode)
                 return access_token, "OAUTH"
+            logger.debug("auth_mode is %s but no access_token found", auth_mode)
+            return None, None
+
+        # API-key mode (or no auth.json / unknown auth_mode): env var first, then file.
+        key = os.environ.get("OPENAI_API_KEY")
+        if key:
+            logger.debug("Using OPENAI_API_KEY from environment")
+            return key, "API_KEY"
+        if data.get("OPENAI_API_KEY"):
+            logger.debug("Using OPENAI_API_KEY from ~/.codex/auth.json")
+            return data["OPENAI_API_KEY"], "API_KEY"
+
+        # Fallback: OAuth tokens even if auth_mode wasn't explicitly set.
+        tokens = data.get("tokens") or {}
+        access_token = tokens.get("access_token")
+        if access_token:
+            logger.debug("Using OAuth access_token from ~/.codex/auth.json (no auth_mode)")
+            return access_token, "OAUTH"
+
         logger.debug("No OpenAI API key found")
         return None, None
 
@@ -200,10 +239,20 @@ class CodexBackend(AgentBackend):
         proxy_token: str,
         workdir: str,
     ) -> None:
-        # Write a fake auth.json that authenticates to our proxy via API key
-        # mode, regardless of the user's real auth mode (API key or OAuth).
+        # Write a fake auth.json that authenticates to our proxy.
         # The real credential is injected by the proxy; the container only ever
         # sees the short-lived proxy token.
+        #
+        # Always use auth_mode="apikey" regardless of the host's real auth mode.
+        # In apikey mode, codex respects OPENAI_BASE_URL (which points to the
+        # proxy) for its API calls.  In chatgpt mode, codex bypasses
+        # OPENAI_BASE_URL and goes directly to chatgpt.com, so the proxy is
+        # never involved.
+        #
+        # For OAuth hosts, container_env sets OPENAI_BASE_URL without a /v1
+        # suffix (e.g. http://proxy) and proxy_kwargs targets
+        # chatgpt.com/backend-api/codex, so codex's apikey path
+        # ({OPENAI_BASE_URL}/responses) correctly maps to the OAuth endpoint.
         fake_auth = {"auth_mode": "apikey", "OPENAI_API_KEY": proxy_token, "tokens": None}
         (session_dir / "codex_auth.json").write_text(json.dumps(fake_auth))
 

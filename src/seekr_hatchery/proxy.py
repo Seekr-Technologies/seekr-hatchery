@@ -58,6 +58,11 @@ def _sanitize_header(value: str) -> str:
 class _ProxyHandler(http.server.BaseHTTPRequestHandler):
     """Validates the proxy token, strips inbound auth, injects the real API key, and forwards."""
 
+    # HTTP/1.1 is required for WebSocket upgrades (RFC 6455 §4.1) and for
+    # correct chunked-transfer / keep-alive handling.  Python's BaseHTTPRequestHandler
+    # defaults to HTTP/1.0; override it here.
+    protocol_version = "HTTP/1.1"
+
     # Overridden per-server-instance by start_proxy via a fresh subclass.
     # Must be a staticmethod to prevent Python's descriptor protocol from
     # injecting `self` as the first argument when called as self.header_mutator().
@@ -92,7 +97,51 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
             return True
         return False
 
+    # Headers that are normally hop-by-hop but are REQUIRED for a WebSocket
+    # upgrade response to reach the client (RFC 6455 §4.1).
+    _WS_KEEP: frozenset[str] = frozenset(
+        {"connection", "upgrade", "sec-websocket-accept", "sec-websocket-protocol", "sec-websocket-extensions"}
+    )
+
+    def _relay_websocket(self, upstream_reader, upstream_sock) -> None:
+        """Relay WebSocket frames bidirectionally after a 101 upgrade.
+
+        upstream_reader — BufferedReader wrapping the upstream SSL socket;
+            may already hold bytes read-ahead from the 101 response.
+        upstream_sock   — the underlying SSL socket; used for writes to upstream.
+        """
+        self.wfile.flush()
+
+        def upstream_to_client() -> None:
+            try:
+                while True:
+                    chunk = upstream_reader.read1(_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+            except Exception:
+                pass
+
+        relay_thread = threading.Thread(target=upstream_to_client, daemon=True)
+        relay_thread.start()
+        try:
+            while True:
+                chunk = self.rfile.read1(_CHUNK_SIZE)
+                if not chunk:
+                    break
+                upstream_sock.sendall(chunk)
+        except Exception:
+            pass
+        finally:
+            relay_thread.join(timeout=30)
+
     def _handle_request(self, *, _retried: bool = False) -> None:
+        # HTTP/1.1 defaults to keep-alive; force close after each request so
+        # clients don't wait for a second request that never comes.  WebSocket
+        # relay sets this implicitly by returning after the relay completes.
+        self.close_connection = True
+
         # ── 0. Validate proxy token ───────────────────────────────────────────
         # Reject requests whose token doesn't match the stable per-task proxy
         # token.  This prevents other containers (which share the host gateway
@@ -104,16 +153,19 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
         # ── 1. Build outgoing headers ─────────────────────────────────────────
         # Strip hop-by-hop headers; delegate auth stripping + key injection to
         # the backend mutator.
-        pre_auth_headers: dict[str, str] = {
-            k: v for k, v in self.headers.items()
-            if k.lower() not in _HOP_BY_HOP
-        }
+        pre_auth_headers: dict[str, str] = {k: v for k, v in self.headers.items() if k.lower() not in _HOP_BY_HOP}
 
         # Backend owns all auth header logic.
         out_headers = self.header_mutator(pre_auth_headers)
 
         # Always set host (routing concern owned by proxy).
         out_headers["host"] = self.target_host
+
+        # Preserve Connection/Upgrade on the outbound leg for WebSocket
+        # handshakes so the upstream actually performs the upgrade.
+        if self.headers.get("upgrade", "").lower() == "websocket":
+            out_headers["Connection"] = "Upgrade"
+            out_headers["Upgrade"] = "websocket"
 
         # ── 2. Read request body ──────────────────────────────────────────────
         content_length = int(self.headers.get("content-length", 0) or 0)
@@ -125,7 +177,26 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
             conn.request(self.command, self.path_prefix + self.path, body=body, headers=out_headers)
             resp = conn.getresponse()
 
-            # ── 3a. 401 retry — refresh credentials once ──────────────────────
+            # ── 3a. 101 Switching Protocols — WebSocket relay ─────────────────
+            # Forward the upgrade response (including hop-by-hop headers required
+            # by RFC 6455) then relay raw bytes bidirectionally.
+            if resp.status == 101:
+                logger.debug("proxy: WebSocket upgrade to %s, starting relay", self.target_host)
+                self.send_response(101)
+                for key, value in resp.getheaders():
+                    if key.lower() in _HOP_BY_HOP and key.lower() not in self._WS_KEEP:
+                        continue
+                    self.send_header(_sanitize_header(key), _sanitize_header(value))
+                self.end_headers()
+                # Detach conn.sock before conn.close() so the relay keeps the
+                # SSL socket open.  resp.fp is the BufferedReader wrapping the
+                # same socket and may already hold read-ahead bytes.
+                upstream_sock = conn.sock
+                conn.sock = None
+                self._relay_websocket(resp.fp, upstream_sock)
+                return
+
+            # ── 3b. 401 retry — refresh credentials once ──────────────────────
             if resp.status == 401 and not _retried:
                 # Drain and discard the 401 body (always small).
                 resp.read()
