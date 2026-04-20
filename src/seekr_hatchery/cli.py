@@ -714,7 +714,8 @@ def cmd_new(
             task_path = tasks.write_task_file(worktree, name, branch, objective=objective)
 
         if in_repo:
-            tasks.run(["git", "add", ".hatchery/"], cwd=worktree)
+            add_path = ".hatchery/tasks/" if no_commit_docker else ".hatchery/"
+            tasks.run(["git", "add", add_path], cwd=worktree)
             tasks.run(["git", "commit", "-m", f"task({name}): add task file"], cwd=worktree)
 
         meta = {
