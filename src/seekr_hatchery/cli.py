@@ -480,6 +480,38 @@ def _chat_post_exit(name: str, repo: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Shell completion
+# ---------------------------------------------------------------------------
+
+
+class TaskNameType(click.ParamType):
+    """Click parameter type that tab-completes existing task names."""
+
+    name = "name"
+
+    def convert(self, value: str, param: click.Parameter | None, ctx: click.Context | None) -> str:
+        return value
+
+    def shell_complete(
+        self,
+        ctx: click.Context,
+        param: click.Parameter,
+        incomplete: str,
+    ) -> list:
+        from click.shell_completion import CompletionItem
+
+        try:
+            repo, _ = git.git_root_or_cwd()
+            all_tasks = tasks.repo_tasks_for_current_repo(repo)
+            return [CompletionItem(t["name"]) for t in all_tasks if t.get("name", "").startswith(incomplete)]
+        except Exception:
+            return []
+
+
+TASK_NAME = TaskNameType()
+
+
+# ---------------------------------------------------------------------------
 # CLI group
 # ---------------------------------------------------------------------------
 
@@ -497,12 +529,13 @@ def cli(log_level: str, log_file: str | None) -> None:
     """AI coding agent task orchestration."""
     configure_logging(log_level, log_file)
     tasks.migrate_db()
-    update = _check_for_update()
-    if update:
-        latest, current = update
-        ui.warn(
-            f"hatchery {latest} is available (you have {current}). Run: hatchery self update",
-        )
+    if not os.environ.get("_HATCHERY_COMPLETE"):
+        update = _check_for_update()
+        if update:
+            latest, current = update
+            ui.warn(
+                f"hatchery {latest} is available (you have {current}). Run: hatchery self update",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -552,7 +585,14 @@ def cli(log_level: str, log_file: str | None) -> None:
     ),
 )
 def cmd_new(
-    name: str, base: str, no_docker: bool, no_worktree: bool, editor: bool | None, agent_name: str, rebuild_sandbox: bool, no_commit_docker: bool
+    name: str,
+    base: str,
+    no_docker: bool,
+    no_worktree: bool,
+    editor: bool | None,
+    agent_name: str,
+    rebuild_sandbox: bool,
+    no_commit_docker: bool,
 ) -> None:
     """Start a new task."""
     ui.hatchery_header(_version)
@@ -604,7 +644,12 @@ def cmd_new(
             if df_created or dc_created:
                 ui.info("  Committing...")
                 tasks.run(
-                    ["git", "add", str(docker.dockerfile_path(worktree, backend).relative_to(worktree)), str(tasks.DOCKER_CONFIG)],
+                    [
+                        "git",
+                        "add",
+                        str(docker.dockerfile_path(worktree, backend).relative_to(worktree)),
+                        str(tasks.DOCKER_CONFIG),
+                    ],
                     cwd=worktree,
                 )
                 tasks.run(
@@ -646,7 +691,18 @@ def cmd_new(
 
         runtime = docker.resolve_runtime(repo, worktree, no_docker, backend=backend)
         main_branch = git.get_default_branch(repo)
-        _launch_new(repo, worktree, name, session_id, backend, runtime, branch, main_branch, no_worktree, no_cache=rebuild_sandbox)
+        _launch_new(
+            repo,
+            worktree,
+            name,
+            session_id,
+            backend,
+            runtime,
+            branch,
+            main_branch,
+            no_worktree,
+            no_cache=rebuild_sandbox,
+        )
     except KeyboardInterrupt:
         if not no_worktree:
             git.remove_worktree(repo, worktree)
@@ -656,7 +712,7 @@ def cmd_new(
 
 
 @cli.command("chat")
-@click.argument("name", required=False, default=None)
+@click.argument("name", required=False, default=None, type=TASK_NAME)
 @click.option(
     "--agent",
     "agent_name",
@@ -724,7 +780,7 @@ def cmd_chat(name: str | None, agent_name: str) -> None:
 
 
 @cli.command("resume")
-@click.argument("name")
+@click.argument("name", type=TASK_NAME)
 @click.option("--no-docker", is_flag=True, help="Run agent directly, even if a Dockerfile is present")
 @click.option(
     "--rebuild-sandbox",
@@ -771,7 +827,19 @@ def cmd_resume(name: str, no_docker: bool, rebuild_sandbox: bool) -> None:
     is_chat = meta.get("type") == "chat"
     runtime = docker.resolve_runtime(repo, worktree, no_docker, backend=backend)
     main_branch = git.get_default_branch(repo)
-    _launch_resume(repo, worktree, name, session_id, backend, runtime, meta["branch"], main_branch, no_worktree, is_chat=is_chat, no_cache=rebuild_sandbox)
+    _launch_resume(
+        repo,
+        worktree,
+        name,
+        session_id,
+        backend,
+        runtime,
+        meta["branch"],
+        main_branch,
+        no_worktree,
+        is_chat=is_chat,
+        no_cache=rebuild_sandbox,
+    )
 
 
 @cli.command("sandbox")
@@ -806,7 +874,7 @@ def cmd_sandbox(shell: str, rebuild_sandbox: bool) -> None:
 
 
 @cli.command("exec")
-@click.argument("name")
+@click.argument("name", type=TASK_NAME)
 @click.option("--shell", default="/bin/bash", help="Shell to launch (default: /bin/bash)")
 def cmd_exec(name: str, shell: str) -> None:
     """Exec an interactive shell into a running task's container."""
@@ -816,7 +884,7 @@ def cmd_exec(name: str, shell: str) -> None:
 
 
 @cli.command("done")
-@click.argument("name")
+@click.argument("name", type=TASK_NAME)
 def cmd_done(name: str) -> None:
     """Mark complete and remove worktree."""
     repo, _ = git.git_root_or_cwd()
@@ -834,7 +902,7 @@ def cmd_abort(name: str) -> None:
 
 
 @cli.command("archive")
-@click.argument("name")
+@click.argument("name", type=TASK_NAME)
 def cmd_archive(name: str) -> None:
     """Park a task: remove worktree, keep branch for later resumption."""
     repo, _ = git.git_root_or_cwd()
@@ -866,7 +934,7 @@ def cmd_archive(name: str) -> None:
 
 
 @cli.command("delete")
-@click.argument("name")
+@click.argument("name", type=TASK_NAME)
 def cmd_delete(name: str) -> None:
     """Delete task, branch, and all metadata."""
     repo, _ = git.git_root_or_cwd()
@@ -891,7 +959,7 @@ def cmd_list(show_all: bool) -> None:
 
 
 @cli.command("status")
-@click.argument("name")
+@click.argument("name", type=TASK_NAME)
 def cmd_status(name: str) -> None:
     """Show task file and metadata."""
     repo, _ = git.git_root_or_cwd()
@@ -920,7 +988,7 @@ def cmd_status(name: str) -> None:
 
 
 @cli.command("shell")
-@click.argument("name")
+@click.argument("name", type=TASK_NAME)
 def cmd_shell(name: str) -> None:
     """Open a native shell in the task's worktree."""
     repo, _ = git.git_root_or_cwd()
@@ -996,6 +1064,41 @@ def cmd_self_update() -> None:
     ui.error("Could not detect uv tool installation.")
     ui.info("Run manually: uv tool upgrade seekr-hatchery")
     sys.exit(1)
+
+
+@cmd_self.command("completions")
+def cmd_self_completions() -> None:
+    """Install shell tab-completion into your shell's rc file."""
+    shell = Path(os.environ.get("SHELL", "")).name
+
+    rc_files = {
+        "bash": Path.home() / ".bashrc",
+        "zsh": Path.home() / ".zshrc",
+        "fish": Path.home() / ".config" / "fish" / "config.fish",
+    }
+    completion_lines = {
+        "bash": 'eval "$(_HATCHERY_COMPLETE=bash_source hatchery)"',
+        "zsh": 'eval "$(_HATCHERY_COMPLETE=zsh_source hatchery)"',
+        "fish": "_HATCHERY_COMPLETE=fish_source hatchery | source",
+    }
+
+    if shell not in rc_files:
+        ui.error(f"Unsupported shell: {shell!r}. Run `hatchery completion <shell>` for manual instructions.")
+        sys.exit(1)
+
+    rc_file = rc_files[shell]
+    line = completion_lines[shell]
+
+    if rc_file.exists() and "_HATCHERY_COMPLETE" in rc_file.read_text():
+        ui.success(f"Shell completion is already installed in {rc_file}.")
+        return
+
+    rc_file.parent.mkdir(parents=True, exist_ok=True)
+    with rc_file.open("a") as f:
+        f.write(f"\n# hatchery shell completion\n{line}\n")
+
+    ui.success(f"Completion installed in {rc_file}.")
+    ui.note(f"Run `source {rc_file}` (or open a new terminal) to activate.")
 
 
 # ---------------------------------------------------------------------------
