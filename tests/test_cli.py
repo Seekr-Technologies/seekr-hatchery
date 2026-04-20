@@ -11,6 +11,7 @@ import seekr_hatchery.docker as docker
 import seekr_hatchery.tasks as tasks
 from seekr_hatchery.cli import (
     _WRAP_UP_PROMPT,
+    TaskNameType,
     _launch_finalize,
     _launch_new,
     _launch_resume,
@@ -1985,7 +1986,6 @@ class TestExec:
 class TestCompletion:
     def test_task_name_type_empty_on_no_tasks(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        from seekr_hatchery.cli import TaskNameType
 
         t = TaskNameType()
         with patch("seekr_hatchery.tasks.TASKS_DB_DIR", tmp_path / "nonexistent"):
@@ -1993,7 +1993,6 @@ class TestCompletion:
         assert result == []
 
     def test_task_name_type_silent_on_error(self):
-        from seekr_hatchery.cli import TaskNameType
 
         t = TaskNameType()
         with patch("seekr_hatchery.git.git_root_or_cwd", side_effect=RuntimeError("boom")):
@@ -2001,7 +2000,6 @@ class TestCompletion:
         assert result == []
 
     def test_task_name_type_returns_matching(self, tmp_path):
-        from seekr_hatchery.cli import TaskNameType
 
         t = TaskNameType()
         fake_tasks = [

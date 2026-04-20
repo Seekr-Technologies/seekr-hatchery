@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import click
+from click.shell_completion import CompletionItem
 
 import seekr_hatchery.agents as agent
 import seekr_hatchery.docker as docker
@@ -498,8 +499,6 @@ class TaskNameType(click.ParamType):
         param: click.Parameter,
         incomplete: str,
     ) -> list:
-        from click.shell_completion import CompletionItem
-
         try:
             repo, _ = git.git_root_or_cwd()
             all_tasks = tasks.repo_tasks_for_current_repo(repo)
