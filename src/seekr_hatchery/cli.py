@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import click
+from click.shell_completion import CompletionItem
 
 import seekr_hatchery.agents as agent
 import seekr_hatchery.docker as docker
@@ -179,33 +180,36 @@ _WRAP_UP_PROMPT = (
 )
 
 
-def _do_delete(name: str, repo: Path, worktree: Path, meta: dict) -> None:
+def _do_delete(name: str, repo: Path, worktree: Path, meta: dict, *, confirmed: bool = False) -> None:
     branch = meta["branch"]
     no_worktree = meta.get("no_worktree", False)
 
     if not no_worktree:
         if worktree.exists():
             if git.has_uncommitted_changes(worktree):
-                ui.warn("there are uncommitted changes in the worktree.")
-            answer = input(f"Delete task '{name}' (worktree + branch + metadata)? [y/N] ").strip().lower()
-            if answer != "y":
-                ui.info("Aborted.")
-                return
+                ui.warn(f"Task '{name}': there are uncommitted changes in the worktree.")
+            if not confirmed:
+                answer = input(f"Delete task '{name}' (worktree + branch + metadata)? [y/N] ").strip().lower()
+                if answer != "y":
+                    ui.info("Aborted.")
+                    return
             git.remove_worktree(repo, worktree, force=True)
         else:
-            answer = input(f"Delete task '{name}' (branch + metadata)? [y/N] ").strip().lower()
-            if answer != "y":
-                ui.info("Aborted.")
-                return
+            if not confirmed:
+                answer = input(f"Delete task '{name}' (branch + metadata)? [y/N] ").strip().lower()
+                if answer != "y":
+                    ui.info("Aborted.")
+                    return
         if git.delete_branch(repo, branch):
             ui.info(f"Branch deleted: {branch}")
         else:
             ui.info(f"Could not delete branch {branch} (may already be gone)")
     else:
-        answer = input(f"Delete task '{name}' (metadata only)? [y/N] ").strip().lower()
-        if answer != "y":
-            ui.info("Aborted.")
-            return
+        if not confirmed:
+            answer = input(f"Delete task '{name}' (metadata only)? [y/N] ").strip().lower()
+            if answer != "y":
+                ui.info("Aborted.")
+                return
 
     tasks.task_db_path(repo, name).unlink(missing_ok=True)
     ui.success(f"Task '{name}' deleted.")
@@ -480,11 +484,80 @@ def _chat_post_exit(name: str, repo: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Shell completion
+# ---------------------------------------------------------------------------
+
+
+class TaskNameType(click.ParamType):
+    """Click parameter type that tab-completes existing task names."""
+
+    name = "name"
+
+    def convert(self, value: str, param: click.Parameter | None, ctx: click.Context | None) -> str:
+        return value
+
+    def shell_complete(
+        self,
+        ctx: click.Context,
+        param: click.Parameter,
+        incomplete: str,
+    ) -> list:
+        try:
+            repo, _ = git.git_root_or_cwd()
+            all_tasks = tasks.repo_tasks_for_current_repo(repo)
+            return [CompletionItem(t["name"]) for t in all_tasks if t.get("name", "").startswith(incomplete)]
+        except Exception:
+            return []
+
+
+TASK_NAME = TaskNameType()
+
+
+# ---------------------------------------------------------------------------
 # CLI group
 # ---------------------------------------------------------------------------
 
 
-@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+class AliasedGroup(click.Group):
+    """Click Group subclass that supports short aliases shown in --help."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        # alias -> primary command name
+        self._aliases: dict[str, str] = {}
+
+    def add_alias(self, alias: str, target: str) -> None:
+        self._aliases[alias] = target
+
+    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
+        return super().get_command(ctx, self._aliases.get(cmd_name, cmd_name))
+
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        # Include aliases in tab-completion
+        return sorted(list(self.commands) + list(self._aliases))
+
+    def format_commands(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        # Build reverse map: primary -> sorted aliases
+        primary_to_aliases: dict[str, list[str]] = {}
+        for alias, primary in self._aliases.items():
+            primary_to_aliases.setdefault(primary, []).append(alias)
+
+        commands = []
+        for name in self.commands:
+            cmd = self.commands[name]
+            if cmd.hidden:
+                continue
+            aliases = sorted(primary_to_aliases.get(name, []))
+            parts = aliases + [name] if aliases else [name]
+            display = " | ".join(parts)
+            commands.append((display, cmd.get_short_help_str(limit=formatter.width)))
+
+        if commands:
+            with formatter.section("Commands"):
+                formatter.write_dl(commands)
+
+
+@click.group(cls=AliasedGroup, context_settings={"help_option_names": ["-h", "--help"]})
 @click.version_option(version=_version, prog_name="hatchery")
 @click.option(
     "--log-level",
@@ -497,12 +570,13 @@ def cli(log_level: str, log_file: str | None) -> None:
     """AI coding agent task orchestration."""
     configure_logging(log_level, log_file)
     tasks.migrate_db()
-    update = _check_for_update()
-    if update:
-        latest, current = update
-        ui.warn(
-            f"hatchery {latest} is available (you have {current}). Run: hatchery self update",
-        )
+    if not os.environ.get("_HATCHERY_COMPLETE"):
+        update = _check_for_update()
+        if update:
+            latest, current = update
+            ui.warn(
+                f"hatchery {latest} is available (you have {current}). Run: hatchery self update",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -552,7 +626,14 @@ def cli(log_level: str, log_file: str | None) -> None:
     ),
 )
 def cmd_new(
-    name: str, base: str, no_docker: bool, no_worktree: bool, editor: bool | None, agent_name: str, rebuild_sandbox: bool, no_commit_docker: bool
+    name: str,
+    base: str,
+    no_docker: bool,
+    no_worktree: bool,
+    editor: bool | None,
+    agent_name: str,
+    rebuild_sandbox: bool,
+    no_commit_docker: bool,
 ) -> None:
     """Start a new task."""
     ui.hatchery_header(_version)
@@ -604,7 +685,12 @@ def cmd_new(
             if df_created or dc_created:
                 ui.info("  Committing...")
                 tasks.run(
-                    ["git", "add", str(docker.dockerfile_path(worktree, backend).relative_to(worktree)), str(tasks.DOCKER_CONFIG)],
+                    [
+                        "git",
+                        "add",
+                        str(docker.dockerfile_path(worktree, backend).relative_to(worktree)),
+                        str(tasks.DOCKER_CONFIG),
+                    ],
                     cwd=worktree,
                 )
                 tasks.run(
@@ -628,7 +714,8 @@ def cmd_new(
             task_path = tasks.write_task_file(worktree, name, branch, objective=objective)
 
         if in_repo:
-            tasks.run(["git", "add", ".hatchery/"], cwd=worktree)
+            add_path = ".hatchery/tasks/" if no_commit_docker else ".hatchery/"
+            tasks.run(["git", "add", add_path], cwd=worktree)
             tasks.run(["git", "commit", "-m", f"task({name}): add task file"], cwd=worktree)
 
         meta = {
@@ -646,7 +733,18 @@ def cmd_new(
 
         runtime = docker.resolve_runtime(repo, worktree, no_docker, backend=backend)
         main_branch = git.get_default_branch(repo)
-        _launch_new(repo, worktree, name, session_id, backend, runtime, branch, main_branch, no_worktree, no_cache=rebuild_sandbox)
+        _launch_new(
+            repo,
+            worktree,
+            name,
+            session_id,
+            backend,
+            runtime,
+            branch,
+            main_branch,
+            no_worktree,
+            no_cache=rebuild_sandbox,
+        )
     except KeyboardInterrupt:
         if not no_worktree:
             git.remove_worktree(repo, worktree)
@@ -656,7 +754,7 @@ def cmd_new(
 
 
 @cli.command("chat")
-@click.argument("name", required=False, default=None)
+@click.argument("name", required=False, default=None, type=TASK_NAME)
 @click.option(
     "--agent",
     "agent_name",
@@ -724,7 +822,7 @@ def cmd_chat(name: str | None, agent_name: str) -> None:
 
 
 @cli.command("resume")
-@click.argument("name")
+@click.argument("name", type=TASK_NAME)
 @click.option("--no-docker", is_flag=True, help="Run agent directly, even if a Dockerfile is present")
 @click.option(
     "--rebuild-sandbox",
@@ -771,7 +869,19 @@ def cmd_resume(name: str, no_docker: bool, rebuild_sandbox: bool) -> None:
     is_chat = meta.get("type") == "chat"
     runtime = docker.resolve_runtime(repo, worktree, no_docker, backend=backend)
     main_branch = git.get_default_branch(repo)
-    _launch_resume(repo, worktree, name, session_id, backend, runtime, meta["branch"], main_branch, no_worktree, is_chat=is_chat, no_cache=rebuild_sandbox)
+    _launch_resume(
+        repo,
+        worktree,
+        name,
+        session_id,
+        backend,
+        runtime,
+        meta["branch"],
+        main_branch,
+        no_worktree,
+        is_chat=is_chat,
+        no_cache=rebuild_sandbox,
+    )
 
 
 @cli.command("sandbox")
@@ -806,7 +916,7 @@ def cmd_sandbox(shell: str, rebuild_sandbox: bool) -> None:
 
 
 @cli.command("exec")
-@click.argument("name")
+@click.argument("name", type=TASK_NAME)
 @click.option("--shell", default="/bin/bash", help="Shell to launch (default: /bin/bash)")
 def cmd_exec(name: str, shell: str) -> None:
     """Exec an interactive shell into a running task's container."""
@@ -816,13 +926,13 @@ def cmd_exec(name: str, shell: str) -> None:
 
 
 @cli.command("done")
-@click.argument("name")
-def cmd_done(name: str) -> None:
+@click.argument("names", nargs=-1, required=True, type=TASK_NAME)
+def cmd_done(names: tuple[str, ...]) -> None:
     """Mark complete and remove worktree."""
     repo, _ = git.git_root_or_cwd()
-    meta = tasks.load_task(repo, name)
-    worktree = Path(meta["worktree"])
-    _do_mark_done(meta["name"], Path(meta["repo"]), worktree)
+    for name in names:
+        meta = tasks.load_task(repo, name)
+        _do_mark_done(meta["name"], Path(meta["repo"]), Path(meta["worktree"]))
 
 
 @cli.command("abort", hidden=True)
@@ -834,49 +944,60 @@ def cmd_abort(name: str) -> None:
 
 
 @cli.command("archive")
-@click.argument("name")
-def cmd_archive(name: str) -> None:
+@click.argument("names", nargs=-1, required=True, type=TASK_NAME)
+def cmd_archive(names: tuple[str, ...]) -> None:
     """Park a task: remove worktree, keep branch for later resumption."""
     repo, _ = git.git_root_or_cwd()
-    meta = tasks.load_task(repo, name)
-    worktree = Path(meta["worktree"])
-    repo = Path(meta["repo"])
-    no_worktree = meta.get("no_worktree", False)
+    for name in names:
+        meta = tasks.load_task(repo, name)
+        worktree = Path(meta["worktree"])
+        task_repo = Path(meta["repo"])
+        no_worktree = meta.get("no_worktree", False)
 
-    if no_worktree:
-        ui.note("no-worktree task — no worktree or branch to remove.")
-    else:
-        if worktree.exists():
-            if git.has_uncommitted_changes(worktree):
-                ui.warn("there are uncommitted changes in the worktree.")
-                ui.info(git.uncommitted_changes_summary(worktree))
-                answer = input("Commit them as a checkpoint before archiving? [Y/n] ").strip().lower()
-                if answer != "n":
-                    tasks.run(["git", "add", "-A"], cwd=worktree)
-                    tasks.run(["git", "commit", "-m", f"task({name}): checkpoint before archive"], cwd=worktree)
-            git.remove_worktree(repo, worktree)
-            ui.info(f"Worktree removed: {worktree}")
+        if no_worktree:
+            ui.note(f"Task '{name}': no-worktree task — no worktree or branch to remove.")
         else:
-            ui.info("Worktree not found (may already be removed).")
-        ui.info(f"Branch retained: {meta['branch']}")
+            if worktree.exists():
+                if git.has_uncommitted_changes(worktree):
+                    ui.warn(f"Task '{name}': there are uncommitted changes in the worktree.")
+                    ui.info(git.uncommitted_changes_summary(worktree))
+                    answer = input("Commit them as a checkpoint before archiving? [Y/n] ").strip().lower()
+                    if answer != "n":
+                        tasks.run(["git", "add", "-A"], cwd=worktree)
+                        tasks.run(["git", "commit", "-m", f"task({name}): checkpoint before archive"], cwd=worktree)
+                git.remove_worktree(task_repo, worktree)
+                ui.info(f"Worktree removed: {worktree}")
+            else:
+                ui.info(f"Task '{name}': worktree not found (may already be removed).")
+            ui.info(f"Branch retained: {meta['branch']}")
 
-    meta["status"] = "archived"
-    tasks.save_task(meta)
-    ui.success(f"Task '{name}' archived. Resume with: hatchery resume {name}")
+        meta["status"] = "archived"
+        tasks.save_task(meta)
+        ui.success(f"Task '{name}' archived. Resume with: hatchery resume {name}")
 
 
 @cli.command("delete")
-@click.argument("name")
-def cmd_delete(name: str) -> None:
+@click.argument("names", nargs=-1, required=True, type=TASK_NAME)
+@click.option("-f", "--force", is_flag=True, help="Skip confirmation prompt.")
+def cmd_delete(names: tuple[str, ...], force: bool) -> None:
     """Delete task, branch, and all metadata."""
     repo, _ = git.git_root_or_cwd()
-    meta = tasks.load_task(repo, name)
-    worktree = Path(meta["worktree"])
-    _do_delete(meta["name"], repo, worktree, meta)
+    if len(names) > 1:
+        metas = [tasks.load_task(repo, n) for n in names]
+        if not force:
+            answer = input(f"Delete {len(names)} tasks ({', '.join(names)})? [y/N] ").strip().lower()
+            if answer != "y":
+                ui.info("Aborted.")
+                return
+        for meta in metas:
+            _do_delete(meta["name"], repo, Path(meta["worktree"]), meta, confirmed=True)
+    else:
+        meta = tasks.load_task(repo, names[0])
+        _do_delete(meta["name"], repo, Path(meta["worktree"]), meta, confirmed=force)
 
 
 @cli.command("list")
-@click.option("--all", "show_all", is_flag=True, help="Show all tasks, including completed and aborted")
+@click.option("-a", "--all", "show_all", is_flag=True, help="Show all tasks, including completed and aborted")
 def cmd_list(show_all: bool) -> None:
     """List tasks for current repo."""
     repo, _ = git.git_root_or_cwd()
@@ -890,8 +1011,10 @@ def cmd_list(show_all: bool) -> None:
     ui.task_list_table(task_list, archived_count, show_all)
 
 
+
+
 @cli.command("status")
-@click.argument("name")
+@click.argument("name", type=TASK_NAME)
 def cmd_status(name: str) -> None:
     """Show task file and metadata."""
     repo, _ = git.git_root_or_cwd()
@@ -919,8 +1042,9 @@ def cmd_status(name: str) -> None:
         click.echo("\n(Task file not accessible — worktree may have been removed)")
 
 
+
 @cli.command("shell")
-@click.argument("name")
+@click.argument("name", type=TASK_NAME)
 def cmd_shell(name: str) -> None:
     """Open a native shell in the task's worktree."""
     repo, _ = git.git_root_or_cwd()
@@ -996,6 +1120,49 @@ def cmd_self_update() -> None:
     ui.error("Could not detect uv tool installation.")
     ui.info("Run manually: uv tool upgrade seekr-hatchery")
     sys.exit(1)
+
+
+@cmd_self.command("completions")
+def cmd_self_completions() -> None:
+    """Install shell tab-completion into your shell's rc file."""
+    shell = Path(os.environ.get("SHELL", "")).name
+
+    rc_files = {
+        "bash": Path.home() / ".bashrc",
+        "zsh": Path.home() / ".zshrc",
+        "fish": Path.home() / ".config" / "fish" / "config.fish",
+    }
+    completion_lines = {
+        "bash": 'eval "$(_HATCHERY_COMPLETE=bash_source hatchery)"',
+        "zsh": 'eval "$(_HATCHERY_COMPLETE=zsh_source hatchery)"',
+        "fish": "_HATCHERY_COMPLETE=fish_source hatchery | source",
+    }
+
+    if shell not in rc_files:
+        ui.error(f"Unsupported shell: {shell!r}. Run `hatchery completion <shell>` for manual instructions.")
+        sys.exit(1)
+
+    rc_file = rc_files[shell]
+    line = completion_lines[shell]
+
+    if rc_file.exists() and "_HATCHERY_COMPLETE" in rc_file.read_text():
+        ui.success(f"Shell completion is already installed in {rc_file}.")
+        return
+
+    rc_file.parent.mkdir(parents=True, exist_ok=True)
+    with rc_file.open("a") as f:
+        f.write(f"\n# hatchery shell completion\n{line}\n")
+
+    ui.success(f"Completion installed in {rc_file}.")
+    ui.note(f"Run `source {rc_file}` (or open a new terminal) to activate.")
+
+
+# ---------------------------------------------------------------------------
+# Aliases (shown as name|alias in --help, resolved in AliasedGroup)
+# ---------------------------------------------------------------------------
+
+cli.add_alias("ls", "list")
+cli.add_alias("st", "status")
 
 
 # ---------------------------------------------------------------------------
