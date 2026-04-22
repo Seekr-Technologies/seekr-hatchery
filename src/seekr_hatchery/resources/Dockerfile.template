@@ -50,6 +50,12 @@ ENV PATH="/home/hatchery/.npm-global/bin:/home/hatchery/.local/bin:$PATH"
 #     && rm -rf /var/lib/apt/lists/*
 # USER hatchery
 
+# ── kubectl ───────────────────────────────────────────────────────────────────
+# Uncomment to enable kubectl inside the sandbox.
+# Required when using the `kubernetes:` feature in .hatchery/docker.yaml.
+# Bump the version tag to match your cluster's minor version (±1 is supported).
+# COPY --from=bitnami/kubectl:1.32.3 /opt/bitnami/kubectl/bin/kubectl /usr/local/bin/kubectl
+
 # ── Podman-in-Podman (DinD) ──────────────────────────────────────────────────
 # Uncomment this section AND set `dind: true` in .hatchery/docker.yaml.
 {{DIND}}

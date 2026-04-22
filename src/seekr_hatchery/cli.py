@@ -912,6 +912,8 @@ def cmd_sandbox(shell: str, rebuild_sandbox: bool) -> None:
         )
     runtime = docker.detect_runtime()
     config = docker.load_docker_config(repo)
+    features = docker.docker_features(config)
+    ui.banner("sandbox", repo, sandbox=True, worktree=False, features=features)
     docker.launch_sandbox_shell(repo, backend, config, runtime, shell=shell, no_cache=rebuild_sandbox)
 
 

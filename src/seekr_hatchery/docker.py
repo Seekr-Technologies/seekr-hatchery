@@ -8,7 +8,8 @@ import sys
 import tempfile
 import uuid
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from enum import Enum
 from pathlib import Path
 from typing import Literal
@@ -18,9 +19,11 @@ import yaml
 from pydantic import BaseModel, ConfigDict, field_validator
 
 import seekr_hatchery.agents as agent
+import seekr_hatchery.kubectl_proxy as _kubectl_proxy
 import seekr_hatchery.proxy as proxy
 import seekr_hatchery.tasks as tasks
 import seekr_hatchery.ui as ui
+from seekr_hatchery.kubectl_proxy import KubectlConfig
 
 logger = logging.getLogger("hatchery")
 
@@ -126,6 +129,7 @@ class DockerConfig(BaseModel):
     mounts: list[str] = []
     dind: bool = False
     cap_add: list[str] = []
+    kubernetes: KubectlConfig | None = None
 
     @field_validator("cap_add", mode="before")
     @classmethod
@@ -182,6 +186,60 @@ def get_or_create_proxy_token(repo: Path, name: str) -> str:
     token_file.write_text(token)
     logger.debug("Created proxy token for task %r", name)
     return token
+
+
+# ── kubectl helpers ───────────────────────────────────────────────────────────
+
+
+def _get_or_create_kubectl_token(session_dir: Path) -> str:
+    """Return the stable kubectl RBAC proxy token, creating it on first call."""
+    token_file = session_dir / "kubectl_proxy_token"
+    if token_file.exists():
+        return token_file.read_text().strip()
+    token = str(uuid.uuid4())
+    token_file.write_text(token)
+    return token
+
+
+@contextmanager
+def _kubectl_context(
+    config: DockerConfig,
+    session_dir: Path,
+) -> Generator[list[str], None, None]:
+    """Context manager that starts the kubectl proxy chain and yields extra mounts.
+
+    Yields an empty list when ``config.kubernetes`` is ``None``.  On exit
+    (normal or exceptional) the RBAC proxy and kubectl proxy subprocess are
+    stopped.
+    """
+    if config.kubernetes is None:
+        yield []
+        return
+
+    kubectl_proxy_token = _get_or_create_kubectl_token(session_dir)
+
+    # Start kubectl proxy subprocess (uses host kubeconfig).
+    kubectl_proc, kube_port = _kubectl_proxy.start_kubectl_proxy_proc(
+        context=config.kubernetes.context
+    )
+
+    # Start RBAC filtering proxy in front of it (TLS; returns cert_pem for kubeconfig).
+    rbac_server, rbac_port, ca_cert_pem = _kubectl_proxy.start_rbac_proxy(
+        config.kubernetes.rules, kubectl_proxy_token, kube_port
+    )
+
+    # Write a kubeconfig pointing to the RBAC proxy (HTTPS with pinned cert).
+    kubeconfig_path = session_dir / "kubeconfig"
+    kubeconfig_path.write_text(
+        _kubectl_proxy.make_kubeconfig(rbac_port, kubectl_proxy_token, ca_cert_pem)
+    )
+    kubeconfig_path.chmod(0o600)
+
+    try:
+        yield [f"{kubeconfig_path}:{agent.CONTAINER_HOME}/.kube/config:ro"]
+    finally:
+        _kubectl_proxy.stop_rbac_proxy(rbac_server)
+        _kubectl_proxy.stop_kubectl_proxy_proc(kubectl_proc)
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
@@ -379,6 +437,8 @@ def docker_features(config: DockerConfig) -> list[str]:
     features = []
     if config.dind:
         features.append("DinD")
+    if config.kubernetes is not None:
+        features.append("kubectl")
     return features
 
 
@@ -663,6 +723,7 @@ def _run_container(
     _interactive: bool = False,
     cap_add: list[str] | None = None,
     container_name: str | None = None,
+    add_host_gateway: bool = False,
 ) -> subprocess.CompletedProcess[str] | None:
     """Assemble and execute the container run command for the given agent session.
 
@@ -673,6 +734,10 @@ def _run_container(
     *proxy_token* is a stable per-task UUID used as the API key env var inside
     the container.  It must be provided whenever *mutator* is set.
     The same token is reused on resume.
+
+    *add_host_gateway* forces the ``--add-host=host.docker.internal:host-gateway``
+    flag on Linux even when the API proxy is not active (e.g. when the kubectl
+    feature is enabled and the container needs to reach the RBAC proxy).
     """
     # Start the host-side proxy so the real credentials never enter the container.
     proxy_server = None
@@ -696,10 +761,12 @@ def _run_container(
     if mutator is not None and proxy_port is not None:
         for key, val in backend.container_env(proxy_token, proxy_port).items():
             cmd += ["-e", f"{key}={val}"]
-        # On Linux, Docker doesn't automatically expose host.docker.internal;
-        # --add-host maps it to the host gateway so the container can reach the proxy.
-        if sys.platform == "linux":
-            cmd += ["--add-host=host.docker.internal:host-gateway"]
+
+    # On Linux, Docker doesn't automatically expose host.docker.internal;
+    # --add-host maps it to the host gateway so the container can reach any
+    # host-side proxy (API proxy and/or kubectl RBAC proxy).
+    if (proxy_port is not None or add_host_gateway) and sys.platform == "linux":
+        cmd += ["--add-host=host.docker.internal:host-gateway"]
 
     cmd += ["-e", f"HATCHERY_TASK={name}"]
     cmd += ["-e", f"HATCHERY_REPO={hatchery_repo}"]
@@ -833,22 +900,26 @@ def launch_docker(
     build_docker_image(repo, worktree, name, backend, runtime=runtime, no_cache=no_cache)
     image = docker_image_name(repo, name)
     mounts = docker_mounts(repo, worktree, name, backend, session_dir, config, git_sentinels, worktree_git_ptr=git_ptr)
+
     logger.debug(f"Launching {runtime.binary} container for task '{name}'")
-    return _run_container(
-        image,
-        mounts,
-        container_worktree,
-        tasks.CONTAINER_REPO_ROOT,
-        name,
-        mutator,
-        proxy_token,
-        agent_cmd,
-        backend=backend,
-        dind=config.dind,
-        runtime=runtime,
-        cap_add=config.cap_add,
-        container_name=task_container_name(repo, name),
-    )
+    with _kubectl_context(config, session_dir) as kubectl_mounts:
+        mounts.extend(kubectl_mounts)
+        _run_container(
+            image,
+            mounts,
+            container_worktree,
+            tasks.CONTAINER_REPO_ROOT,
+            name,
+            mutator,
+            proxy_token,
+            agent_cmd,
+            backend=backend,
+            dind=config.dind,
+            runtime=runtime,
+            cap_add=config.cap_add,
+            container_name=task_container_name(repo, name),
+            add_host_gateway=(config.kubernetes is not None),
+        )
 
 
 def launch_docker_no_worktree(
@@ -885,22 +956,26 @@ def launch_docker_no_worktree(
     build_docker_image(cwd, cwd, name, backend, runtime=runtime, no_cache=no_cache)
     image = docker_image_name(cwd, name)
     mounts = docker_mounts_no_worktree(cwd, backend, session_dir, config=config)
+
     logger.debug(f"Launching {runtime.binary} container for task '{name}' (no-worktree mode)")
-    return _run_container(
-        image,
-        mounts,
-        "/workspace",
-        "/workspace",
-        name,
-        mutator,
-        proxy_token,
-        agent_cmd,
-        backend=backend,
-        dind=config.dind,
-        runtime=runtime,
-        cap_add=config.cap_add,
-        container_name=task_container_name(cwd, name),
-    )
+    with _kubectl_context(config, session_dir) as kubectl_mounts:
+        mounts.extend(kubectl_mounts)
+        _run_container(
+            image,
+            mounts,
+            "/workspace",
+            "/workspace",
+            name,
+            mutator,
+            proxy_token,
+            agent_cmd,
+            backend=backend,
+            dind=config.dind,
+            runtime=runtime,
+            cap_add=config.cap_add,
+            container_name=task_container_name(cwd, name),
+            add_host_gateway=(config.kubernetes is not None),
+        )
 
 
 def launch_sandbox_shell(
@@ -923,19 +998,32 @@ def launch_sandbox_shell(
         + _default_home_mounts()
         + _construct_docker_mounts(config)
     )
-    _run_container(
-        image=image,
-        mounts=mounts,
-        workdir=tasks.CONTAINER_REPO_ROOT,
-        hatchery_repo=tasks.CONTAINER_REPO_ROOT,
-        name="sandbox",
-        mutator=None,
-        proxy_token=None,
-        agent_cmd=[],
-        runtime=runtime,
-        _command_override=[shell],
-        _interactive=True,
-    )
+
+    # Use a short-lived session dir under ~/.hatchery/ for the kubeconfig mount.
+    # tempfile.TemporaryDirectory() is not reliable on macOS because Python
+    # resolves to /var/folders/… which is outside Podman Machine's default
+    # virtio-fs share roots (only /Users/ and /private/tmp are shared).
+    sandbox_session_dir = tasks.HATCHERY_DIR / "sandbox-sessions" / str(uuid.uuid4())
+    sandbox_session_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with _kubectl_context(config, sandbox_session_dir) as kubectl_mounts:
+            mounts = list(mounts) + kubectl_mounts
+            _run_container(
+                image=image,
+                mounts=mounts,
+                workdir=tasks.CONTAINER_REPO_ROOT,
+                hatchery_repo=tasks.CONTAINER_REPO_ROOT,
+                name="sandbox",
+                mutator=None,
+                proxy_token=None,
+                agent_cmd=[],
+                runtime=runtime,
+                _command_override=[shell],
+                _interactive=True,
+                add_host_gateway=(config.kubernetes is not None),
+            )
+    finally:
+        shutil.rmtree(sandbox_session_dir, ignore_errors=True)
 
 
 def exec_task_shell(name: str, runtime: Runtime, repo: Path, shell: str = "/bin/bash") -> None:
