@@ -74,6 +74,9 @@ _HOP_BY_HOP: frozenset[str] = frozenset(
 # These use streaming/interactive protocols (SPDY/WebSocket) that we don't proxy.
 _BLOCKED_SUBRESOURCES: frozenset[str] = frozenset({"exec", "attach", "portforward", "proxy"})
 
+# RFC 7230 header field-name token — rejects anything that could enable header injection.
+_HEADER_NAME_RE: re.Pattern[str] = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+
 # ── Models ────────────────────────────────────────────────────────────────────
 
 
@@ -348,7 +351,12 @@ class _RBACProxyHandler(http.server.BaseHTTPRequestHandler):
             for key, value in resp.getheaders():
                 if key.lower() in _HOP_BY_HOP:
                     continue
-                self.send_header(key, value)
+                # Guard against HTTP response splitting: reject header names that
+                # don't match the RFC 7230 token grammar, and strip CR/LF from values.
+                if not _HEADER_NAME_RE.match(key):
+                    logger.warning("kubectl RBAC proxy: dropping upstream header with unsafe name: %r", key)
+                    continue
+                self.send_header(key, value.replace("\r", "").replace("\n", ""))
             self.end_headers()
 
             # Stream response body in chunks (handles watch / log streaming).
@@ -488,6 +496,7 @@ def start_rbac_proxy(
         os.write(key_fd, key_pem)
         os.close(key_fd)
         ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ssl_ctx.load_cert_chain(cert_path, key_path)
     finally:
         for p in (cert_path, key_path):
