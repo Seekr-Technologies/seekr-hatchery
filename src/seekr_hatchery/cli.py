@@ -135,6 +135,7 @@ def _set_task_status(repo: Path, name: str, status: str) -> None:
 def _do_mark_done(name: str, repo: Path, worktree: Path) -> None:
     meta = tasks.load_task(repo, name)
     no_worktree = meta.get("no_worktree", False)
+    no_commit = meta.get("no_commit", False)
 
     if not no_worktree:
         if worktree.exists():
@@ -144,7 +145,7 @@ def _do_mark_done(name: str, repo: Path, worktree: Path) -> None:
                 if "## Summary" not in content:
                     ui.warn("task file has no ## Summary section — agent may not have completed cleanly.")
 
-            if git.has_uncommitted_changes(worktree):
+            if not no_commit and git.has_uncommitted_changes(worktree):
                 ui.warn("worktree has uncommitted changes.")
                 ui.info(git.uncommitted_changes_summary(worktree))
                 answer = input("Commit them as a final checkpoint before removing? [Y/n] ").strip().lower()
@@ -625,6 +626,16 @@ def cli(log_level: str, log_file: str | None) -> None:
         "`git rm --cached .hatchery/Dockerfile.<agent> .hatchery/docker.yaml` to undo."
     ),
 )
+@click.option(
+    "--no-commit",
+    "no_commit",
+    is_flag=True,
+    help=(
+        "Skip all automatic git commits made by hatchery "
+        "(task file, Docker configuration, etc.). "
+        "Files are still written to the worktree but never staged or committed."
+    ),
+)
 def cmd_new(
     name: str,
     base: str,
@@ -634,6 +645,7 @@ def cmd_new(
     agent_name: str,
     rebuild_sandbox: bool,
     no_commit_docker: bool,
+    no_commit: bool,
 ) -> None:
     """Start a new task."""
     ui.hatchery_header(_version)
@@ -674,7 +686,7 @@ def cmd_new(
 
     try:
         if in_repo:
-            if no_commit_docker:
+            if no_commit_docker or no_commit:
                 # Generate files to the repo root so they stay uncommitted.
                 # The source=repo calls below will then copy them into the worktree
                 # for this session without committing.
@@ -682,7 +694,7 @@ def cmd_new(
                 docker.ensure_docker_config(repo)
             df_created = docker.ensure_dockerfile(worktree, backend, source=repo)
             dc_created = docker.ensure_docker_config(worktree, source=repo)
-            if df_created or dc_created:
+            if not no_commit and (df_created or dc_created):
                 ui.info("  Committing...")
                 tasks.run(
                     [
@@ -713,7 +725,7 @@ def cmd_new(
             objective = _prompt_objective()
             task_path = tasks.write_task_file(worktree, name, branch, objective=objective)
 
-        if in_repo:
+        if in_repo and not no_commit:
             add_path = ".hatchery/tasks/" if no_commit_docker else ".hatchery/"
             tasks.run(["git", "add", add_path], cwd=worktree)
             tasks.run(["git", "commit", "-m", f"task({name}): add task file"], cwd=worktree)
@@ -727,6 +739,7 @@ def cmd_new(
             "created": datetime.now().isoformat(),
             "session_id": session_id,  # internal only, not shown in normal output
             "no_worktree": no_worktree,
+            "no_commit": no_commit,
             "agent": backend.kind,
         }
         tasks.save_task(meta)
@@ -762,7 +775,13 @@ def cmd_new(
     type=click.Choice(["codex"], case_sensitive=False),
     help="Agent to use (auto-detected if not specified)",
 )
-def cmd_chat(name: str | None, agent_name: str) -> None:
+@click.option(
+    "--no-commit",
+    "no_commit",
+    is_flag=True,
+    help="Skip all automatic git commits made by hatchery (Docker configuration, etc.).",
+)
+def cmd_chat(name: str | None, agent_name: str, no_commit: bool) -> None:
     """Start a free-form chat session in a sandbox."""
     ui.hatchery_header(_version)
     repo, in_repo = git.git_root_or_cwd()
@@ -789,7 +808,7 @@ def cmd_chat(name: str | None, agent_name: str) -> None:
     # Ensure Docker scaffolding
     df_created = docker.ensure_dockerfile(repo, backend)
     dc_created = docker.ensure_docker_config(repo)
-    if df_created or dc_created:
+    if not no_commit and (df_created or dc_created):
         ui.info("  Committing...")
         tasks.run(
             ["git", "add", str(docker.dockerfile_path(repo, backend).relative_to(repo)), str(tasks.DOCKER_CONFIG)],
@@ -892,7 +911,13 @@ def cmd_resume(name: str, no_docker: bool, rebuild_sandbox: bool) -> None:
     is_flag=True,
     help="Rebuild the sandbox image from scratch, ignoring the layer cache",
 )
-def cmd_sandbox(shell: str, rebuild_sandbox: bool) -> None:
+@click.option(
+    "--no-commit",
+    "no_commit",
+    is_flag=True,
+    help="Skip all automatic git commits made by hatchery (Docker configuration, etc.).",
+)
+def cmd_sandbox(shell: str, rebuild_sandbox: bool, no_commit: bool) -> None:
     """Drop into an interactive shell inside the Docker sandbox."""
     repo, in_repo = git.git_root_or_cwd()
     cfg = user_config.UserConfig.load()
@@ -900,7 +925,7 @@ def cmd_sandbox(shell: str, rebuild_sandbox: bool) -> None:
     tasks.ensure_tasks_dir(repo)
     df_created = docker.ensure_dockerfile(repo, backend)
     dc_created = docker.ensure_docker_config(repo)
-    if in_repo and (df_created or dc_created):
+    if in_repo and not no_commit and (df_created or dc_created):
         ui.info("  Committing...")
         tasks.run(
             ["git", "add", str(docker.dockerfile_path(repo, backend).relative_to(repo)), str(tasks.DOCKER_CONFIG)],
@@ -953,12 +978,13 @@ def cmd_archive(names: tuple[str, ...]) -> None:
         worktree = Path(meta["worktree"])
         task_repo = Path(meta["repo"])
         no_worktree = meta.get("no_worktree", False)
+        no_commit = meta.get("no_commit", False)
 
         if no_worktree:
             ui.note(f"Task '{name}': no-worktree task — no worktree or branch to remove.")
         else:
             if worktree.exists():
-                if git.has_uncommitted_changes(worktree):
+                if not no_commit and git.has_uncommitted_changes(worktree):
                     ui.warn(f"Task '{name}': there are uncommitted changes in the worktree.")
                     ui.info(git.uncommitted_changes_summary(worktree))
                     answer = input("Commit them as a checkpoint before archiving? [Y/n] ").strip().lower()
