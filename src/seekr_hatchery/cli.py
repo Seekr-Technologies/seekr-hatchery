@@ -1013,8 +1013,6 @@ def cmd_list(show_all: bool) -> None:
     ui.task_list_table(task_list, archived_count, show_all)
 
 
-
-
 @cli.command("status")
 @click.argument("name", type=TASK_NAME)
 def cmd_status(name: str) -> None:
@@ -1042,7 +1040,6 @@ def cmd_status(name: str) -> None:
         click.echo(task_path.read_text())
     else:
         click.echo("\n(Task file not accessible — worktree may have been removed)")
-
 
 
 @cli.command("shell")

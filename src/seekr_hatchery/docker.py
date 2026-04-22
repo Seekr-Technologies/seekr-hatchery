@@ -219,9 +219,7 @@ def _kubectl_context(
     kubectl_proxy_token = _get_or_create_kubectl_token(session_dir)
 
     # Start kubectl proxy subprocess (uses host kubeconfig).
-    kubectl_proc, kube_port = _kubectl_proxy.start_kubectl_proxy_proc(
-        context=config.kubernetes.context
-    )
+    kubectl_proc, kube_port = _kubectl_proxy.start_kubectl_proxy_proc(context=config.kubernetes.context)
 
     # Start RBAC filtering proxy in front of it (TLS; returns cert_pem for kubeconfig).
     rbac_server, rbac_port, ca_cert_pem = _kubectl_proxy.start_rbac_proxy(
@@ -230,9 +228,7 @@ def _kubectl_context(
 
     # Write a kubeconfig pointing to the RBAC proxy (HTTPS with pinned cert).
     kubeconfig_path = session_dir / "kubeconfig"
-    kubeconfig_path.write_text(
-        _kubectl_proxy.make_kubeconfig(rbac_port, kubectl_proxy_token, ca_cert_pem)
-    )
+    kubeconfig_path.write_text(_kubectl_proxy.make_kubeconfig(rbac_port, kubectl_proxy_token, ca_cert_pem))
     kubeconfig_path.chmod(0o600)
 
     try:
@@ -993,11 +989,7 @@ def launch_sandbox_shell(
     """
     build_docker_image(repo, repo, "sandbox", backend, runtime=runtime, no_cache=no_cache)
     image = docker_image_name(repo, "sandbox")
-    mounts = (
-        [f"{repo}:{tasks.CONTAINER_REPO_ROOT}:rw"]
-        + _default_home_mounts()
-        + _construct_docker_mounts(config)
-    )
+    mounts = [f"{repo}:{tasks.CONTAINER_REPO_ROOT}:rw"] + _default_home_mounts() + _construct_docker_mounts(config)
 
     # Use a short-lived session dir under ~/.hatchery/ for the kubeconfig mount.
     # tempfile.TemporaryDirectory() is not reliable on macOS because Python

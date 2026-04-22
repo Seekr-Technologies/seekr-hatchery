@@ -8,7 +8,6 @@ import json
 import ssl
 import tempfile
 import threading
-from pathlib import Path
 
 import pytest
 
@@ -22,7 +21,6 @@ from seekr_hatchery.kubectl_proxy import (
     start_rbac_proxy,
     stop_rbac_proxy,
 )
-
 
 # ── URL parsing ───────────────────────────────────────────────────────────────
 
@@ -74,9 +72,7 @@ class TestParseK8sUrl:
         assert parse_k8s_url("/api/v1/namespaces/default/pods/") == ("default", "pods", "")
 
     def test_portforward_subresource(self) -> None:
-        assert parse_k8s_url("/api/v1/namespaces/default/pods/my-pod/portforward") == (
-            "default", "pods", "portforward"
-        )
+        assert parse_k8s_url("/api/v1/namespaces/default/pods/my-pod/portforward") == ("default", "pods", "portforward")
 
 
 # ── HTTP verb mapping ─────────────────────────────────────────────────────────
@@ -287,6 +283,7 @@ def _ssl_ctx_for_cert(cert_pem: bytes) -> ssl.SSLContext:
         tmp_path = f.name
     ctx.load_verify_locations(tmp_path)
     import os
+
     os.unlink(tmp_path)
     return ctx
 

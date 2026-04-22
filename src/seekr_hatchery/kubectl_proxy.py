@@ -272,7 +272,7 @@ class _RBACProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def _validate_token(self) -> bool:
         auth = self.headers.get("authorization", "")
-        if auth.startswith("Bearer ") and auth[len("Bearer "):] == self.proxy_token:
+        if auth.startswith("Bearer ") and auth[len("Bearer ") :] == self.proxy_token:
             return True
         return False
 
@@ -285,8 +285,7 @@ class _RBACProxyHandler(http.server.BaseHTTPRequestHandler):
         if not self._validate_token():
             received = self.headers.get("authorization", "")[7:]  # strip "Bearer "
             logger.warning(
-                "kubectl RBAC proxy: 401 – bearer token mismatch. "
-                "Expected ...%s, received ...%s. path=%s",
+                "kubectl RBAC proxy: 401 – bearer token mismatch. Expected ...%s, received ...%s. path=%s",
                 self.proxy_token[-6:] if len(self.proxy_token) >= 6 else self.proxy_token,
                 received[-6:] if len(received) >= 6 else f"(empty or short: {received!r})",
                 self.path,
@@ -413,8 +412,7 @@ def _generate_self_signed_cert() -> tuple[bytes, bytes]:
         from cryptography.x509.oid import NameOID
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError(
-            "The kubectl feature requires the 'cryptography' package. "
-            "Install it with: pip install cryptography"
+            "The kubectl feature requires the 'cryptography' package. Install it with: pip install cryptography"
         ) from exc
 
     key = ec.generate_private_key(ec.SECP256R1())
@@ -533,9 +531,7 @@ def start_kubectl_proxy_proc(
     import time
 
     if not shutil.which("kubectl"):
-        raise RuntimeError(
-            "kubectl not found on PATH — install kubectl on the host to use the kubectl feature"
-        )
+        raise RuntimeError("kubectl not found on PATH — install kubectl on the host to use the kubectl feature")
 
     cmd = ["kubectl", "proxy", "--port=0", "--address=127.0.0.1"]
     if context:
@@ -557,9 +553,7 @@ def start_kubectl_proxy_proc(
         if not line:
             # Process exited unexpectedly.
             stderr_out = proc.stderr.read() if proc.stderr else ""
-            raise RuntimeError(
-                f"kubectl proxy exited unexpectedly.  stderr: {stderr_out.strip()}"
-            )
+            raise RuntimeError(f"kubectl proxy exited unexpectedly.  stderr: {stderr_out.strip()}")
         m = port_re.search(line)
         if m:
             port = int(m.group(1))
@@ -567,9 +561,7 @@ def start_kubectl_proxy_proc(
             return proc, port
 
     proc.terminate()
-    raise RuntimeError(
-        f"kubectl proxy did not report its port within {timeout}s"
-    )
+    raise RuntimeError(f"kubectl proxy did not report its port within {timeout}s")
 
 
 def stop_kubectl_proxy_proc(proc: subprocess.Popen[str]) -> None:

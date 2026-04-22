@@ -77,6 +77,7 @@ class SpyBackend(agent.AgentBackend):
             out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")}
             out["x-api-key"] = "spy-key"
             return out
+
         return _mutate
 
     def home_mounts(self, session_dir: Path | None) -> list[str]:

@@ -235,10 +235,12 @@ class TestResolveRuntime:
 
 def _make_mutator(key: str = "real-secret-key"):
     """Return a simple header mutator for tests."""
+
     def _mutate(headers):
         out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")}
         out["Authorization"] = f"Bearer {key}"
         return out
+
     return _mutate
 
 
