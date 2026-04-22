@@ -694,7 +694,7 @@ def cmd_new(
                 docker.ensure_docker_config(repo)
             df_created = docker.ensure_dockerfile(worktree, backend, source=repo)
             dc_created = docker.ensure_docker_config(worktree, source=repo)
-            if not no_commit and (df_created or dc_created):
+            if not (no_commit_docker or no_commit) and (df_created or dc_created):
                 ui.info("  Committing...")
                 tasks.run(
                     [
@@ -726,8 +726,10 @@ def cmd_new(
             task_path = tasks.write_task_file(worktree, name, branch, objective=objective)
 
         if in_repo and not no_commit:
-            add_path = ".hatchery/tasks/" if no_commit_docker else ".hatchery/"
-            tasks.run(["git", "add", add_path], cwd=worktree)
+            # Always add only the tasks directory — docker files are committed in a
+            # separate block above (if freshly created) and should never be swept up
+            # here (they may have been copied from the repo root but left uncommitted).
+            tasks.run(["git", "add", ".hatchery/tasks/"], cwd=worktree)
             tasks.run(["git", "commit", "-m", f"task({name}): add task file"], cwd=worktree)
 
         meta = {
