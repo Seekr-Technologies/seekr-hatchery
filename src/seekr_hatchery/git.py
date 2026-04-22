@@ -11,20 +11,45 @@ import seekr_hatchery.ui as ui
 logger = logging.getLogger("hatchery")
 
 
+def _resolve_main_repo(repo: Path) -> Path:
+    """If repo is a git linked worktree, resolve to the main repository root.
+
+    In a linked worktree, .git is a file pointing to the worktree-specific
+    metadata inside the main repo's .git/worktrees/<name>/.  Git objects,
+    refs, and all shared state live in the main repo's .git/.  Returning the
+    main repo root ensures callers always work with a .git directory rather
+    than a .git file, so Docker bind-mount paths like .git/objects resolve
+    correctly.
+    """
+    git_path = repo / ".git"
+    if not git_path.is_file():
+        return repo  # normal checkout — nothing to resolve
+    # Linked worktree: find the common git dir (main repo's .git).
+    result = tasks.run(["git", "rev-parse", "--git-common-dir"], cwd=repo, check=False)
+    if result.returncode != 0:
+        ui.error("could not resolve git common directory for linked worktree.")
+        sys.exit(1)
+    common_dir = Path(result.stdout.strip())
+    if not common_dir.is_absolute():
+        common_dir = (repo / common_dir).resolve()
+    # common_dir is e.g. /path/to/main-repo/.git; parent is the main repo root.
+    return common_dir.parent
+
+
 def git_root() -> Path:
     """Return the root of the current git repository, or exit with an error."""
     result = tasks.run(["git", "rev-parse", "--show-toplevel"], check=False)
     if result.returncode != 0:
         ui.error("not inside a git repository.")
         sys.exit(1)
-    return Path(result.stdout.strip())
+    return _resolve_main_repo(Path(result.stdout.strip()))
 
 
 def git_root_or_cwd() -> tuple[Path, bool]:
     """Return (root, True) if in a git repo, else (Path.cwd(), False)."""
     result = tasks.run(["git", "rev-parse", "--show-toplevel"], check=False)
     if result.returncode == 0:
-        return Path(result.stdout.strip()), True
+        return _resolve_main_repo(Path(result.stdout.strip())), True
     return Path.cwd(), False
 
 
