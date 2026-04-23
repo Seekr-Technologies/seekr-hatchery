@@ -41,8 +41,28 @@ jobs:
 
           echo "Latest tag: $LATEST_TAG"
 
-          # Find the PR that was merged via this push
-          PR_NUMBER=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" --jq '.[0].number')
+          # Find the PR that was merged via this push (retry for API propagation delay)
+          PR_NUMBER=""
+          for attempt in 1 2 3; do
+            PR_NUMBER=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" --jq '.[0].number' 2>/dev/null || echo "")
+            if [ -n "$PR_NUMBER" ] && [ "$PR_NUMBER" != "null" ]; then
+              break
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "PR not yet indexed, retrying in 10s (attempt $attempt/3)..."
+              sleep 10
+            fi
+          done
+
+          # Fallback: parse PR number from squash-merge commit message "(#N)"
+          if [ -z "$PR_NUMBER" ] || [ "$PR_NUMBER" = "null" ]; then
+            COMMIT_MSG=$(git log -1 --format='%s' "$GITHUB_SHA")
+            PR_NUMBER=$(echo "$COMMIT_MSG" | grep -oE '\(#[0-9]+\)$' | grep -oE '[0-9]+' || echo "")
+            if [ -n "$PR_NUMBER" ]; then
+              echo "Extracted PR number from commit message: #$PR_NUMBER"
+            fi
+          fi
+
           echo "PR number: $PR_NUMBER"
 
           # Skip if no PR is associated (e.g. a direct push to main)
