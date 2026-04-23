@@ -939,6 +939,8 @@ def cmd_sandbox(shell: str, rebuild_sandbox: bool, no_commit: bool) -> None:
         )
     runtime = docker.detect_runtime()
     config = docker.load_docker_config(repo)
+    features = docker.docker_features(config)
+    ui.banner("sandbox", repo, sandbox=True, worktree=False, features=features)
     docker.launch_sandbox_shell(repo, backend, config, runtime, shell=shell, no_cache=rebuild_sandbox)
 
 
@@ -1039,8 +1041,6 @@ def cmd_list(show_all: bool) -> None:
     ui.task_list_table(task_list, archived_count, show_all)
 
 
-
-
 @cli.command("status")
 @click.argument("name", type=TASK_NAME)
 def cmd_status(name: str) -> None:
@@ -1068,7 +1068,6 @@ def cmd_status(name: str) -> None:
         click.echo(task_path.read_text())
     else:
         click.echo("\n(Task file not accessible — worktree may have been removed)")
-
 
 
 @cli.command("shell")

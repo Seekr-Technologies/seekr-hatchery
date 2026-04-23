@@ -27,3 +27,26 @@ dind: false
 # capabilities(7); invalid names are rejected at load time.
 # cap_add:
 #   - NET_BIND_SERVICE
+
+# kubernetes: give the agent a kubectl command with virtual RBAC filtering.
+#
+# Also uncomment the kubectl section in .hatchery/Dockerfile.
+# The host's active kubeconfig context is used for credentials.
+#
+# context: (optional) pin which kubeconfig context kubectl proxy uses.
+#   Useful when you have multiple contexts and want to avoid ambiguity.
+#   Defaults to the host's currently active context.
+# Rules are an allowlist; unmatched requests are denied (fail-closed).
+# Verbs map to HTTP methods: get/list/watch → GET, create → POST,
+#   update → PUT, patch → PATCH, delete/deletecollection → DELETE.
+#   Note: 'describe' is a kubectl client command, not a k8s verb — use 'get'.
+# namespaces: "*"  matches all namespaces.
+#             ""   matches cluster-scoped queries (e.g. `kubectl get pods -A`).
+# Subresources exec / attach / portforward / proxy are always blocked.
+#
+# kubernetes:
+#   context: my-dev-cluster   # optional: pin kubeconfig context
+#   rules:
+#     - verbs: [get, list, watch]
+#       resources: ["*"]
+#       namespaces: ["*"]
