@@ -533,7 +533,7 @@ class TestCliNew:
         assert mock_ensure_dc.call_args_list[1][0][0] == worktree
 
     def test_no_commit_docker_skips_dockerfile_commit(self):
-        """--no-commit-docker does not git-commit the Dockerfile even if ensure returns True."""
+        """--no-commit-docker never git-commits the Dockerfile."""
         runner = CliRunner()
 
         with ExitStack() as stack:
@@ -626,6 +626,215 @@ class TestCliNew:
             if c[0][0] == ["git", "commit", "-m", "chore: add hatchery Docker configuration"]
         ]
         assert len(dockerfile_commits) == 1
+
+    def test_no_flags_dockerfile_exists_at_root_not_committed(self):
+        """Without flags, a Dockerfile copied from the repo root (ensure returns False)
+        is not committed — only the task file is."""
+        runner = CliRunner()
+
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in _new_patches()]
+            (
+                mock_root,
+                _,
+                _,
+                mock_ensure_df,
+                mock_ensure_dc,
+                mock_db_path,
+                mock_wt_dir,
+                _,
+                mock_run,
+                mock_write,
+                _,
+                _,
+                mock_docker,
+                _,
+                _,
+            ) = mocks
+            repo = Path("/repo")
+            mock_root.return_value = (repo, True)
+            mock_db_path.return_value = MagicMock(exists=lambda: False)
+            mock_wt_dir.return_value = repo / ".hatchery/worktrees"
+            mock_write.return_value = repo / ".hatchery/tasks/task.md"
+            mock_docker.return_value = None
+            # ensure_dockerfile returns False: file copied from repo root, not newly created
+            mock_ensure_df.return_value = False
+            mock_ensure_dc.return_value = False
+            result = runner.invoke(cli, ["new", "my-task"])
+
+        assert result.exit_code == 0
+        dockerfile_commits = [
+            c
+            for c in mock_run.call_args_list
+            if c[0][0] == ["git", "commit", "-m", "chore: add hatchery Docker configuration"]
+        ]
+        assert len(dockerfile_commits) == 0
+        task_file_commits = [
+            c
+            for c in mock_run.call_args_list
+            if len(c[0][0]) >= 4 and c[0][0][:3] == ["git", "commit", "-m"] and "add task file" in c[0][0][3]
+        ]
+        assert len(task_file_commits) == 1
+
+    def test_no_commit_docker_existing_dockerfile_not_committed(self):
+        """--no-commit-docker with a pre-existing repo-root Dockerfile never commits it."""
+        runner = CliRunner()
+
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in _new_patches()]
+            (
+                mock_root,
+                _,
+                _,
+                mock_ensure_df,
+                mock_ensure_dc,
+                mock_db_path,
+                mock_wt_dir,
+                _,
+                mock_run,
+                mock_write,
+                _,
+                _,
+                mock_docker,
+                _,
+                _,
+            ) = mocks
+            repo = Path("/repo")
+            mock_root.return_value = (repo, True)
+            mock_db_path.return_value = MagicMock(exists=lambda: False)
+            mock_wt_dir.return_value = repo / ".hatchery/worktrees"
+            mock_write.return_value = repo / ".hatchery/tasks/task.md"
+            mock_docker.return_value = None
+            # Both calls return False: file already exists at root, copied to worktree
+            mock_ensure_df.return_value = False
+            mock_ensure_dc.return_value = False
+            result = runner.invoke(cli, ["new", "my-task", "--no-commit-docker"])
+
+        assert result.exit_code == 0
+        dockerfile_commits = [
+            c
+            for c in mock_run.call_args_list
+            if c[0][0] == ["git", "commit", "-m", "chore: add hatchery Docker configuration"]
+        ]
+        assert len(dockerfile_commits) == 0
+
+    def test_no_commit_skips_all_commits_dockerfile_new(self):
+        """--no-commit skips docker and task-file commits even when Dockerfile is brand-new."""
+        runner = CliRunner()
+
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in _new_patches()]
+            (
+                mock_root,
+                _,
+                _,
+                mock_ensure_df,
+                mock_ensure_dc,
+                mock_db_path,
+                mock_wt_dir,
+                _,
+                mock_run,
+                mock_write,
+                _,
+                mock_save,
+                mock_docker,
+                _,
+                _,
+            ) = mocks
+            repo = Path("/repo")
+            mock_root.return_value = (repo, True)
+            mock_db_path.return_value = MagicMock(exists=lambda: False)
+            mock_wt_dir.return_value = repo / ".hatchery/worktrees"
+            mock_write.return_value = repo / ".hatchery/tasks/task.md"
+            mock_docker.return_value = None
+            # Repo-root call creates (True); worktree copy returns False
+            mock_ensure_df.side_effect = [True, False]
+            mock_ensure_dc.side_effect = [True, False]
+            result = runner.invoke(cli, ["new", "my-task", "--no-commit"])
+
+        assert result.exit_code == 0
+        all_commits = [c for c in mock_run.call_args_list if "commit" in c[0][0]]
+        assert len(all_commits) == 0
+
+    def test_no_commit_skips_all_commits_dockerfile_exists(self):
+        """--no-commit skips all commits when Dockerfile already exists at repo root."""
+        runner = CliRunner()
+
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in _new_patches()]
+            (
+                mock_root,
+                _,
+                _,
+                mock_ensure_df,
+                mock_ensure_dc,
+                mock_db_path,
+                mock_wt_dir,
+                _,
+                mock_run,
+                mock_write,
+                _,
+                mock_save,
+                mock_docker,
+                _,
+                _,
+            ) = mocks
+            repo = Path("/repo")
+            mock_root.return_value = (repo, True)
+            mock_db_path.return_value = MagicMock(exists=lambda: False)
+            mock_wt_dir.return_value = repo / ".hatchery/worktrees"
+            mock_write.return_value = repo / ".hatchery/tasks/task.md"
+            mock_docker.return_value = None
+            mock_ensure_df.return_value = False
+            mock_ensure_dc.return_value = False
+            result = runner.invoke(cli, ["new", "my-task", "--no-commit"])
+
+        assert result.exit_code == 0
+        all_commits = [c for c in mock_run.call_args_list if "commit" in c[0][0]]
+        assert len(all_commits) == 0
+
+    def test_no_commit_saves_metadata_flag(self):
+        """--no-commit persists no_commit=True in task metadata."""
+        runner = CliRunner()
+
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in _new_patches()]
+            (
+                mock_root,
+                _,
+                _,
+                mock_ensure_df,
+                mock_ensure_dc,
+                mock_db_path,
+                mock_wt_dir,
+                _,
+                _,
+                mock_write,
+                _,
+                mock_save,
+                mock_docker,
+                _,
+                _,
+            ) = mocks
+            repo = Path("/repo")
+            mock_root.return_value = (repo, True)
+            mock_db_path.return_value = MagicMock(exists=lambda: False)
+            mock_wt_dir.return_value = repo / ".hatchery/worktrees"
+            mock_write.return_value = repo / ".hatchery/tasks/task.md"
+            mock_docker.return_value = None
+            mock_ensure_df.return_value = False
+            mock_ensure_dc.return_value = False
+            result = runner.invoke(cli, ["new", "my-task", "--no-commit"])
+
+        assert result.exit_code == 0
+        saved_meta = mock_save.call_args[0][0]
+        assert saved_meta.get("no_commit") is True
+
+    def test_no_commit_help_text(self):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["new", "--help"])
+        assert result.exit_code == 0
+        assert "--no-commit" in result.output
 
 
 # ---------------------------------------------------------------------------
