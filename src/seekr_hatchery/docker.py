@@ -124,6 +124,7 @@ class DockerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     schema_version: Literal["1"] = "1"
     mounts: list[str] = []
+    include: list[str] = []
     dind: bool = False
     cap_add: list[str] = []
 
@@ -528,6 +529,54 @@ def docker_mounts_no_worktree(
     )
 
 
+def _unique_basename(name: str, used: set[str]) -> str:
+    """Return *name* if unused, else *name*-1, *name*-2, … until unique."""
+    if name not in used:
+        return name
+    i = 1
+    while f"{name}-{i}" in used:
+        i += 1
+    return f"{name}-{i}"
+
+
+def docker_mounts_includes(
+    include_paths: list[Path],
+    name: str,
+    session_dir: Path,
+    no_worktree: bool,
+) -> list[str]:
+    """Return -v flags for paths included via --include.
+
+    Each path is mounted read-write at /includes/<basename>/.  If two included
+    paths share a basename the second gets a numeric suffix (e.g. api-1).
+
+    For git repos that have a hatchery/<name> worktree, a corrected .git pointer
+    file is written to *session_dir* and bind-mounted over the worktree's .git
+    file so that git resolves the git-dir correctly inside the container.
+    """
+    mounts: list[str] = []
+    used_basenames: set[str] = set()
+
+    for path in include_paths:
+        basename = _unique_basename(path.name, used_basenames)
+        used_basenames.add(basename)
+        container_path = f"{tasks.CONTAINER_INCLUDES_ROOT}/{basename}"
+
+        mounts.append(f"{path}:{container_path}:rw")
+
+        # For git repos with a worktree, rewrite the .git pointer to use
+        # the container-relative path (same technique as the primary worktree).
+        if not no_worktree and (path / ".git").exists():
+            worktree = path / tasks.WORKTREES_SUBDIR / name
+            if worktree.exists():
+                container_worktree = f"{container_path}/.hatchery/worktrees/{name}"
+                git_ptr_file = session_dir / f"git_ptr_include_{basename}"
+                git_ptr_file.write_text(f"gitdir: {container_path}/.git/worktrees/{name}\n")
+                mounts.append(f"{git_ptr_file}:{container_worktree}/.git:rw")
+
+    return mounts
+
+
 def _default_home_mounts() -> list[str]:
     """Mounts applied to every container regardless of agent: .gitconfig and uv cache."""
     mounts: list[str] = []
@@ -787,6 +836,7 @@ def launch_docker(
     config: DockerConfig,
     runtime: Runtime = Runtime.DOCKER,
     no_cache: bool = False,
+    include_repos: list[Path] | None = None,
 ) -> None:
     """Replace the current process with a Docker-sandboxed agent session.
 
@@ -794,6 +844,10 @@ def launch_docker(
     Auth is provided via the appropriate API key env var or per-task config.
     *agent_cmd* must be the full command already built for Docker mode
     (``backend.build_*_command(docker=True, workdir=container_workdir)``).
+
+    *include_repos* — additional paths to mount at /includes/<basename>/ rw.
+    Git repos in this list that have a hatchery/<name> worktree will also have
+    their .git pointer corrected for the container environment.
     """
     try:
         mutator = backend.make_header_mutator()
@@ -833,6 +887,8 @@ def launch_docker(
     build_docker_image(repo, worktree, name, backend, runtime=runtime, no_cache=no_cache)
     image = docker_image_name(repo, name)
     mounts = docker_mounts(repo, worktree, name, backend, session_dir, config, git_sentinels, worktree_git_ptr=git_ptr)
+    if include_repos:
+        mounts.extend(docker_mounts_includes(include_repos, name, session_dir, no_worktree=False))
     logger.debug(f"Launching {runtime.binary} container for task '{name}'")
     return _run_container(
         image,
@@ -859,6 +915,7 @@ def launch_docker_no_worktree(
     config: DockerConfig,
     runtime: Runtime = Runtime.DOCKER,
     no_cache: bool = False,
+    include_repos: list[Path] | None = None,
 ) -> None:
     """Launch a Docker-sandboxed agent session with cwd mounted as /workspace.
 
@@ -866,6 +923,8 @@ def launch_docker_no_worktree(
     Builds the image from cwd/.hatchery/Dockerfile (same as standard mode).
     *agent_cmd* must be the full command already built for Docker mode
     (``backend.build_*_command(docker=True, workdir="/workspace")``).
+
+    *include_repos* — additional paths to mount at /includes/<basename>/ rw.
     """
     try:
         mutator = backend.make_header_mutator()
@@ -885,6 +944,8 @@ def launch_docker_no_worktree(
     build_docker_image(cwd, cwd, name, backend, runtime=runtime, no_cache=no_cache)
     image = docker_image_name(cwd, name)
     mounts = docker_mounts_no_worktree(cwd, backend, session_dir, config=config)
+    if include_repos:
+        mounts.extend(docker_mounts_includes(include_repos, name, session_dir, no_worktree=True))
     logger.debug(f"Launching {runtime.binary} container for task '{name}' (no-worktree mode)")
     return _run_container(
         image,

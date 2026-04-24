@@ -135,6 +135,7 @@ def _set_task_status(repo: Path, name: str, status: str) -> None:
 def _do_mark_done(name: str, repo: Path, worktree: Path) -> None:
     meta = tasks.load_task(repo, name)
     no_worktree = meta.get("no_worktree", False)
+    include_repos = [Path(p) for p in meta.get("include", [])]
     no_commit = meta.get("no_commit", False)
 
     if not no_worktree:
@@ -157,6 +158,9 @@ def _do_mark_done(name: str, repo: Path, worktree: Path) -> None:
             ui.info(f"Worktree removed: {worktree}")
         else:
             ui.info(f"Worktree already gone: {worktree}")
+
+        if include_repos:
+            git.remove_include_worktrees(include_repos, name)
 
     meta["status"] = "complete"
     meta["completed"] = datetime.now().isoformat()
@@ -184,6 +188,7 @@ _WRAP_UP_PROMPT = (
 def _do_delete(name: str, repo: Path, worktree: Path, meta: dict, *, confirmed: bool = False) -> None:
     branch = meta["branch"]
     no_worktree = meta.get("no_worktree", False)
+    include_repos = [Path(p) for p in meta.get("include", [])]
 
     if not no_worktree:
         if worktree.exists():
@@ -205,6 +210,10 @@ def _do_delete(name: str, repo: Path, worktree: Path, meta: dict, *, confirmed: 
             ui.info(f"Branch deleted: {branch}")
         else:
             ui.info(f"Could not delete branch {branch} (may already be gone)")
+
+        if include_repos:
+            git.remove_include_worktrees(include_repos, name)
+            git.delete_include_branches(include_repos, name)
     else:
         if not confirmed:
             answer = input(f"Delete task '{name}' (metadata only)? [y/N] ").strip().lower()
@@ -356,6 +365,40 @@ def _session_env(name: str, repo: Path) -> dict[str, str]:
     return {**os.environ, "HATCHERY_TASK": name, "HATCHERY_REPO": str(repo)}
 
 
+def _resolve_include_repos(
+    cli_includes: tuple[Path, ...],
+    config_includes: list[str],
+    repo: Path,
+) -> list[Path]:
+    """Merge --include CLI paths with docker.yaml 'include:' entries.
+
+    CLI paths are always resolved against the current working directory (they
+    come from click.Path which handles that).  Config paths are resolved
+    relative to the primary repo root.  Duplicates (by resolved absolute path)
+    are removed while preserving order (CLI paths first).
+    """
+    seen: set[Path] = set()
+    result: list[Path] = []
+
+    for p in cli_includes:
+        resolved = p.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            result.append(resolved)
+
+    for s in config_includes:
+        raw = Path(s)
+        resolved = (repo / raw).resolve() if not raw.is_absolute() else raw.resolve()
+        if not resolved.exists():
+            ui.warn(f"docker.yaml include path does not exist, skipping: {s}")
+            continue
+        if resolved not in seen:
+            seen.add(resolved)
+            result.append(resolved)
+
+    return result
+
+
 def _launch_new(
     repo: Path,
     worktree: Path,
@@ -368,7 +411,9 @@ def _launch_new(
     no_worktree: bool = False,
     is_chat: bool = False,
     no_cache: bool = False,
+    include_repos: list[Path] | None = None,
 ) -> None:
+    include_repos = include_repos or []
     session_dir = tasks.task_session_dir(repo, name)
     backend.on_new_task(session_dir)
     backend.on_before_launch(worktree)
@@ -376,7 +421,10 @@ def _launch_new(
         system_prompt = ""
         initial_prompt = ""
     else:
-        env_ctx = tasks.sandbox_context(name, branch, worktree, repo, main_branch, bool(runtime), no_worktree)
+        env_ctx = tasks.sandbox_context(
+            name, branch, worktree, repo, main_branch, bool(runtime), no_worktree,
+            include_paths=include_repos,
+        )
         system_prompt = tasks.SESSION_SYSTEM + "\n" + env_ctx
         initial_prompt = tasks.session_prompt(name, worktree)
     config, features, container_workdir = _docker_context(runtime, None if no_worktree else worktree, repo)
@@ -391,9 +439,15 @@ def _launch_new(
     try:
         if runtime:
             if no_worktree:
-                docker.launch_docker_no_worktree(worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache)
+                docker.launch_docker_no_worktree(
+                    worktree, name, backend, agent_cmd, config, runtime,
+                    no_cache=no_cache, include_repos=include_repos,
+                )
             else:
-                docker.launch_docker(repo, worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache)
+                docker.launch_docker(
+                    repo, worktree, name, backend, agent_cmd, config, runtime,
+                    no_cache=no_cache, include_repos=include_repos,
+                )
         else:
             os.chdir(worktree)
             subprocess.run(agent_cmd, env=_session_env(name, repo))
@@ -419,13 +473,18 @@ def _launch_resume(
     no_worktree: bool = False,
     is_chat: bool = False,
     no_cache: bool = False,
+    include_repos: list[Path] | None = None,
 ) -> None:
+    include_repos = include_repos or []
     backend.on_before_launch(worktree)
     if is_chat:
         system_prompt = ""
         initial_prompt = ""
     else:
-        env_ctx = tasks.sandbox_context(name, branch, worktree, repo, main_branch, bool(runtime), no_worktree)
+        env_ctx = tasks.sandbox_context(
+            name, branch, worktree, repo, main_branch, bool(runtime), no_worktree,
+            include_paths=include_repos,
+        )
         system_prompt = tasks.SESSION_SYSTEM + "\n" + env_ctx
         initial_prompt = tasks.session_prompt(name, worktree)
     config, features, container_workdir = _docker_context(runtime, None if no_worktree else worktree, repo)
@@ -440,9 +499,15 @@ def _launch_resume(
     try:
         if runtime:
             if no_worktree:
-                docker.launch_docker_no_worktree(worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache)
+                docker.launch_docker_no_worktree(
+                    worktree, name, backend, agent_cmd, config, runtime,
+                    no_cache=no_cache, include_repos=include_repos,
+                )
             else:
-                docker.launch_docker(repo, worktree, name, backend, agent_cmd, config, runtime, no_cache=no_cache)
+                docker.launch_docker(
+                    repo, worktree, name, backend, agent_cmd, config, runtime,
+                    no_cache=no_cache, include_repos=include_repos,
+                )
         else:
             os.chdir(worktree)
             subprocess.run(agent_cmd, env=_session_env(name, repo))
@@ -627,6 +692,18 @@ def cli(log_level: str, log_file: str | None) -> None:
     ),
 )
 @click.option(
+    "--include",
+    "include",
+    multiple=True,
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    metavar="PATH",
+    help=(
+        "Mount an additional directory inside the container at /includes/<basename>/. "
+        "Git repos get a hatchery/<name> worktree for branch isolation. "
+        "Repeatable; merged with docker.yaml 'include:' list."
+    ),
+)
+@click.option(
     "--no-commit",
     "no_commit",
     is_flag=True,
@@ -645,6 +722,7 @@ def cmd_new(
     agent_name: str,
     rebuild_sandbox: bool,
     no_commit_docker: bool,
+    include: tuple[Path, ...],
     no_commit: bool,
 ) -> None:
     """Start a new task."""
@@ -662,6 +740,14 @@ def cmd_new(
     tasks.ensure_tasks_dir(repo)
     if in_repo:
         tasks.ensure_gitignore(repo)
+
+    # Resolve --include paths (CLI flags + docker.yaml 'include:' list).
+    # We do a quick load of docker.yaml from the repo root (not yet from the
+    # worktree) to pick up any existing include entries before the worktree is
+    # created. The worktree-based load inside _docker_context later is for
+    # mount/dind settings only.
+    _early_config = docker.load_docker_config(repo)
+    include_repos = _resolve_include_repos(include, _early_config.include, repo)
 
     name = tasks.to_name(name)
     db_path = tasks.task_db_path(repo, name)
@@ -683,6 +769,8 @@ def cmd_new(
         worktree = tasks.worktrees_dir(repo) / name
         ui.info(f"Creating task: {name}")
         git.create_worktree(repo, branch, worktree, base)
+        if include_repos:
+            git.create_include_worktrees(include_repos, name, base)
 
     try:
         if in_repo:
@@ -743,6 +831,7 @@ def cmd_new(
             "no_worktree": no_worktree,
             "no_commit": no_commit,
             "agent": backend.kind,
+            "include": [str(p) for p in include_repos],
         }
         tasks.save_task(meta)
 
@@ -759,11 +848,14 @@ def cmd_new(
             main_branch,
             no_worktree,
             no_cache=rebuild_sandbox,
+            include_repos=include_repos,
         )
     except KeyboardInterrupt:
         if not no_worktree:
             git.remove_worktree(repo, worktree)
             git.delete_branch(repo, branch)
+            if include_repos:
+                git.remove_include_worktrees(include_repos, name)
         ui.warn("Cancelled.")
         sys.exit(1)
 
@@ -888,6 +980,7 @@ def cmd_resume(name: str, no_docker: bool, rebuild_sandbox: bool) -> None:
         ui.note(f"task '{name}' was marked as running — a previous session may have exited unexpectedly.")
 
     is_chat = meta.get("type") == "chat"
+    include_repos = [Path(p) for p in meta.get("include", [])]
     runtime = docker.resolve_runtime(repo, worktree, no_docker, backend=backend)
     main_branch = git.get_default_branch(repo)
     _launch_resume(
@@ -902,6 +995,7 @@ def cmd_resume(name: str, no_docker: bool, rebuild_sandbox: bool) -> None:
         no_worktree,
         is_chat=is_chat,
         no_cache=rebuild_sandbox,
+        include_repos=include_repos,
     )
 
 

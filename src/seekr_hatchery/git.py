@@ -113,6 +113,41 @@ def delete_branch(repo: Path, branch: str) -> bool:
     return result.returncode == 0
 
 
+def create_include_worktrees(includes: list[Path], name: str, base: str) -> None:
+    """Create a hatchery/<name> worktree inside each included path that is a git repo.
+
+    Non-git directories are silently skipped.
+    """
+    branch = f"hatchery/{name}"
+    for path in includes:
+        if (path / ".git").exists():
+            worktree = path / tasks.WORKTREES_SUBDIR / name
+            create_worktree(path, branch, worktree, base)
+            logger.debug("Include worktree created at %s", worktree)
+
+
+def remove_include_worktrees(includes: list[Path], name: str) -> None:
+    """Remove the hatchery/<name> worktree from each included git repo.
+
+    Non-git directories and missing worktrees are silently skipped.
+    """
+    for path in includes:
+        if (path / ".git").exists():
+            worktree = path / tasks.WORKTREES_SUBDIR / name
+            remove_worktree(path, worktree, force=True)
+
+
+def delete_include_branches(includes: list[Path], name: str) -> None:
+    """Delete the hatchery/<name> branch from each included git repo.
+
+    Non-git directories and missing branches are silently skipped.
+    """
+    branch = f"hatchery/{name}"
+    for path in includes:
+        if (path / ".git").exists():
+            delete_branch(path, branch)
+
+
 def get_default_branch(repo: Path) -> str:
     """Return the repo's default branch name (main / master / etc.)."""
     # Prefer the remote's HEAD pointer — reliable on repos with a remote.
