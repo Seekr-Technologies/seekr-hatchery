@@ -92,18 +92,17 @@ Your workflow:
    This file will be merged into main as the permanent record of this task.
 """
 
-def _include_container_basename(path: Path, used: set[str]) -> str:
-    """Return a collision-safe container basename for an included path."""
-    name = path.name
+def _unique_basename(name: str, used: set[str]) -> str:
+    """Return *name* if not in *used*, else *name*-1, *name*-2, … — first unused variant.
+
+    Does NOT mutate *used*; callers are responsible for adding the result.
+    """
     if name not in used:
-        used.add(name)
         return name
     i = 1
     while f"{name}-{i}" in used:
         i += 1
-    result = f"{name}-{i}"
-    used.add(result)
-    return result
+    return f"{name}-{i}"
 
 
 def sandbox_context(
@@ -188,7 +187,8 @@ def sandbox_context(
         for inc in include_paths:
             is_git = (inc / ".git").exists()
             if use_docker:
-                basename = _include_container_basename(inc, used_basenames)
+                basename = _unique_basename(inc.name, used_basenames)
+                used_basenames.add(basename)
                 container_inc = f"{CONTAINER_INCLUDES_ROOT}/{basename}"
                 if is_git and not no_worktree:
                     container_inc_wt = f"{container_inc}/.hatchery/worktrees/{name}"

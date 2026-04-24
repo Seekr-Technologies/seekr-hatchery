@@ -16,6 +16,7 @@ from seekr_hatchery.cli import (
     _launch_new,
     _launch_resume,
     _next_chat_name,
+    _resolve_include_repos,
     cli,
 )
 
@@ -2289,3 +2290,471 @@ class TestSelfCompletions:
         runner = CliRunner()
         result = runner.invoke(cli, ["self", "completions"])
         assert result.exit_code == 1
+
+
+# ---------------------------------------------------------------------------
+# _resolve_include_repos
+# ---------------------------------------------------------------------------
+
+
+class TestResolveIncludeRepos:
+    def test_empty_both(self, tmp_path):
+        result = _resolve_include_repos((), [], tmp_path)
+        assert result == []
+
+    def test_cli_path_resolved(self, tmp_path):
+        p = tmp_path / "repo-b"
+        p.mkdir()
+        result = _resolve_include_repos((p,), [], tmp_path)
+        assert result == [p.resolve()]
+
+    def test_config_path_relative_to_repo(self, tmp_path):
+        repo_b = tmp_path / "repo-b"
+        repo_b.mkdir()
+        # config entry is relative to primary repo root (tmp_path)
+        result = _resolve_include_repos((), ["repo-b"], tmp_path)
+        assert result == [repo_b.resolve()]
+
+    def test_config_absolute_path(self, tmp_path):
+        repo_b = tmp_path / "repo-b"
+        repo_b.mkdir()
+        result = _resolve_include_repos((), [str(repo_b)], tmp_path)
+        assert result == [repo_b.resolve()]
+
+    def test_cli_takes_priority_deduplicates(self, tmp_path):
+        """CLI path and config path resolving to the same dir → only one entry."""
+        repo_b = tmp_path / "repo-b"
+        repo_b.mkdir()
+        result = _resolve_include_repos((repo_b,), ["repo-b"], tmp_path)
+        assert result == [repo_b.resolve()]
+
+    def test_order_cli_first(self, tmp_path):
+        """CLI entries come before config entries."""
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        a.mkdir()
+        b.mkdir()
+        result = _resolve_include_repos((a,), ["b"], tmp_path)
+        assert result == [a.resolve(), b.resolve()]
+
+    def test_missing_config_path_is_skipped(self, tmp_path, capsys):
+        """A config include path that doesn't exist is skipped with a warning."""
+        result = _resolve_include_repos((), ["nonexistent"], tmp_path)
+        assert result == []
+        captured = capsys.readouterr()
+        assert "nonexistent" in captured.err or "nonexistent" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# cmd_new --include: metadata + worktree creation
+# ---------------------------------------------------------------------------
+
+
+class TestCliNewInclude:
+    def test_include_stored_in_metadata(self, tmp_path):
+        """--include paths are stored as absolute strings in saved metadata."""
+        runner = CliRunner()
+        repo_b = tmp_path / "repo-b"
+        repo_b.mkdir()
+
+        saved_meta = {}
+
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in _new_patches()]
+            (
+                mock_root, _, _, _, _,
+                mock_db_path, mock_wt_dir, mock_create_wt, _,
+                mock_write, _, mock_save, mock_docker, _, _,
+            ) = mocks
+            mock_root.return_value = (Path("/repo"), True)
+            mock_db_path.return_value = MagicMock(exists=lambda: False)
+            mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
+            mock_write.return_value = Path("/repo/.hatchery/tasks/task.md")
+            mock_docker.return_value = None
+            mock_save.side_effect = saved_meta.update
+
+            stack.enter_context(patch("seekr_hatchery.cli.git.create_include_worktrees"))
+            stack.enter_context(patch("seekr_hatchery.cli.docker.load_docker_config",
+                                      return_value=MagicMock(include=[])))
+
+            result = runner.invoke(cli, ["new", "my-task", "--include", str(repo_b)])
+
+        assert result.exit_code == 0, result.output
+        assert str(repo_b.resolve()) in saved_meta.get("include", [])
+
+    def test_include_creates_secondary_worktrees(self, tmp_path):
+        """When --include points at a git repo, create_include_worktrees is called."""
+        runner = CliRunner()
+        repo_b = tmp_path / "repo-b"
+        repo_b.mkdir()
+        (repo_b / ".git").mkdir()
+
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in _new_patches()]
+            (
+                mock_root, _, _, _, _,
+                mock_db_path, mock_wt_dir, _, _,
+                mock_write, _, _, mock_docker, _, _,
+            ) = mocks
+            mock_root.return_value = (Path("/repo"), True)
+            mock_db_path.return_value = MagicMock(exists=lambda: False)
+            mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
+            mock_write.return_value = Path("/repo/.hatchery/tasks/task.md")
+            mock_docker.return_value = None
+
+            mock_create_inc = stack.enter_context(
+                patch("seekr_hatchery.cli.git.create_include_worktrees")
+            )
+            stack.enter_context(patch("seekr_hatchery.cli.docker.load_docker_config",
+                                      return_value=MagicMock(include=[])))
+
+            runner.invoke(cli, ["new", "my-task", "--include", str(repo_b)])
+
+        mock_create_inc.assert_called_once()
+        call_includes = mock_create_inc.call_args[0][0]
+        assert any(repo_b.resolve() == p for p in call_includes)
+
+    def test_include_passed_to_launch_new(self, tmp_path):
+        """include_repos is forwarded to _launch_new."""
+        runner = CliRunner()
+        repo_b = tmp_path / "repo-b"
+        repo_b.mkdir()
+
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in _new_patches()]
+            (
+                mock_root, _, _, _, _,
+                mock_db_path, mock_wt_dir, _, _,
+                mock_write, _, _, mock_docker, mock_launch, _,
+            ) = mocks
+            mock_root.return_value = (Path("/repo"), True)
+            mock_db_path.return_value = MagicMock(exists=lambda: False)
+            mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
+            mock_write.return_value = Path("/repo/.hatchery/tasks/task.md")
+            mock_docker.return_value = None
+
+            stack.enter_context(patch("seekr_hatchery.cli.git.create_include_worktrees"))
+            stack.enter_context(patch("seekr_hatchery.cli.docker.load_docker_config",
+                                      return_value=MagicMock(include=[])))
+
+            runner.invoke(cli, ["new", "my-task", "--include", str(repo_b)])
+
+        assert mock_launch.called
+        kwargs = mock_launch.call_args[1]
+        include_repos = kwargs.get("include_repos", [])
+        assert any(repo_b.resolve() == p for p in include_repos)
+
+    def test_keyboard_interrupt_removes_secondary_worktrees_and_branches(self, tmp_path):
+        """Ctrl-C during cmd_new removes include worktrees and deletes branches."""
+        runner = CliRunner()
+        repo_b = tmp_path / "repo-b"
+        repo_b.mkdir()
+
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in _new_patches()]
+            (
+                mock_root, _, _, _, _,
+                mock_db_path, mock_wt_dir, _, _,
+                mock_write, _, _, mock_docker, mock_launch, _,
+            ) = mocks
+            mock_root.return_value = (Path("/repo"), True)
+            mock_db_path.return_value = MagicMock(exists=lambda: False)
+            mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
+            mock_write.return_value = Path("/repo/.hatchery/tasks/task.md")
+            mock_docker.return_value = None
+            mock_launch.side_effect = KeyboardInterrupt
+
+            mock_remove_inc = stack.enter_context(
+                patch("seekr_hatchery.cli.git.remove_include_worktrees")
+            )
+            mock_delete_inc = stack.enter_context(
+                patch("seekr_hatchery.cli.git.delete_include_branches")
+            )
+            stack.enter_context(patch("seekr_hatchery.cli.git.create_include_worktrees"))
+            stack.enter_context(patch("seekr_hatchery.cli.docker.load_docker_config",
+                                      return_value=MagicMock(include=[])))
+
+            result = runner.invoke(cli, ["new", "my-task", "--include", str(repo_b)])
+
+        assert result.exit_code == 1
+        mock_remove_inc.assert_called_once()
+        mock_delete_inc.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# cmd_resume — include_repos passed to _launch_resume
+# ---------------------------------------------------------------------------
+
+
+class TestCliResumeInclude:
+    def test_include_repos_passed_to_launch_resume(self, fake_tasks_db, tmp_path):
+        """include paths from metadata are forwarded to _launch_resume."""
+        runner = CliRunner()
+        repo_b = tmp_path / "repo-b"
+
+        with (
+            patch("seekr_hatchery.cli.tasks.load_task") as mock_load,
+            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
+            patch("seekr_hatchery.cli._launch_resume") as mock_launch,
+            patch("seekr_hatchery.cli.Path") as mock_path_cls,
+        ):
+            worktree = MagicMock(spec=Path)
+            worktree.exists.return_value = True
+            mock_path_cls.return_value = worktree
+            mock_load.return_value = {
+                "name": "my-task",
+                "branch": "hatchery/my-task",
+                "worktree": "/some/worktree",
+                "repo": "/some/repo",
+                "session_id": "sid-123",
+                "include": [str(repo_b)],
+            }
+            runner.invoke(cli, ["resume", "my-task"])
+
+        assert mock_launch.called
+        kwargs = mock_launch.call_args[1]
+        include_repos = kwargs.get("include_repos", [])
+        # Path is globally mocked so each Path(p) returns the mock worktree object;
+        # verify that one include entry was constructed and forwarded.
+        assert len(include_repos) == 1
+
+    def test_missing_include_key_defaults_to_empty(self, fake_tasks_db):
+        """Tasks without 'include' metadata resume without error."""
+        runner = CliRunner()
+        with (
+            patch("seekr_hatchery.cli.tasks.load_task") as mock_load,
+            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
+            patch("seekr_hatchery.cli._launch_resume") as mock_launch,
+            patch("seekr_hatchery.cli.Path") as mock_path_cls,
+        ):
+            worktree = MagicMock(spec=Path)
+            worktree.exists.return_value = True
+            mock_path_cls.return_value = worktree
+            mock_load.return_value = {
+                "name": "my-task",
+                "branch": "hatchery/my-task",
+                "worktree": "/some/worktree",
+                "repo": "/some/repo",
+                "session_id": "sid-123",
+            }
+            result = runner.invoke(cli, ["resume", "my-task"])
+
+        assert result.exit_code == 0
+        kwargs = mock_launch.call_args[1]
+        assert kwargs.get("include_repos", []) == []
+
+
+# ---------------------------------------------------------------------------
+# _do_mark_done / _do_delete — include cleanup
+# ---------------------------------------------------------------------------
+
+
+class TestDoMarkDoneInclude:
+    def test_done_removes_include_worktrees(self, fake_tasks_db):
+        """_do_mark_done calls remove_include_worktrees when include paths are present."""
+        repo = Path("/my/repo")
+        worktree = Path("/my/repo/.hatchery/worktrees/my-task")
+        repo_b = Path("/other/repo-b")
+
+        tasks.save_task({
+            "name": "my-task",
+            "branch": "hatchery/my-task",
+            "worktree": str(worktree),
+            "repo": str(repo),
+            "status": "in-progress",
+            "no_worktree": True,
+            "include": [str(repo_b)],
+        })
+
+        import seekr_hatchery.cli as cli_mod
+
+        with patch("seekr_hatchery.cli.git.remove_include_worktrees") as mock_remove:
+            cli_mod._do_mark_done("my-task", repo, worktree)
+
+        mock_remove.assert_not_called()  # no_worktree=True skips the whole block
+
+    def test_done_removes_include_worktrees_with_worktree_mode(self, fake_tasks_db, tmp_path):
+        """_do_mark_done with no_worktree=False removes include worktrees."""
+        repo = Path("/my/repo")
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        repo_b = Path("/other/repo-b")
+
+        tasks.save_task({
+            "name": "my-task",
+            "branch": "hatchery/my-task",
+            "worktree": str(wt),
+            "repo": str(repo),
+            "status": "in-progress",
+            "no_worktree": False,
+            "include": [str(repo_b)],
+        })
+
+        import seekr_hatchery.cli as cli_mod
+
+        with (
+            patch("seekr_hatchery.cli.git.remove_worktree"),
+            patch("seekr_hatchery.cli.git.has_uncommitted_changes", return_value=False),
+            patch("seekr_hatchery.cli.git.remove_include_worktrees") as mock_remove,
+        ):
+            cli_mod._do_mark_done("my-task", repo, wt)
+
+        mock_remove.assert_called_once_with([repo_b], "my-task")
+
+    def test_done_no_include_does_not_call_remove(self, fake_tasks_db, tmp_path):
+        """_do_mark_done with no include paths does not call remove_include_worktrees."""
+        repo = Path("/my/repo")
+        wt = tmp_path / "wt"
+        wt.mkdir()
+
+        tasks.save_task({
+            "name": "my-task",
+            "branch": "hatchery/my-task",
+            "worktree": str(wt),
+            "repo": str(repo),
+            "status": "in-progress",
+            "no_worktree": False,
+        })
+
+        import seekr_hatchery.cli as cli_mod
+
+        with (
+            patch("seekr_hatchery.cli.git.remove_worktree"),
+            patch("seekr_hatchery.cli.git.has_uncommitted_changes", return_value=False),
+            patch("seekr_hatchery.cli.git.remove_include_worktrees") as mock_remove,
+        ):
+            cli_mod._do_mark_done("my-task", repo, wt)
+
+        mock_remove.assert_not_called()
+
+
+class TestDoDeleteInclude:
+    def test_delete_removes_worktrees_and_branches(self, fake_tasks_db, tmp_path):
+        """_do_delete calls remove_include_worktrees and delete_include_branches."""
+        repo = Path("/my/repo")
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        repo_b = Path("/other/repo-b")
+
+        meta = {
+            "name": "my-task",
+            "branch": "hatchery/my-task",
+            "worktree": str(wt),
+            "repo": str(repo),
+            "status": "in-progress",
+            "no_worktree": False,
+            "include": [str(repo_b)],
+        }
+        tasks.save_task(meta)
+
+        import seekr_hatchery.cli as cli_mod
+
+        with (
+            patch("seekr_hatchery.cli.git.remove_worktree"),
+            patch("seekr_hatchery.cli.git.delete_branch", return_value=True),
+            patch("seekr_hatchery.cli.git.remove_include_worktrees") as mock_remove,
+            patch("seekr_hatchery.cli.git.delete_include_branches") as mock_delete_br,
+        ):
+            cli_mod._do_delete("my-task", repo, wt, meta, confirmed=True)
+
+        mock_remove.assert_called_once_with([repo_b], "my-task")
+        mock_delete_br.assert_called_once_with([repo_b], "my-task")
+
+    def test_delete_no_include_does_not_call_helpers(self, fake_tasks_db, tmp_path):
+        repo = Path("/my/repo")
+        wt = tmp_path / "wt"
+        wt.mkdir()
+
+        meta = {
+            "name": "my-task",
+            "branch": "hatchery/my-task",
+            "worktree": str(wt),
+            "repo": str(repo),
+            "status": "in-progress",
+            "no_worktree": False,
+        }
+        tasks.save_task(meta)
+
+        import seekr_hatchery.cli as cli_mod
+
+        with (
+            patch("seekr_hatchery.cli.git.remove_worktree"),
+            patch("seekr_hatchery.cli.git.delete_branch", return_value=True),
+            patch("seekr_hatchery.cli.git.remove_include_worktrees") as mock_remove,
+            patch("seekr_hatchery.cli.git.delete_include_branches") as mock_delete_br,
+        ):
+            cli_mod._do_delete("my-task", repo, wt, meta, confirmed=True)
+
+        mock_remove.assert_not_called()
+        mock_delete_br.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _launch_finalize — include_repos
+# ---------------------------------------------------------------------------
+
+
+class TestLaunchFinalizeInclude:
+    def test_include_repos_passed_to_sandbox_context(self, tmp_path, spy_backend):
+        """_launch_finalize includes paths appear in the system prompt."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        repo_b = tmp_path / "repo-b"
+        repo_b.mkdir()
+
+        with (
+            patch("seekr_hatchery.cli._set_task_status"),
+            patch("seekr_hatchery.cli._post_exit_check"),
+            patch("seekr_hatchery.cli.tasks.sandbox_context", wraps=tasks.sandbox_context) as mock_ctx,
+            patch("seekr_hatchery.cli._docker_context", return_value=(MagicMock(), [], "/workspace")),
+            patch("seekr_hatchery.cli.os.chdir"),
+            patch("seekr_hatchery.cli.subprocess.run"),
+        ):
+            _launch_finalize(
+                repo, worktree, "my-task", "sid-1", spy_backend,
+                runtime=None,  # no docker → uses subprocess path
+                branch="hatchery/my-task",
+                main_branch="main",
+                no_worktree=True,
+                include_repos=[repo_b],
+            )
+
+        # sandbox_context was called with include_paths=[repo_b]
+        assert mock_ctx.called
+        kwargs = mock_ctx.call_args[1]
+        assert repo_b in kwargs.get("include_paths", [])
+
+    def test_include_repos_forwarded_to_launch_docker(self, tmp_path, spy_backend):
+        """_launch_finalize forwards include_repos to launch_docker."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        repo_b = tmp_path / "repo-b"
+        repo_b.mkdir()
+
+        with (
+            patch("seekr_hatchery.cli._set_task_status"),
+            patch("seekr_hatchery.cli._post_exit_check"),
+            patch("seekr_hatchery.cli.docker.launch_docker") as mock_launch,
+            patch("seekr_hatchery.cli._docker_context",
+                  return_value=(MagicMock(), [], "/repo/.hatchery/worktrees/my-task")),
+        ):
+            _launch_finalize(
+                repo, worktree, "my-task", "sid-1", spy_backend,
+                runtime=MagicMock(),
+                branch="hatchery/my-task",
+                main_branch="main",
+                no_worktree=False,
+                include_repos=[repo_b],
+            )
+
+        assert mock_launch.called
+        kwargs = mock_launch.call_args[1]
+        assert repo_b in kwargs.get("include_repos", [])

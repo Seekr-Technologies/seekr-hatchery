@@ -255,8 +255,13 @@ def _launch_finalize(
     branch: str,
     main_branch: str,
     no_worktree: bool = False,
+    include_repos: list[Path] | None = None,
 ) -> None:
-    env_ctx = tasks.sandbox_context(name, branch, worktree, repo, main_branch, bool(runtime), no_worktree)
+    include_repos = include_repos or []
+    env_ctx = tasks.sandbox_context(
+        name, branch, worktree, repo, main_branch, bool(runtime), no_worktree,
+        include_paths=include_repos,
+    )
     system_prompt = tasks.SESSION_SYSTEM + "\n" + env_ctx
     config, features, container_workdir = _docker_context(runtime, None if no_worktree else worktree, repo)
     agent_cmd = backend.build_finalize_command(
@@ -267,9 +272,15 @@ def _launch_finalize(
     try:
         if runtime:
             if no_worktree:
-                docker.launch_docker_no_worktree(worktree, name, backend, agent_cmd, config, runtime)
+                docker.launch_docker_no_worktree(
+                    worktree, name, backend, agent_cmd, config, runtime,
+                    include_repos=include_repos,
+                )
             else:
-                docker.launch_docker(repo, worktree, name, backend, agent_cmd, config, runtime)
+                docker.launch_docker(
+                    repo, worktree, name, backend, agent_cmd, config, runtime,
+                    include_repos=include_repos,
+                )
         else:
             os.chdir(worktree)
             subprocess.run(agent_cmd, env=_session_env(name, repo))
@@ -321,7 +332,12 @@ def _post_exit_check(
         backend = agent.from_kind(meta.get("agent", "CODEX"))
         runtime = docker.resolve_runtime(repo, worktree, no_docker=not sandbox, backend=backend)
         main_branch = git.get_default_branch(repo)
-        _launch_finalize(repo, worktree, name, session_id, backend, runtime, meta["branch"], main_branch, no_worktree)
+        include_repos = [Path(p) for p in meta.get("include", [])]
+        _launch_finalize(
+            repo, worktree, name, session_id, backend, runtime,
+            meta["branch"], main_branch, no_worktree,
+            include_repos=include_repos,
+        )
     elif choice == "x":
         meta = tasks.load_task(repo, name)
         _do_delete(name, repo, worktree, meta)
@@ -856,6 +872,7 @@ def cmd_new(
             git.delete_branch(repo, branch)
             if include_repos:
                 git.remove_include_worktrees(include_repos, name)
+                git.delete_include_branches(include_repos, name)
         ui.warn("Cancelled.")
         sys.exit(1)
 

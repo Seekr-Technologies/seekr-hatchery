@@ -529,14 +529,7 @@ def docker_mounts_no_worktree(
     )
 
 
-def _unique_basename(name: str, used: set[str]) -> str:
-    """Return *name* if unused, else *name*-1, *name*-2, … until unique."""
-    if name not in used:
-        return name
-    i = 1
-    while f"{name}-{i}" in used:
-        i += 1
-    return f"{name}-{i}"
+_unique_basename = tasks._unique_basename
 
 
 def docker_mounts_includes(

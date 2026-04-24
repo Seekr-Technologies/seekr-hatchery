@@ -100,3 +100,85 @@ class TestGitRootOrCwdWorktree:
 
         assert in_repo is True
         assert path == main_repo
+
+
+# ---------------------------------------------------------------------------
+# create_include_worktrees / remove_include_worktrees / delete_include_branches
+# ---------------------------------------------------------------------------
+
+
+class TestIncludeWorktreeHelpers:
+    """Tests for create/remove/delete_include_worktrees using mocked git calls."""
+
+    def _fake_run(self, returncode: int = 0):
+        return SimpleNamespace(returncode=returncode, stdout="", stderr="")
+
+    def test_create_skips_non_git_dir(self, tmp_path):
+        """A plain directory with no .git is silently skipped."""
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        with patch("seekr_hatchery.git.create_worktree") as mock_cw:
+            git.create_include_worktrees([plain], "my-task", "HEAD")
+        mock_cw.assert_not_called()
+
+    def test_create_calls_create_worktree_for_git_repo(self, tmp_path):
+        """A directory with .git triggers create_worktree with the right args."""
+        repo_b = tmp_path / "repo-b"
+        repo_b.mkdir()
+        (repo_b / ".git").mkdir()
+        import seekr_hatchery.tasks as tasks_mod
+
+        with patch("seekr_hatchery.git.create_worktree") as mock_cw:
+            git.create_include_worktrees([repo_b], "my-task", "HEAD")
+
+        expected_worktree = repo_b / tasks_mod.WORKTREES_SUBDIR / "my-task"
+        mock_cw.assert_called_once_with(repo_b, "hatchery/my-task", expected_worktree, "HEAD")
+
+    def test_create_skips_non_git_passes_git(self, tmp_path):
+        """Mixed list: git repo gets a worktree, plain dir is skipped."""
+        repo_b = tmp_path / "repo-b"
+        repo_b.mkdir()
+        (repo_b / ".git").mkdir()
+        plain = tmp_path / "data"
+        plain.mkdir()
+
+        with patch("seekr_hatchery.git.create_worktree") as mock_cw:
+            git.create_include_worktrees([repo_b, plain], "t", "HEAD")
+
+        assert mock_cw.call_count == 1
+
+    def test_remove_skips_non_git_dir(self, tmp_path):
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        with patch("seekr_hatchery.git.remove_worktree") as mock_rw:
+            git.remove_include_worktrees([plain], "my-task")
+        mock_rw.assert_not_called()
+
+    def test_remove_calls_remove_worktree_for_git_repo(self, tmp_path):
+        repo_b = tmp_path / "repo-b"
+        repo_b.mkdir()
+        (repo_b / ".git").mkdir()
+        import seekr_hatchery.tasks as tasks_mod
+
+        with patch("seekr_hatchery.git.remove_worktree") as mock_rw:
+            git.remove_include_worktrees([repo_b], "my-task")
+
+        expected_worktree = repo_b / tasks_mod.WORKTREES_SUBDIR / "my-task"
+        mock_rw.assert_called_once_with(repo_b, expected_worktree, force=True)
+
+    def test_delete_branches_skips_non_git_dir(self, tmp_path):
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        with patch("seekr_hatchery.git.delete_branch") as mock_db:
+            git.delete_include_branches([plain], "my-task")
+        mock_db.assert_not_called()
+
+    def test_delete_branches_calls_delete_branch_for_git_repo(self, tmp_path):
+        repo_b = tmp_path / "repo-b"
+        repo_b.mkdir()
+        (repo_b / ".git").mkdir()
+
+        with patch("seekr_hatchery.git.delete_branch") as mock_db:
+            git.delete_include_branches([repo_b], "my-task")
+
+        mock_db.assert_called_once_with(repo_b, "hatchery/my-task")
