@@ -281,6 +281,39 @@ class TestMigrateDb:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# include field round-trip
+# ---------------------------------------------------------------------------
+
+
+class TestIncludeRoundTrip:
+    def test_include_field_persists(self, fake_tasks_db):
+        """The 'include' list round-trips through save_task / load_task."""
+        meta = {
+            "name": "my-task",
+            "repo": str(_REPO),
+            "status": "in-progress",
+            "include": ["/path/to/repo-b", "/shared/data"],
+        }
+        tasks.save_task(meta)
+        loaded = tasks.load_task(_REPO, "my-task")
+        assert loaded["include"] == ["/path/to/repo-b", "/shared/data"]
+
+    def test_missing_include_defaults_to_empty(self, fake_tasks_db):
+        """Older task metadata without 'include' loads without error."""
+        meta = {
+            "name": "my-task",
+            "repo": str(_REPO),
+            "status": "in-progress",
+        }
+        tasks.save_task(meta)
+        loaded = tasks.load_task(_REPO, "my-task")
+        assert loaded.get("include", []) == []
+
+
+# ---------------------------------------------------------------------------
+
+
 class TestSandboxContextChat:
     def test_no_worktree_docker_no_branch(self):
         """sandbox_context with no_worktree=True, branch='', use_docker=True

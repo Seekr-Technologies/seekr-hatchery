@@ -606,3 +606,126 @@ class TestStreamBuild:
         monkeypatch.setattr(docker.subprocess, "run", _mock_run)
         docker._stream_build(["echo", "hello"], cwd=_sys.modules["pathlib"].Path("."))
         assert captured_kwargs[0].get("stdin") is subprocess.DEVNULL
+
+
+# ---------------------------------------------------------------------------
+# _docker_mounts_includes()
+# ---------------------------------------------------------------------------
+
+
+class TestDockerMountsIncludes:
+    def test_plain_dir_gets_rw_mount(self, tmp_path):
+        """A plain (non-git) directory is mounted rw at /includes/<basename>/."""
+        plain = tmp_path / "shared-data"
+        plain.mkdir()
+        session_dir = tmp_path / "session"
+        session_dir.mkdir()
+
+        mounts = docker._docker_mounts_includes([plain], "my-task", session_dir, no_worktree=False)
+
+        assert f"{plain}:/includes/shared-data:rw" in mounts
+
+    def test_git_repo_without_worktree_gets_rw_mount(self, tmp_path):
+        """A git repo with no worktree for the task falls back to a simple rw mount."""
+        repo = tmp_path / "repo-b"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        # No worktree created
+        session_dir = tmp_path / "session"
+        session_dir.mkdir()
+
+        mounts = docker._docker_mounts_includes([repo], "my-task", session_dir, no_worktree=False)
+
+        assert f"{repo}:/includes/repo-b:rw" in mounts
+        # No git_ptr mount since worktree doesn't exist
+        assert not any("git_ptr" in m for m in mounts)
+
+    def test_git_repo_with_worktree_gets_layered_mounts(self, tmp_path):
+        """A git repo with a task worktree gets layered mounts (root:ro, .git:rw, worktree:rw)."""
+        import seekr_hatchery.tasks as tasks_mod
+
+        repo = tmp_path / "repo-b"
+        repo.mkdir()
+        git_dir = repo / ".git"
+        git_dir.mkdir()
+        (git_dir / "objects").mkdir()
+        worktree = repo / tasks_mod.WORKTREES_SUBDIR / "my-task"
+        worktree.mkdir(parents=True)
+        session_dir = tmp_path / "session"
+        session_dir.mkdir()
+
+        mounts = docker._docker_mounts_includes([repo], "my-task", session_dir, no_worktree=False)
+
+        # Root is read-only
+        assert f"{repo}:/includes/repo-b:ro" in mounts
+        # .git sub-dirs are rw
+        assert f"{git_dir}:/includes/repo-b/.git:rw" in mounts
+        assert f"{git_dir / 'objects'}:/includes/repo-b/.git/objects:rw" in mounts
+        # Worktree itself is rw
+        container_wt = "/includes/repo-b/.hatchery/worktrees/my-task"
+        assert f"{worktree}:{container_wt}:rw" in mounts
+        # git pointer file is written and mounted
+        git_ptr_file = session_dir / "git_ptr_include_repo-b"
+        assert git_ptr_file.exists()
+        assert "gitdir: /includes/repo-b/.git/worktrees/my-task" in git_ptr_file.read_text()
+        assert f"{git_ptr_file}:{container_wt}/.git:rw" in mounts
+        # No single full rw mount for root
+        assert f"{repo}:/includes/repo-b:rw" not in mounts
+
+    def test_basename_collision_gets_numeric_suffix(self, tmp_path):
+        """Two paths sharing the same basename get distinct container paths."""
+        a = tmp_path / "a" / "api"
+        b = tmp_path / "b" / "api"
+        a.mkdir(parents=True)
+        b.mkdir(parents=True)
+        session_dir = tmp_path / "session"
+        session_dir.mkdir()
+
+        mounts = docker._docker_mounts_includes([a, b], "task", session_dir, no_worktree=False)
+
+        assert f"{a}:/includes/api:rw" in mounts
+        assert f"{b}:/includes/api-1:rw" in mounts
+
+    def test_no_worktree_skips_layered_mounts(self, tmp_path):
+        """In no-worktree mode, git repos get a simple rw mount (no layering, no git_ptr)."""
+        repo = tmp_path / "repo-b"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        import seekr_hatchery.tasks as tasks_mod
+        worktree = repo / tasks_mod.WORKTREES_SUBDIR / "my-task"
+        worktree.mkdir(parents=True)
+        session_dir = tmp_path / "session"
+        session_dir.mkdir()
+
+        mounts = docker._docker_mounts_includes([repo], "my-task", session_dir, no_worktree=True)
+
+        assert f"{repo}:/includes/repo-b:rw" in mounts
+        # No git_ptr pointer file should be written or mounted in no-worktree mode
+        git_ptr_file = session_dir / "git_ptr_include_repo-b"
+        assert not git_ptr_file.exists()
+        assert not any(str(git_ptr_file) in m for m in mounts)
+
+    def test_empty_list_returns_empty(self, tmp_path):
+        mounts = docker._docker_mounts_includes([], "task", tmp_path, no_worktree=False)
+        assert mounts == []
+
+
+# ---------------------------------------------------------------------------
+# DockerConfig.include field
+# ---------------------------------------------------------------------------
+
+
+class TestDockerConfigInclude:
+    def test_defaults_to_empty(self):
+        config = docker.DockerConfig()
+        assert config.include == []
+
+    def test_parses_include_list(self):
+        config = docker.DockerConfig(include=["../repo-b", "/abs/path"])
+        assert config.include == ["../repo-b", "/abs/path"]
+
+    def test_extra_fields_still_forbidden(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            docker.DockerConfig(unknown_field="oops")

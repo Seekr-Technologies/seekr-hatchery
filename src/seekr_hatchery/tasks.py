@@ -58,6 +58,9 @@ DOCKER_CONFIG = Path(".hatchery") / "docker.yaml"
 # Inside the container the repo is always mounted here.
 CONTAINER_REPO_ROOT = "/repo"
 
+# Included paths (--include) are mounted under this prefix inside the container.
+CONTAINER_INCLUDES_ROOT = "/includes"
+
 # Appended to the agent's default system prompt (preserving its built-in
 # tool knowledge and workspace awareness). Edit here — single source of truth.
 SESSION_SYSTEM = """\
@@ -89,6 +92,19 @@ Your workflow:
    This file will be merged into main as the permanent record of this task.
 """
 
+def _unique_basename(name: str, used: set[str]) -> str:
+    """Return *name* if not in *used*, else *name*-1, *name*-2, … — first unused variant.
+
+    Does NOT mutate *used*; callers are responsible for adding the result.
+    """
+    if name not in used:
+        return name
+    i = 1
+    while f"{name}-{i}" in used:
+        i += 1
+    return f"{name}-{i}"
+
+
 def sandbox_context(
     name: str,
     branch: str,
@@ -97,8 +113,10 @@ def sandbox_context(
     main_branch: str,
     use_docker: bool,
     no_worktree: bool = False,
+    include_paths: list[Path] | None = None,
 ) -> str:
     """Return a system-prompt section describing the sandbox environment."""
+    include_paths = include_paths or []
     if no_worktree and use_docker:
         lines = [
             "# Sandbox Environment",
@@ -162,6 +180,33 @@ def sandbox_context(
             "",
             f"When creating commits or pull requests, target `{main_branch}`. You may push to `{branch}` only.",
         ]
+
+    if include_paths:
+        lines += ["", "**Included paths** (read-write):"]
+        used_basenames: set[str] = set()
+        for inc in include_paths:
+            is_git = (inc / ".git").exists()
+            if use_docker:
+                basename = _unique_basename(inc.name, used_basenames)
+                used_basenames.add(basename)
+                container_inc = f"{CONTAINER_INCLUDES_ROOT}/{basename}"
+                if is_git and not no_worktree:
+                    container_inc_wt = f"{container_inc}/.hatchery/worktrees/{name}"
+                    lines.append(
+                        f"- `{container_inc}/` — git repo; your worktree: `{container_inc_wt}/`"
+                    )
+                else:
+                    kind = "git repo" if is_git else "directory"
+                    lines.append(f"- `{container_inc}/` — {kind}")
+            else:
+                # Native mode: report host paths
+                if is_git and not no_worktree:
+                    wt = inc / WORKTREES_SUBDIR / name
+                    lines.append(f"- `{wt}/` — git repo worktree (host path)")
+                else:
+                    kind = "git repo" if is_git else "directory"
+                    lines.append(f"- `{inc}/` — {kind} (host path)")
+
     return "\n".join(lines)
 
 
