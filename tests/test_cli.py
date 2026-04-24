@@ -2344,6 +2344,19 @@ class TestResolveIncludeRepos:
         captured = capsys.readouterr()
         assert "nonexistent" in captured.err or "nonexistent" in captured.out
 
+    def test_config_path_missing_on_another_machine(self, tmp_path, capsys):
+        """docker.yaml include path absent on current machine is skipped gracefully.
+
+        Scenario: a developer commits docker.yaml with 'include: [../repo-a]', but a
+        colleague pulls the repo and does not have repo-a checked out locally.
+        The path does not exist → warn and skip (no crash or hard error).
+        """
+        result = _resolve_include_repos((), ["../repo-a"], tmp_path)
+        assert result == []
+        captured = capsys.readouterr()
+        combined = captured.out + captured.err
+        assert "repo-a" in combined
+
 
 # ---------------------------------------------------------------------------
 # cmd_new --include: metadata + worktree creation

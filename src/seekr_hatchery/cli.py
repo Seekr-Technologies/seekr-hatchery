@@ -132,6 +132,40 @@ def _set_task_status(repo: Path, name: str, status: str) -> None:
     tasks.save_task(meta)
 
 
+def _resolve_include_repos(
+    cli_includes: tuple[Path, ...],
+    config_includes: list[str],
+    repo: Path,
+) -> list[Path]:
+    """Merge --include CLI paths with docker.yaml 'include:' entries.
+
+    CLI paths are always resolved against the current working directory (they
+    come from click.Path which handles that).  Config paths are resolved
+    relative to the primary repo root.  Duplicates (by resolved absolute path)
+    are removed while preserving order (CLI paths first).
+    """
+    seen: set[Path] = set()
+    result: list[Path] = []
+
+    for p in cli_includes:
+        resolved = p.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            result.append(resolved)
+
+    for s in config_includes:
+        raw = Path(s)
+        resolved = (repo / raw).resolve() if not raw.is_absolute() else raw.resolve()
+        if not resolved.exists():
+            ui.warn(f"docker.yaml include path does not exist, skipping: {s}")
+            continue
+        if resolved not in seen:
+            seen.add(resolved)
+            result.append(resolved)
+
+    return result
+
+
 def _do_mark_done(name: str, repo: Path, worktree: Path) -> None:
     meta = tasks.load_task(repo, name)
     no_worktree = meta.get("no_worktree", False)
@@ -379,40 +413,6 @@ def _prompt_objective() -> str:
 def _session_env(name: str, repo: Path) -> dict[str, str]:
     """Env vars that identify the hatchery session to child processes (e.g. statusline scripts)."""
     return {**os.environ, "HATCHERY_TASK": name, "HATCHERY_REPO": str(repo)}
-
-
-def _resolve_include_repos(
-    cli_includes: tuple[Path, ...],
-    config_includes: list[str],
-    repo: Path,
-) -> list[Path]:
-    """Merge --include CLI paths with docker.yaml 'include:' entries.
-
-    CLI paths are always resolved against the current working directory (they
-    come from click.Path which handles that).  Config paths are resolved
-    relative to the primary repo root.  Duplicates (by resolved absolute path)
-    are removed while preserving order (CLI paths first).
-    """
-    seen: set[Path] = set()
-    result: list[Path] = []
-
-    for p in cli_includes:
-        resolved = p.resolve()
-        if resolved not in seen:
-            seen.add(resolved)
-            result.append(resolved)
-
-    for s in config_includes:
-        raw = Path(s)
-        resolved = (repo / raw).resolve() if not raw.is_absolute() else raw.resolve()
-        if not resolved.exists():
-            ui.warn(f"docker.yaml include path does not exist, skipping: {s}")
-            continue
-        if resolved not in seen:
-            seen.add(resolved)
-            result.append(resolved)
-
-    return result
 
 
 def _launch_new(
