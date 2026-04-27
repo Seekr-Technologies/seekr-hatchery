@@ -872,6 +872,86 @@ class TestTaskContainerName:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# sandbox_context — include_paths
+# ---------------------------------------------------------------------------
+
+
+class TestSandboxContextIncludePaths:
+    """Verify that include_paths appear in the sandbox context output."""
+
+    _BASE = dict(
+        name="my-task",
+        branch="hatchery/my-task",
+        worktree=Path("/repo/.hatchery/worktrees/my-task"),
+        repo=Path("/repo"),
+        main_branch="main",
+    )
+
+    def _ctx(self, use_docker: bool, no_worktree: bool, include_paths=None) -> str:
+        return tasks.sandbox_context(
+            **self._BASE,
+            use_docker=use_docker,
+            no_worktree=no_worktree,
+            include_paths=include_paths,
+        )
+
+    def test_no_includes_produces_no_includes_section(self):
+        result = self._ctx(use_docker=True, no_worktree=False)
+        assert "Included paths" not in result
+
+    def test_empty_list_produces_no_includes_section(self):
+        result = self._ctx(use_docker=True, no_worktree=False, include_paths=[])
+        assert "Included paths" not in result
+
+    def test_docker_plain_dir_shows_container_path(self, tmp_path):
+        plain = tmp_path / "shared-data"
+        plain.mkdir()
+        result = self._ctx(use_docker=True, no_worktree=False, include_paths=[plain])
+        assert "Included paths" in result
+        assert "/includes/shared-data/" in result
+
+    def test_docker_git_repo_with_worktree_shows_worktree_path(self, tmp_path):
+        repo_b = tmp_path / "repo-b"
+        repo_b.mkdir()
+        (repo_b / ".git").mkdir()
+        import seekr_hatchery.tasks as tasks_mod
+        wt = repo_b / tasks_mod.WORKTREES_SUBDIR / "my-task"
+        wt.mkdir(parents=True)
+        result = self._ctx(use_docker=True, no_worktree=False, include_paths=[repo_b])
+        assert "/includes/repo-b/" in result
+        assert ".hatchery/worktrees/my-task" in result
+
+    def test_docker_basename_collision_shows_suffix(self, tmp_path):
+        a = tmp_path / "a" / "api"
+        b = tmp_path / "b" / "api"
+        a.mkdir(parents=True)
+        b.mkdir(parents=True)
+        result = self._ctx(use_docker=True, no_worktree=False, include_paths=[a, b])
+        assert "/includes/api/" in result
+        assert "/includes/api-1/" in result
+
+    def test_native_plain_dir_shows_host_path(self, tmp_path):
+        plain = tmp_path / "shared-data"
+        plain.mkdir()
+        result = self._ctx(use_docker=False, no_worktree=False, include_paths=[plain])
+        assert "Included paths" in result
+        assert str(plain) in result
+
+    def test_native_git_repo_shows_worktree_host_path(self, tmp_path):
+        repo_b = tmp_path / "repo-b"
+        repo_b.mkdir()
+        (repo_b / ".git").mkdir()
+        import seekr_hatchery.tasks as tasks_mod
+        wt = repo_b / tasks_mod.WORKTREES_SUBDIR / "my-task"
+        wt.mkdir(parents=True)
+        result = self._ctx(use_docker=False, no_worktree=False, include_paths=[repo_b])
+        assert str(wt) in result
+
+
+# ---------------------------------------------------------------------------
+
+
 class TestExecTaskShell:
     """Verify exec_task_shell execs directly into the named container."""
 

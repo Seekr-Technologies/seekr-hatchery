@@ -18,6 +18,15 @@ mounts:
   # DANGEROUS: Uncomment for ssh access
   # - "~/.ssh:/home/hatchery/.ssh:ro"
 
+# include: additional repos or directories to mount inside the container.
+# Each path is mounted read-write at /includes/<basename>/.
+# Git repos automatically get a hatchery/<task> worktree created for branch isolation.
+# Paths are relative to this repo's root, or absolute.
+# Merged with any --include flags passed to `hatchery new`.
+# include:
+#   - ../other-repo
+#   - /shared/data
+
 # Set to true to enable Podman-in-Podman (nested container support).
 # Also uncomment the DinD section in .hatchery/Dockerfile.
 dind: false

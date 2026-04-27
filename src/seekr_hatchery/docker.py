@@ -124,6 +124,7 @@ class DockerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     schema_version: Literal["1"] = "1"
     mounts: list[str] = []
+    include: list[str] = []
     dind: bool = False
     cap_add: list[str] = []
 
@@ -424,6 +425,40 @@ def _construct_docker_mounts(config: DockerConfig) -> list[str]:
     return result
 
 
+def _git_worktree_mounts(repo: Path, name: str, container_root: str) -> list[str]:
+    """Return the layered -v flags for one repo + worktree pair (pre-worktree portion).
+
+    Produces the read-only repo root + targeted read-write .git sub-mounts that
+    protect the main branch while allowing the hatchery/<name> worktree's git
+    metadata to be modified.  The worktree directory itself and any git-pointer
+    shadow file are NOT included — callers append those afterwards (so sentinel
+    files can be inserted between the .git layers and the worktree mount if needed).
+
+    This function is intentionally repo-agnostic: pass ``tasks.CONTAINER_REPO_ROOT``
+    for the primary repo or ``/includes/<basename>`` for an included secondary repo.
+    """
+    git_dir = repo / ".git"
+    mounts = [
+        f"{repo}:{container_root}:ro",          # repo root ro; .git overridden below
+        f"{git_dir}:{container_root}/.git:rw",  # unlock .git/ root for lock files
+        f"{git_dir / 'objects'}:{container_root}/.git/objects:rw",
+    ]
+    # Mount the entire hatchery/ ref directory rw so git can create .lock sidecar
+    # files alongside the branch ref during commits.
+    hatchery_refs = git_dir / "refs" / "heads" / "hatchery"
+    if hatchery_refs.exists():
+        mounts.append(f"{hatchery_refs}:{container_root}/.git/refs/heads/hatchery:rw")
+    logs_dir = git_dir / "logs"
+    if logs_dir.exists():
+        mounts.append(f"{logs_dir}:{container_root}/.git/logs:rw")
+    # Only this task's worktree git metadata is writable; other worktrees' metadata
+    # is protected by the ro parent mount (prevents `git worktree prune` damage).
+    worktree_meta = git_dir / "worktrees" / name
+    if worktree_meta.exists():
+        mounts.append(f"{worktree_meta}:{container_root}/.git/worktrees/{name}:rw")
+    return mounts
+
+
 def docker_mounts(
     repo: Path,
     worktree: Path,
@@ -439,12 +474,12 @@ def docker_mounts(
       /repo                                       ← full repo + .git, read-only
       /repo/.git                                  ← read-write (allows lock files at .git/ root)
       /repo/.git/objects                          ← read-write (new commit objects)
-      /repo/.git/refs/heads/hatchery/                  ← read-write (own branch + lock sidecar files)
+      /repo/.git/refs/heads/hatchery/             ← read-write (own branch + lock sidecar files)
       /repo/.git/logs                             ← read-write (reflogs, if dir exists)
       /repo/.git/worktrees/<n>                    ← read-write (this task's index + HEAD only)
       /repo/.git/COMMIT_EDITMSG                   ← read-write (per-task sentinel file)
       /repo/.git/ORIG_HEAD                        ← read-write (per-task sentinel file)
-      /repo/.hatchery/worktrees/<n>                ← read-write (the ONLY place edits land)
+      /repo/.hatchery/worktrees/<n>               ← read-write (the ONLY place edits land)
       /repo/.hatchery/worktrees/<n>/.git          ← container-path-aware .git pointer (file)
       {CONTAINER_HOME}/...  ← agent-specific home mounts (see backend.home_mounts())
 
@@ -463,31 +498,10 @@ def docker_mounts(
         staging temp dir + post-exit copy-back, which means commits made inside the
         container are not visible via `git log` on the host until the session ends.
     """
-    git_dir = repo / ".git"
     worktree_rel = worktree.relative_to(repo)
     container_worktree = f"{tasks.CONTAINER_REPO_ROOT}/{worktree_rel}"
-    mounts = [
-        f"{repo}:{tasks.CONTAINER_REPO_ROOT}:ro",  # .git ro via parent; overridden below
-        f"{git_dir}:{tasks.CONTAINER_REPO_ROOT}/.git:rw",  # unlock .git/ root for lock files
-        f"{git_dir / 'objects'}:{tasks.CONTAINER_REPO_ROOT}/.git/objects:rw",
-    ]
 
-    # Mount the entire task/ ref directory rw so git can create .lock sidecar
-    # files alongside the branch ref during commits.  refs/heads/ itself is
-    # read-only via the parent repo mount, so main/develop/etc. stay protected.
-    hatchery_refs_dir = git_dir / "refs" / "heads" / "hatchery"
-    if hatchery_refs_dir.exists():
-        mounts.append(f"{hatchery_refs_dir}:{tasks.CONTAINER_REPO_ROOT}/.git/refs/heads/hatchery:rw")
-
-    logs_dir = git_dir / "logs"
-    if logs_dir.exists():
-        mounts.append(f"{logs_dir}:{tasks.CONTAINER_REPO_ROOT}/.git/logs:rw")
-
-    # Only this task's worktree git metadata is writable; other worktrees' metadata
-    # is protected by the ro parent mount (prevents `git worktree prune` damage).
-    worktree_meta = git_dir / "worktrees" / name
-    if worktree_meta.exists():
-        mounts.append(f"{worktree_meta}:{tasks.CONTAINER_REPO_ROOT}/.git/worktrees/{name}:rw")
+    mounts = _git_worktree_mounts(repo, name, tasks.CONTAINER_REPO_ROOT)
 
     # git writes these into .git/ root during normal commits; use per-task sentinel
     # files so .git/ root stays ro.
@@ -526,6 +540,54 @@ def docker_mounts_no_worktree(
         + backend.home_mounts(session_dir)
         + _construct_docker_mounts(config)
     )
+
+
+_unique_basename = tasks._unique_basename
+
+
+def _docker_mounts_includes(
+    include_paths: list[Path],
+    name: str,
+    session_dir: Path,
+    no_worktree: bool,
+) -> list[str]:
+    """Return -v flags for paths included via --include.
+
+    Each path is mounted at /includes/<basename>/.  If two included paths share
+    a basename the second gets a numeric suffix (e.g. api-1).
+
+    For git repos with a hatchery/<name> worktree the same layered mount
+    strategy as the primary repo is applied (root:ro, targeted .git sub-dirs:rw,
+    worktree:rw) and a corrected .git pointer file is written to *session_dir*
+    and bind-mounted over the worktree's .git file.
+
+    Plain directories and no-worktree mode receive a simple rw mount.
+    """
+    mounts: list[str] = []
+    used_basenames: set[str] = set()
+
+    for path in include_paths:
+        basename = _unique_basename(path.name, used_basenames)
+        used_basenames.add(basename)
+        container_path = f"{tasks.CONTAINER_INCLUDES_ROOT}/{basename}"
+
+        is_git = (path / ".git").exists()
+        if not no_worktree and is_git:
+            worktree = path / tasks.WORKTREES_SUBDIR / name
+            if worktree.exists():
+                # Layered mounts: root ro + targeted .git rw (same as primary repo)
+                mounts.extend(_git_worktree_mounts(path, name, container_path))
+                container_worktree = f"{container_path}/.hatchery/worktrees/{name}"
+                mounts.append(f"{worktree}:{container_worktree}:rw")
+                # Rewrite .git pointer to use container-relative path
+                git_ptr_file = session_dir / f"git_ptr_include_{basename}"
+                git_ptr_file.write_text(f"gitdir: {container_path}/.git/worktrees/{name}\n")
+                mounts.append(f"{git_ptr_file}:{container_worktree}/.git:rw")
+                continue
+        # Plain directory or no-worktree: simple rw mount
+        mounts.append(f"{path}:{container_path}:rw")
+
+    return mounts
 
 
 def _default_home_mounts() -> list[str]:
@@ -787,6 +849,7 @@ def launch_docker(
     config: DockerConfig,
     runtime: Runtime = Runtime.DOCKER,
     no_cache: bool = False,
+    include_repos: list[Path] | None = None,
 ) -> None:
     """Replace the current process with a Docker-sandboxed agent session.
 
@@ -794,6 +857,10 @@ def launch_docker(
     Auth is provided via the appropriate API key env var or per-task config.
     *agent_cmd* must be the full command already built for Docker mode
     (``backend.build_*_command(docker=True, workdir=container_workdir)``).
+
+    *include_repos* — additional paths to mount at /includes/<basename>/ rw.
+    Git repos in this list that have a hatchery/<name> worktree will also have
+    their .git pointer corrected for the container environment.
     """
     try:
         mutator = backend.make_header_mutator()
@@ -833,6 +900,8 @@ def launch_docker(
     build_docker_image(repo, worktree, name, backend, runtime=runtime, no_cache=no_cache)
     image = docker_image_name(repo, name)
     mounts = docker_mounts(repo, worktree, name, backend, session_dir, config, git_sentinels, worktree_git_ptr=git_ptr)
+    if include_repos:
+        mounts.extend(_docker_mounts_includes(include_repos, name, session_dir, no_worktree=False))
     logger.debug(f"Launching {runtime.binary} container for task '{name}'")
     return _run_container(
         image,
@@ -859,6 +928,7 @@ def launch_docker_no_worktree(
     config: DockerConfig,
     runtime: Runtime = Runtime.DOCKER,
     no_cache: bool = False,
+    include_repos: list[Path] | None = None,
 ) -> None:
     """Launch a Docker-sandboxed agent session with cwd mounted as /workspace.
 
@@ -866,6 +936,8 @@ def launch_docker_no_worktree(
     Builds the image from cwd/.hatchery/Dockerfile (same as standard mode).
     *agent_cmd* must be the full command already built for Docker mode
     (``backend.build_*_command(docker=True, workdir="/workspace")``).
+
+    *include_repos* — additional paths to mount at /includes/<basename>/ rw.
     """
     try:
         mutator = backend.make_header_mutator()
@@ -885,6 +957,8 @@ def launch_docker_no_worktree(
     build_docker_image(cwd, cwd, name, backend, runtime=runtime, no_cache=no_cache)
     image = docker_image_name(cwd, name)
     mounts = docker_mounts_no_worktree(cwd, backend, session_dir, config=config)
+    if include_repos:
+        mounts.extend(_docker_mounts_includes(include_repos, name, session_dir, no_worktree=True))
     logger.debug(f"Launching {runtime.binary} container for task '{name}' (no-worktree mode)")
     return _run_container(
         image,
