@@ -11,20 +11,45 @@ import seekr_hatchery.ui as ui
 logger = logging.getLogger("hatchery")
 
 
+def _resolve_main_repo(repo: Path) -> Path:
+    """If repo is a git linked worktree, resolve to the main repository root.
+
+    In a linked worktree, .git is a file pointing to the worktree-specific
+    metadata inside the main repo's .git/worktrees/<name>/.  Git objects,
+    refs, and all shared state live in the main repo's .git/.  Returning the
+    main repo root ensures callers always work with a .git directory rather
+    than a .git file, so Docker bind-mount paths like .git/objects resolve
+    correctly.
+    """
+    git_path = repo / ".git"
+    if not git_path.is_file():
+        return repo  # normal checkout — nothing to resolve
+    # Linked worktree: find the common git dir (main repo's .git).
+    result = tasks.run(["git", "rev-parse", "--git-common-dir"], cwd=repo, check=False)
+    if result.returncode != 0:
+        ui.error("could not resolve git common directory for linked worktree.")
+        sys.exit(1)
+    common_dir = Path(result.stdout.strip())
+    if not common_dir.is_absolute():
+        common_dir = (repo / common_dir).resolve()
+    # common_dir is e.g. /path/to/main-repo/.git; parent is the main repo root.
+    return common_dir.parent
+
+
 def git_root() -> Path:
     """Return the root of the current git repository, or exit with an error."""
     result = tasks.run(["git", "rev-parse", "--show-toplevel"], check=False)
     if result.returncode != 0:
         ui.error("not inside a git repository.")
         sys.exit(1)
-    return Path(result.stdout.strip())
+    return _resolve_main_repo(Path(result.stdout.strip()))
 
 
 def git_root_or_cwd() -> tuple[Path, bool]:
     """Return (root, True) if in a git repo, else (Path.cwd(), False)."""
     result = tasks.run(["git", "rev-parse", "--show-toplevel"], check=False)
     if result.returncode == 0:
-        return Path(result.stdout.strip()), True
+        return _resolve_main_repo(Path(result.stdout.strip())), True
     return Path.cwd(), False
 
 
@@ -86,6 +111,41 @@ def delete_branch(repo: Path, branch: str) -> bool:
     """Delete a local branch. Returns True if deleted, False if it didn't exist."""
     result = tasks.run(["git", "branch", "-D", branch], cwd=repo, check=False)
     return result.returncode == 0
+
+
+def create_include_worktrees(includes: list[Path], name: str, base: str) -> None:
+    """Create a hatchery/<name> worktree inside each included path that is a git repo.
+
+    Non-git directories are silently skipped.
+    """
+    branch = f"hatchery/{name}"
+    for path in includes:
+        if (path / ".git").exists():
+            worktree = path / tasks.WORKTREES_SUBDIR / name
+            create_worktree(path, branch, worktree, base)
+            logger.debug("Include worktree created at %s", worktree)
+
+
+def remove_include_worktrees(includes: list[Path], name: str) -> None:
+    """Remove the hatchery/<name> worktree from each included git repo.
+
+    Non-git directories and missing worktrees are silently skipped.
+    """
+    for path in includes:
+        if (path / ".git").exists():
+            worktree = path / tasks.WORKTREES_SUBDIR / name
+            remove_worktree(path, worktree, force=True)
+
+
+def delete_include_branches(includes: list[Path], name: str) -> None:
+    """Delete the hatchery/<name> branch from each included git repo.
+
+    Non-git directories and missing branches are silently skipped.
+    """
+    branch = f"hatchery/{name}"
+    for path in includes:
+        if (path / ".git").exists():
+            delete_branch(path, branch)
 
 
 def get_default_branch(repo: Path) -> str:
