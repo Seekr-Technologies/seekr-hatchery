@@ -129,18 +129,20 @@ def no_wt_run(
         mutator: Callable[[dict], dict] | None = None,
         proxy_token: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        result = docker._run_container(
-            image=no_wt_image,
-            mounts=mounts,
-            workdir="/workspace",
-            hatchery_repo="/workspace",
-            name="test-no-wt",
-            mutator=mutator,
-            proxy_token=proxy_token,
-            agent_cmd=[],
-            runtime=runtime,
-            _command_override=command,
-        )
+        with docker._maybe_api_server(mutator, proxy_token, agent.CODEX) as api_proxy:
+            result = docker._run_container(
+                image=no_wt_image,
+                mounts=mounts,
+                workdir="/workspace",
+                hatchery_repo="/workspace",
+                name="test-no-wt",
+                mutator=mutator,
+                proxy_token=proxy_token,
+                agent_cmd=[],
+                runtime=runtime,
+                _command_override=command,
+                proxy_port=api_proxy.port if api_proxy else None,
+            )
         assert result is not None
         return result
 
@@ -407,11 +409,10 @@ class TestContainerProxy:
         Uses a bare subprocess.run (not _run_container) to test the underlying
         host-gateway networking independently of our mount/env setup.
         """
-        server, _ = proxy_mod.start_proxy("fake-real-key", "correct-token")
-        port = server.server_address[1]
-        # --add-host is what _run_container injects on Linux when api_key is set.
-        extra_args = ["--add-host=host.docker.internal:host-gateway"] if sys.platform == "linux" else []
-        try:
+        with proxy_mod.api_server(_mutator, "correct-token") as server:
+            port = server.port
+            # --add-host is what _run_container injects on Linux when api_key is set.
+            extra_args = ["--add-host=host.docker.internal:host-gateway"] if sys.platform == "linux" else []
             result = subprocess.run(
                 [
                     runtime.binary,
@@ -429,8 +430,6 @@ class TestContainerProxy:
             )
             combined = result.stdout + result.stderr
             assert "nc_exit:0" in combined, f"TCP connection to proxy failed: {combined}"
-        finally:
-            proxy_mod.stop_proxy(server)
 
     def test_request_is_proxied(
         self,

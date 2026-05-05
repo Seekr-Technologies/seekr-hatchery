@@ -116,7 +116,7 @@ class AgentBackend(ABC):
     @staticmethod
     @abstractmethod
     def proxy_kwargs() -> dict:
-        """Return keyword arguments to pass to ``proxy.start_proxy()``.
+        """Return keyword arguments to pass to ``proxy.api_server()``.
 
         Note: does not include ``header_mutator`` — that is provided separately
         via ``make_header_mutator()``.
