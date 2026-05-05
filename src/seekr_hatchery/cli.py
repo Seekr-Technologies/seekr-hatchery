@@ -791,14 +791,12 @@ def cmd_new(
     try:
         if in_repo:
             if no_commit_docker or no_commit:
-                # Generate files to the repo root so they stay uncommitted.
-                # The source=repo calls below will then copy them into the worktree
-                # for this session without committing.
-                docker.ensure_dockerfile(repo, backend)
-                docker.ensure_docker_config(repo)
-            df_created = docker.ensure_dockerfile(worktree, backend, source=repo)
-            dc_created = docker.ensure_docker_config(worktree, source=repo)
-            if not (no_commit_docker or no_commit) and (df_created or dc_created):
+                docker.ensure_docker_files_uncommitted(repo, worktree, backend)
+                df_created = dc_created = False
+            else:
+                df_created = docker.ensure_dockerfile(worktree, backend, source=repo)
+                dc_created = docker.ensure_docker_config(worktree, source=repo)
+            if df_created or dc_created:
                 ui.info("  Committing...")
                 tasks.run(
                     [
@@ -995,6 +993,18 @@ def cmd_resume(name: str, no_docker: bool, rebuild_sandbox: bool) -> None:
 
     if meta.get("status") == "running":
         ui.note(f"task '{name}' was marked as running — a previous session may have exited unexpectedly.")
+
+    # Restore Docker files if they were removed from the task branch (e.g. to
+    # keep them out of a PR).  Generate in repo root if needed, then copy into
+    # the worktree — neither location is committed.
+    if not no_docker and not no_worktree:
+        agent_df = docker.dockerfile_path(worktree, backend)
+        if not agent_df.exists():
+            ui.note(
+                "Dockerfile missing from worktree — restoring from repo root "
+                "(will not be committed to the task branch)."
+            )
+            docker.ensure_docker_files_uncommitted(repo, worktree, backend)
 
     is_chat = meta.get("type") == "chat"
     include_repos = [Path(p) for p in meta.get("include", [])]
