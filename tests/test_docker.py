@@ -731,3 +731,65 @@ class TestDockerConfigInclude:
 
         with pytest.raises(ValidationError):
             docker.DockerConfig(unknown_field="oops")
+
+
+# ---------------------------------------------------------------------------
+# ensure_docker_files_uncommitted
+# ---------------------------------------------------------------------------
+
+
+class TestEnsureDockerFilesUncommitted:
+    def test_copies_from_repo_root_when_worktree_missing(self, tmp_path, monkeypatch):
+        """When files exist in repo root but not in worktree, they are copied."""
+        repo = tmp_path / "repo"
+        worktree = tmp_path / "worktree"
+        for d in (repo / ".hatchery", worktree / ".hatchery"):
+            d.mkdir(parents=True)
+
+        # Place files only in repo root
+        (repo / ".hatchery" / "Dockerfile.codex").write_text("FROM debian\n")
+        (repo / tasks.DOCKER_CONFIG).write_text("schema_version: '1'\n")
+
+        # suppress interactive prompts (shouldn't be hit, but be safe)
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+
+        docker.ensure_docker_files_uncommitted(repo, worktree, agent.CODEX)
+
+        assert (worktree / ".hatchery" / "Dockerfile.codex").exists()
+        assert (worktree / tasks.DOCKER_CONFIG).exists()
+
+    def test_generates_when_repo_root_also_missing(self, tmp_path, monkeypatch):
+        """When neither repo root nor worktree has files, generates from template."""
+        repo = tmp_path / "repo"
+        worktree = tmp_path / "worktree"
+        for d in (repo / ".hatchery", worktree / ".hatchery"):
+            d.mkdir(parents=True)
+
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+
+        docker.ensure_docker_files_uncommitted(repo, worktree, agent.CODEX)
+
+        assert (repo / ".hatchery" / "Dockerfile.codex").exists()
+        assert (worktree / ".hatchery" / "Dockerfile.codex").exists()
+        assert (repo / tasks.DOCKER_CONFIG).exists()
+        assert (worktree / tasks.DOCKER_CONFIG).exists()
+
+    def test_worktree_files_unchanged_when_already_present(self, tmp_path, monkeypatch):
+        """When worktree already has files, they are not overwritten."""
+        repo = tmp_path / "repo"
+        worktree = tmp_path / "worktree"
+        for d in (repo / ".hatchery", worktree / ".hatchery"):
+            d.mkdir(parents=True)
+
+        original_df = "FROM custom-image\n"
+        original_cfg = "schema_version: '1'\nmounts: []\n"
+        (worktree / ".hatchery" / "Dockerfile.codex").write_text(original_df)
+        (worktree / tasks.DOCKER_CONFIG).write_text(original_cfg)
+
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+
+        docker.ensure_docker_files_uncommitted(repo, worktree, agent.CODEX)
+
+        # Worktree files should be untouched
+        assert (worktree / ".hatchery" / "Dockerfile.codex").read_text() == original_df
+        assert (worktree / tasks.DOCKER_CONFIG).read_text() == original_cfg

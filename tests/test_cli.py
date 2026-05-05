@@ -1000,6 +1000,95 @@ class TestCliResume:
         call_args = mock_docker.call_args
         assert call_args[0][2] is True or call_args[1].get("no_docker") is True
 
+    def test_resume_restores_missing_dockerfile(self, fake_tasks_db):
+        """cmd_resume restores Docker files when Dockerfile is missing from worktree."""
+        runner = CliRunner()
+
+        missing_df = MagicMock()
+        missing_df.exists.return_value = False
+
+        with (
+            patch("seekr_hatchery.cli.tasks.load_task") as mock_load,
+            patch("seekr_hatchery.cli.docker.resolve_runtime") as mock_docker,
+            patch("seekr_hatchery.cli.docker.dockerfile_path", return_value=missing_df),
+            patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted") as mock_ensure,
+            patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
+            patch("seekr_hatchery.cli._launch_resume"),
+        ):
+            worktree = MagicMock(spec=Path)
+            worktree.exists.return_value = True
+            mock_load.return_value = {
+                "name": "my-task",
+                "branch": "hatchery/my-task",
+                "worktree": "/some/worktree",
+                "repo": "/some/repo",
+                "session_id": "sid-123",
+            }
+            mock_docker.return_value = None
+
+            with patch("seekr_hatchery.cli.Path") as mock_path_cls:
+                mock_path_cls.return_value = worktree
+                result = runner.invoke(cli, ["resume", "my-task"])
+
+        assert mock_ensure.called
+        assert result.exit_code == 0
+
+    def test_resume_skips_restore_when_dockerfile_present(self, fake_tasks_db):
+        """cmd_resume does not call ensure_docker_files_uncommitted when Dockerfile exists."""
+        runner = CliRunner()
+
+        with (
+            patch("seekr_hatchery.cli.tasks.load_task") as mock_load,
+            patch("seekr_hatchery.cli.docker.resolve_runtime") as mock_docker,
+            patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted") as mock_ensure,
+            patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
+            patch("seekr_hatchery.cli._launch_resume"),
+        ):
+            worktree = MagicMock(spec=Path)
+            worktree.exists.return_value = True
+            mock_load.return_value = {
+                "name": "my-task",
+                "branch": "hatchery/my-task",
+                "worktree": "/some/worktree",
+                "repo": "/some/repo",
+                "session_id": "sid-123",
+            }
+            mock_docker.return_value = None
+
+            with patch("seekr_hatchery.cli.Path") as mock_path_cls:
+                mock_path_cls.return_value = worktree
+                runner.invoke(cli, ["resume", "my-task"])
+
+        assert not mock_ensure.called
+
+    def test_resume_skips_restore_with_no_docker_flag(self, fake_tasks_db):
+        """--no-docker skips the Dockerfile restoration entirely."""
+        runner = CliRunner()
+
+        with (
+            patch("seekr_hatchery.cli.tasks.load_task") as mock_load,
+            patch("seekr_hatchery.cli.docker.resolve_runtime") as mock_docker,
+            patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted") as mock_ensure,
+            patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
+            patch("seekr_hatchery.cli._launch_resume"),
+        ):
+            worktree = MagicMock(spec=Path)
+            worktree.exists.return_value = True
+            mock_load.return_value = {
+                "name": "my-task",
+                "branch": "hatchery/my-task",
+                "worktree": "/some/worktree",
+                "repo": "/some/repo",
+                "session_id": "sid-123",
+            }
+            mock_docker.return_value = None
+
+            with patch("seekr_hatchery.cli.Path") as mock_path_cls:
+                mock_path_cls.return_value = worktree
+                runner.invoke(cli, ["resume", "my-task", "--no-docker"])
+
+        assert not mock_ensure.called
+
 
 # ---------------------------------------------------------------------------
 # CLI dispatch — sandbox

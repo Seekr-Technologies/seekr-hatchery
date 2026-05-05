@@ -410,6 +410,21 @@ def ensure_docker_config(repo: Path, *, source: Path | None = None) -> bool:
     return True
 
 
+def ensure_docker_files_uncommitted(
+    repo: Path, worktree: Path, backend: agent.AgentBackend,
+) -> None:
+    """Ensure Docker files exist in *worktree* without committing.
+
+    Generates Dockerfile and docker.yaml in the repo root if they don't
+    already exist, then copies them into the worktree via the *source*
+    parameter so they remain uncommitted on the task branch.
+    """
+    ensure_dockerfile(repo, backend)
+    ensure_docker_config(repo)
+    ensure_dockerfile(worktree, backend, source=repo)
+    ensure_docker_config(worktree, source=repo)
+
+
 # ── DinD helpers ──────────────────────────────────────────────────────────────
 
 
