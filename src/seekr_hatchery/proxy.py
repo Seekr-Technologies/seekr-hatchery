@@ -17,9 +17,9 @@ proxy (all containers can reach ``host.docker.internal``).
 
 Public interface::
 
-    server, proxy_token = start_proxy(header_mutator, proxy_token)
-    # ... run container ...
-    stop_proxy(server)
+    with api_server(header_mutator, proxy_token) as server:
+        port = server.port
+        # ... run container ...
 """
 
 import http.client
@@ -27,7 +27,8 @@ import http.server
 import logging
 import socketserver
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from typing import Any
 
 logger = logging.getLogger("hatchery")
@@ -254,18 +255,42 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
 
 
 class _ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
-    """HTTP server that handles each request in a separate thread."""
+    """Internal threading server — one thread per request."""
 
     daemon_threads = True
 
 
-def start_proxy(
+class APIServer:
+    """Public handle for a running API proxy server.
+
+    Intentionally a thin wrapper around :class:`_ThreadingHTTPServer` rather
+    than a subclass.  Subclassing would expose the full ``HTTPServer`` /
+    ``socketserver`` API (``shutdown()``, ``server_close()``, ``socket``, …)
+    on a type that callers receive from :func:`api_server`.  Those methods are
+    owned by the context manager and should not be called directly; leaking
+    them onto the public type is misleading and a footgun.
+
+    Callers only ever need ``port``.  If more information is needed in the
+    future, add explicit properties here rather than inheriting everything.
+    """
+
+    def __init__(self, server: _ThreadingHTTPServer) -> None:
+        self._server = server
+
+    @property
+    def port(self) -> int:
+        """Ephemeral port the proxy is listening on."""
+        return self._server.server_address[1]
+
+
+@contextmanager
+def api_server(
     header_mutator: Callable[..., dict[str, str]],
     proxy_token: str,
     target_host: str = "api.anthropic.com",
     path_prefix: str = "",
-) -> tuple[http.server.HTTPServer, str]:
-    """Start the reverse proxy and return ``(server, proxy_token)``.
+) -> Generator[APIServer, None, None]:
+    """Start the reverse proxy, yield an :class:`APIServer`, and shut it down on exit.
 
     The server binds to ``0.0.0.0:0`` so the OS picks an ephemeral port.
     Inbound requests must present *proxy_token* as ``x-api-key`` or
@@ -286,8 +311,8 @@ def start_proxy(
             Use ``"/backend-api/codex"`` for ChatGPT OAuth mode.
     """
 
-    # Bind all settings to a fresh handler class so multiple concurrent proxy
-    # instances don't share state.
+    # Bind all settings to a fresh handler subclass so multiple concurrent
+    # proxy instances don't share state via class-level attributes.
     class _BoundHandler(_ProxyHandler):
         pass
 
@@ -297,22 +322,17 @@ def start_proxy(
     _BoundHandler.path_prefix = path_prefix
 
     server = _ThreadingHTTPServer(("0.0.0.0", 0), _BoundHandler)
-    port = server.server_address[1]
-
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-
     logger.debug(
         "Proxy started on port %d (target=%s prefix=%r)",
-        port,
+        server.server_address[1],
         target_host,
         path_prefix,
     )
-    return server, proxy_token
-
-
-def stop_proxy(server: http.server.HTTPServer) -> None:
-    """Gracefully shut down the proxy server."""
-    server.shutdown()
-    server.server_close()
-    logger.debug("Proxy stopped")
+    try:
+        yield APIServer(server)
+    finally:
+        server.shutdown()
+        server.server_close()
+        logger.debug("Proxy stopped")

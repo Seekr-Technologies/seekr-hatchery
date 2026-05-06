@@ -203,6 +203,30 @@ def _get_or_create_kubectl_token(session_dir: Path) -> str:
 
 
 @contextmanager
+def _maybe_api_server(
+    mutator: Callable[[dict[str, str]], dict[str, str]] | None,
+    proxy_token: str | None,
+    backend: agent.AgentBackend,
+) -> Generator[proxy.APIServer | None, None, None]:
+    """Conditionally start the API proxy and yield the server handle (or ``None``).
+
+    *mutator* is the gate: a non-``None`` mutator means the caller has a real
+    API key to inject, so a proxy is needed.  When ``None`` (e.g. sandbox shell
+    sessions which don't run an agent), no proxy is started and ``None`` is
+    yielded so call sites can use this unconditionally with a uniform pattern::
+
+        with _maybe_api_server(mutator, token, backend) as api_proxy, \\
+             _kubectl_context(config, session_dir) as kubectl_mounts:
+            _run_container(..., proxy_port=api_proxy.port if api_proxy else None)
+    """
+    if mutator is None:
+        yield None
+        return
+    with proxy.api_server(mutator, proxy_token or "", **backend.proxy_kwargs()) as server:
+        yield server
+
+
+@contextmanager
 def _kubectl_context(
     config: DockerConfig,
     session_dir: Path,
@@ -796,6 +820,7 @@ def _run_container(
     _interactive: bool = False,
     cap_add: list[str] | None = None,
     container_name: str | None = None,
+    proxy_port: int | None = None,
     add_host_gateway: bool = False,
 ) -> subprocess.CompletedProcess[str] | None:
     """Assemble and execute the container run command for the given agent session.
@@ -808,19 +833,13 @@ def _run_container(
     the container.  It must be provided whenever *mutator* is set.
     The same token is reused on resume.
 
+    *proxy_port* is the port of the host-side API proxy, managed externally via
+    ``_maybe_api_server``.  When ``None`` no API proxy env vars are injected.
+
     *add_host_gateway* forces the ``--add-host=host.docker.internal:host-gateway``
     flag on Linux even when the API proxy is not active (e.g. when the kubectl
     feature is enabled and the container needs to reach the RBAC proxy).
     """
-    # Start the host-side proxy so the real credentials never enter the container.
-    proxy_server = None
-    proxy_port = None
-    if mutator is not None:
-        proxy_server, _ = proxy.start_proxy(mutator, proxy_token, **backend.proxy_kwargs())
-        proxy_port = proxy_server.server_address[1]
-        if proxy_token is not None:
-            logger.debug("Proxy started for task; API key in container is a proxy token")
-
     cmd = [runtime.binary, "run", "--rm"]
     if _command_override is None or _interactive:
         cmd += ["-it"]
@@ -888,24 +907,16 @@ def _run_container(
     if _command_override is not None:
         cmd += _command_override
         logger.debug(f"Launching {runtime.binary} container image={image!r} name={name!r} (command override)")
-        try:
-            if _interactive:
-                subprocess.run(cmd)
-                return None
-            return subprocess.run(cmd, capture_output=True, text=True)
-        finally:
-            if proxy_server is not None:
-                proxy.stop_proxy(proxy_server)
+        if _interactive:
+            subprocess.run(cmd)
+            return None
+        return subprocess.run(cmd, capture_output=True, text=True)
 
     # Append the full agent command (binary + args, docker-mode already applied).
     cmd += agent_cmd
 
     logger.debug(f"Launching {runtime.binary} container image={image!r} name={name!r} workdir={workdir!r}")
-    try:
-        result = subprocess.run(cmd)
-    finally:
-        if proxy_server is not None:
-            proxy.stop_proxy(proxy_server)
+    result = subprocess.run(cmd)
     if result.returncode != 0:
         ui.warn(f"{runtime.binary} container exited with code {result.returncode}")
         if runtime == Runtime.PODMAN and result.returncode == 137:
@@ -982,7 +993,10 @@ def launch_docker(
         mounts.extend(_docker_mounts_includes(include_repos, name, session_dir, no_worktree=False))
 
     logger.debug(f"Launching {runtime.binary} container for task '{name}'")
-    with _kubectl_context(config, session_dir) as kubectl_mounts:
+    with (
+        _maybe_api_server(mutator, proxy_token, backend) as api_proxy,
+        _kubectl_context(config, session_dir) as kubectl_mounts,
+    ):
         mounts.extend(kubectl_mounts)
         _run_container(
             image,
@@ -998,7 +1012,8 @@ def launch_docker(
             runtime=runtime,
             cap_add=config.cap_add,
             container_name=task_container_name(repo, name),
-            add_host_gateway=(config.kubernetes is not None),
+            proxy_port=api_proxy.port if api_proxy else None,
+            add_host_gateway=bool(kubectl_mounts),
         )
 
 
@@ -1043,7 +1058,10 @@ def launch_docker_no_worktree(
         mounts.extend(_docker_mounts_includes(include_repos, name, session_dir, no_worktree=True))
 
     logger.debug(f"Launching {runtime.binary} container for task '{name}' (no-worktree mode)")
-    with _kubectl_context(config, session_dir) as kubectl_mounts:
+    with (
+        _maybe_api_server(mutator, proxy_token, backend) as api_proxy,
+        _kubectl_context(config, session_dir) as kubectl_mounts,
+    ):
         mounts.extend(kubectl_mounts)
         _run_container(
             image,
@@ -1059,7 +1077,8 @@ def launch_docker_no_worktree(
             runtime=runtime,
             cap_add=config.cap_add,
             container_name=task_container_name(cwd, name),
-            add_host_gateway=(config.kubernetes is not None),
+            proxy_port=api_proxy.port if api_proxy else None,
+            add_host_gateway=bool(kubectl_mounts),
         )
 
 
@@ -1087,7 +1106,10 @@ def launch_sandbox_shell(
     sandbox_session_dir = tasks.HATCHERY_DIR / "sandbox-sessions" / str(uuid.uuid4())
     sandbox_session_dir.mkdir(parents=True, exist_ok=True)
     try:
-        with _kubectl_context(config, sandbox_session_dir) as kubectl_mounts:
+        with (
+            _maybe_api_server(None, None, backend) as api_proxy,
+            _kubectl_context(config, sandbox_session_dir) as kubectl_mounts,
+        ):
             mounts = list(mounts) + kubectl_mounts
             _run_container(
                 image=image,
@@ -1101,7 +1123,8 @@ def launch_sandbox_shell(
                 runtime=runtime,
                 _command_override=[shell],
                 _interactive=True,
-                add_host_gateway=(config.kubernetes is not None),
+                proxy_port=api_proxy.port if api_proxy else None,
+                add_host_gateway=bool(kubectl_mounts),
             )
     finally:
         shutil.rmtree(sandbox_session_dir, ignore_errors=True)

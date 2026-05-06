@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -664,14 +664,8 @@ class TestDindCapMerge:
 
     def _run(self, **kwargs) -> list[str]:
         args = {**self._COMMON, **kwargs}
-        mock_server = MagicMock()
-        mock_server.server_address = ("0.0.0.0", 9999)
-        with (
-            patch("seekr_hatchery.docker.subprocess.run") as mock_run,
-            patch("seekr_hatchery.proxy.start_proxy", return_value=(mock_server, "tok")),
-            patch("seekr_hatchery.proxy.stop_proxy"),
-        ):
-            docker._run_container(**args)
+        with patch("seekr_hatchery.docker.subprocess.run") as mock_run:
+            docker._run_container(**args, proxy_port=9999)
         return mock_run.call_args[0][0]
 
     def test_user_caps_merged(self):
@@ -746,14 +740,8 @@ class TestRunContainerDindFlags:
     def _run(self, **kwargs) -> list[str]:
         """Call _run_container with mock subprocess and return the captured cmd."""
         args = {**self._COMMON, **kwargs}
-        mock_server = MagicMock()
-        mock_server.server_address = ("0.0.0.0", 9999)
-        with (
-            patch("seekr_hatchery.docker.subprocess.run") as mock_run,
-            patch("seekr_hatchery.proxy.start_proxy", return_value=(mock_server, "tok")),
-            patch("seekr_hatchery.proxy.stop_proxy"),
-        ):
-            docker._run_container(**args)
+        with patch("seekr_hatchery.docker.subprocess.run") as mock_run:
+            docker._run_container(**args, proxy_port=9999)
         return mock_run.call_args[0][0]
 
     def test_dind_false_no_extra_flags(self):

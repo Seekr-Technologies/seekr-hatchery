@@ -8,7 +8,6 @@ import pytest
 
 import seekr_hatchery.agents as agent
 import seekr_hatchery.docker as docker
-import seekr_hatchery.proxy as proxy_mod
 import seekr_hatchery.tasks as tasks
 
 # ---------------------------------------------------------------------------
@@ -259,12 +258,6 @@ class TestRunContainerRuntime:
             mutator = _make_mutator()
         captured: list[list[str]] = []
 
-        # Mock the proxy so we don't start a real server; inject predictable values.
-        mock_server = MagicMock()
-        mock_server.server_address = ("0.0.0.0", proxy_port)
-        monkeypatch.setattr(proxy_mod, "start_proxy", lambda _mutator, _token, **kw: (mock_server, "ignored-token"))
-        monkeypatch.setattr(proxy_mod, "stop_proxy", lambda _srv: None)
-
         def _mock_run(cmd, **kw):
             captured.append(cmd)
             return docker.subprocess.CompletedProcess(cmd, 0)
@@ -281,6 +274,7 @@ class TestRunContainerRuntime:
             agent_cmd=["codex"],
             backend=agent.CODEX,
             runtime=runtime,
+            proxy_port=proxy_port,
         )
         return captured[0]
 
@@ -373,12 +367,6 @@ class TestRunContainerRuntime:
 
     def test_no_api_key_env_when_mutator_is_none(self, monkeypatch):
         """When mutator is None, no API key or base URL env vars should appear."""
-        monkeypatch.setattr(
-            proxy_mod,
-            "start_proxy",
-            lambda _mutator, _token, **kw: (_ for _ in ()).throw(AssertionError("should not be called")),
-        )
-
         captured: list[list[str]] = []
 
         def _mock_run(cmd, **kw):
@@ -694,6 +682,7 @@ class TestDockerMountsIncludes:
         repo.mkdir()
         (repo / ".git").mkdir()
         import seekr_hatchery.tasks as tasks_mod
+
         worktree = repo / tasks_mod.WORKTREES_SUBDIR / "my-task"
         worktree.mkdir(parents=True)
         session_dir = tmp_path / "session"
