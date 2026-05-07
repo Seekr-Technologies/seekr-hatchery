@@ -777,7 +777,7 @@ def cmd_new(
     session_id = str(uuid.uuid4())
 
     if no_worktree:
-        worktree = repo
+        worktree = git.git_toplevel_or_cwd()[0] if in_repo else repo
         branch = ""
         ui.info(f"Creating task: {name}")
     else:

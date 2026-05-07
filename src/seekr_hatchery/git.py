@@ -53,6 +53,19 @@ def git_root_or_cwd() -> tuple[Path, bool]:
     return Path.cwd(), False
 
 
+def git_toplevel_or_cwd() -> tuple[Path, bool]:
+    """Return (toplevel, True) if in a git repo, else (Path.cwd(), False).
+
+    Unlike :func:`git_root_or_cwd`, this does **not** resolve linked worktrees
+    to the main repository.  It returns the raw ``--show-toplevel`` path, which
+    is the root of whatever worktree the user is currently inside.
+    """
+    result = tasks.run(["git", "rev-parse", "--show-toplevel"], check=False)
+    if result.returncode == 0:
+        return Path(result.stdout.strip()), True
+    return Path.cwd(), False
+
+
 def create_worktree(repo: Path, branch: str, worktree: Path, base: str) -> None:
     """Create a git worktree on *branch* (force-reset to *base*).
 
