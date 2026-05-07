@@ -102,6 +102,44 @@ class TestGitRootOrCwdWorktree:
         assert path == main_repo
 
 
+class TestGitToplevelOrCwd:
+    """Tests for git_toplevel_or_cwd — returns raw toplevel without resolving worktrees."""
+
+    def test_normal_repo_returns_toplevel(self, tmp_path):
+        (tmp_path / ".git").mkdir()
+        show_toplevel = SimpleNamespace(returncode=0, stdout=str(tmp_path) + "\n")
+        with patch("seekr_hatchery.git.tasks.run", return_value=show_toplevel):
+            path, in_repo = git.git_toplevel_or_cwd()
+        assert in_repo is True
+        assert path == tmp_path
+
+    def test_worktree_returns_worktree_not_main_repo(self, tmp_path):
+        """Unlike git_root_or_cwd, linked worktrees are NOT resolved to the main repo."""
+        main_repo = tmp_path / "main"
+        main_repo.mkdir()
+        (main_repo / ".git").mkdir()
+
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        (worktree / ".git").write_text("gitdir: ../main/.git/worktrees/wt\n")
+
+        show_toplevel = SimpleNamespace(returncode=0, stdout=str(worktree) + "\n")
+        with patch("seekr_hatchery.git.tasks.run", return_value=show_toplevel):
+            path, in_repo = git.git_toplevel_or_cwd()
+
+        assert in_repo is True
+        # Key difference: returns worktree path, NOT main_repo
+        assert path == worktree
+
+    def test_not_in_repo_returns_cwd(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        fail_result = SimpleNamespace(returncode=1, stdout="")
+        with patch("seekr_hatchery.git.tasks.run", return_value=fail_result):
+            path, in_repo = git.git_toplevel_or_cwd()
+        assert in_repo is False
+        assert path == tmp_path
+
+
 # ---------------------------------------------------------------------------
 # create_include_worktrees / remove_include_worktrees / delete_include_branches
 # ---------------------------------------------------------------------------

@@ -1537,6 +1537,27 @@ class TestCliNoWorktree:
 
         assert "not in a git repository" in result.output
 
+    def test_no_worktree_in_linked_worktree_uses_toplevel(self):
+        """--no-worktree from a linked worktree mounts the worktree dir, not the main repo."""
+        runner = CliRunner()
+
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in _new_patches()]
+            _, _, _, mock_launch, _ = self._setup_no_worktree_mocks(mocks, in_repo=True)
+            # git_root_or_cwd returns main repo (as it resolves linked worktrees)
+            mocks[0].return_value = (Path("/main-repo"), True)
+            # git_toplevel_or_cwd returns the actual linked worktree dir
+            mock_toplevel = stack.enter_context(
+                patch("seekr_hatchery.cli.git.git_toplevel_or_cwd", return_value=(Path("/main-repo/worktrees/wt"), True))
+            )
+            result = runner.invoke(cli, ["new", "my-task", "--no-worktree"])
+
+        assert result.exit_code == 0
+        # The worktree arg passed to _launch_new should be the linked worktree dir
+        launch_args = mock_launch.call_args[0]
+        worktree_arg = launch_args[1]  # second positional arg
+        assert worktree_arg == Path("/main-repo/worktrees/wt")
+
     def test_resume_skips_worktree_check_in_no_worktree_mode(self, fake_tasks_db):
         """cmd_resume should not error on missing worktree when no_worktree=True."""
         runner = CliRunner()
