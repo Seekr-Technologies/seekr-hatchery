@@ -50,6 +50,7 @@ cache-keys = [
 
 [dependency-groups]
 dev = [
+    "invoke>=3.0.3",
     "ipdb>=0.13.13",
     "ipython>=9.10.0",
     "pytest>=8.0",

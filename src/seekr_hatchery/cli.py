@@ -293,7 +293,13 @@ def _launch_finalize(
 ) -> None:
     include_repos = include_repos or []
     env_ctx = tasks.sandbox_context(
-        name, branch, worktree, repo, main_branch, bool(runtime), no_worktree,
+        name,
+        branch,
+        worktree,
+        repo,
+        main_branch,
+        bool(runtime),
+        no_worktree,
         include_paths=include_repos,
     )
     system_prompt = tasks.SESSION_SYSTEM + "\n" + env_ctx
@@ -307,12 +313,23 @@ def _launch_finalize(
         if runtime:
             if no_worktree:
                 docker.launch_docker_no_worktree(
-                    worktree, name, backend, agent_cmd, config, runtime,
+                    worktree,
+                    name,
+                    backend,
+                    agent_cmd,
+                    config,
+                    runtime,
                     include_repos=include_repos,
                 )
             else:
                 docker.launch_docker(
-                    repo, worktree, name, backend, agent_cmd, config, runtime,
+                    repo,
+                    worktree,
+                    name,
+                    backend,
+                    agent_cmd,
+                    config,
+                    runtime,
                     include_repos=include_repos,
                 )
         else:
@@ -368,8 +385,15 @@ def _post_exit_check(
         main_branch = git.get_default_branch(repo)
         include_repos = [Path(p) for p in meta.get("include", [])]
         _launch_finalize(
-            repo, worktree, name, session_id, backend, runtime,
-            meta["branch"], main_branch, no_worktree,
+            repo,
+            worktree,
+            name,
+            session_id,
+            backend,
+            runtime,
+            meta["branch"],
+            main_branch,
+            no_worktree,
             include_repos=include_repos,
         )
     elif choice == "x":
@@ -438,7 +462,13 @@ def _launch_new(
         initial_prompt = ""
     else:
         env_ctx = tasks.sandbox_context(
-            name, branch, worktree, repo, main_branch, bool(runtime), no_worktree,
+            name,
+            branch,
+            worktree,
+            repo,
+            main_branch,
+            bool(runtime),
+            no_worktree,
             include_paths=include_repos,
         )
         system_prompt = tasks.SESSION_SYSTEM + "\n" + env_ctx
@@ -456,13 +486,26 @@ def _launch_new(
         if runtime:
             if no_worktree:
                 docker.launch_docker_no_worktree(
-                    worktree, name, backend, agent_cmd, config, runtime,
-                    no_cache=no_cache, include_repos=include_repos,
+                    worktree,
+                    name,
+                    backend,
+                    agent_cmd,
+                    config,
+                    runtime,
+                    no_cache=no_cache,
+                    include_repos=include_repos,
                 )
             else:
                 docker.launch_docker(
-                    repo, worktree, name, backend, agent_cmd, config, runtime,
-                    no_cache=no_cache, include_repos=include_repos,
+                    repo,
+                    worktree,
+                    name,
+                    backend,
+                    agent_cmd,
+                    config,
+                    runtime,
+                    no_cache=no_cache,
+                    include_repos=include_repos,
                 )
         else:
             os.chdir(worktree)
@@ -498,7 +541,13 @@ def _launch_resume(
         initial_prompt = ""
     else:
         env_ctx = tasks.sandbox_context(
-            name, branch, worktree, repo, main_branch, bool(runtime), no_worktree,
+            name,
+            branch,
+            worktree,
+            repo,
+            main_branch,
+            bool(runtime),
+            no_worktree,
             include_paths=include_repos,
         )
         system_prompt = tasks.SESSION_SYSTEM + "\n" + env_ctx
@@ -516,13 +565,26 @@ def _launch_resume(
         if runtime:
             if no_worktree:
                 docker.launch_docker_no_worktree(
-                    worktree, name, backend, agent_cmd, config, runtime,
-                    no_cache=no_cache, include_repos=include_repos,
+                    worktree,
+                    name,
+                    backend,
+                    agent_cmd,
+                    config,
+                    runtime,
+                    no_cache=no_cache,
+                    include_repos=include_repos,
                 )
             else:
                 docker.launch_docker(
-                    repo, worktree, name, backend, agent_cmd, config, runtime,
-                    no_cache=no_cache, include_repos=include_repos,
+                    repo,
+                    worktree,
+                    name,
+                    backend,
+                    agent_cmd,
+                    config,
+                    runtime,
+                    no_cache=no_cache,
+                    include_repos=include_repos,
                 )
         else:
             os.chdir(worktree)

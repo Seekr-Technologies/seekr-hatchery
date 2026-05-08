@@ -911,6 +911,7 @@ class TestSandboxContextIncludePaths:
         repo_b.mkdir()
         (repo_b / ".git").mkdir()
         import seekr_hatchery.tasks as tasks_mod
+
         wt = repo_b / tasks_mod.WORKTREES_SUBDIR / "my-task"
         wt.mkdir(parents=True)
         result = self._ctx(use_docker=True, no_worktree=False, include_paths=[repo_b])
@@ -938,6 +939,7 @@ class TestSandboxContextIncludePaths:
         repo_b.mkdir()
         (repo_b / ".git").mkdir()
         import seekr_hatchery.tasks as tasks_mod
+
         wt = repo_b / tasks_mod.WORKTREES_SUBDIR / "my-task"
         wt.mkdir(parents=True)
         result = self._ctx(use_docker=False, no_worktree=False, include_paths=[repo_b])

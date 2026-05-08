@@ -92,6 +92,7 @@ Your workflow:
    This file will be merged into main as the permanent record of this task.
 """
 
+
 def _unique_basename(name: str, used: set[str]) -> str:
     """Return *name* if not in *used*, else *name*-1, *name*-2, … — first unused variant.
 
@@ -103,7 +104,6 @@ def _unique_basename(name: str, used: set[str]) -> str:
     while f"{name}-{i}" in used:
         i += 1
     return f"{name}-{i}"
-
 
 
 def sandbox_context(
@@ -193,9 +193,7 @@ def sandbox_context(
                 container_inc = f"{CONTAINER_INCLUDES_ROOT}/{basename}"
                 if is_git and not no_worktree:
                     container_inc_wt = f"{container_inc}/.hatchery/worktrees/{name}"
-                    lines.append(
-                        f"- `{container_inc}/` — git repo; your worktree: `{container_inc_wt}/`"
-                    )
+                    lines.append(f"- `{container_inc}/` — git repo; your worktree: `{container_inc_wt}/`")
                 else:
                     kind = "git repo" if is_git else "directory"
                     lines.append(f"- `{container_inc}/` — {kind}")

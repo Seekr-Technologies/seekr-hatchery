@@ -435,7 +435,9 @@ def ensure_docker_config(repo: Path, *, source: Path | None = None) -> bool:
 
 
 def ensure_docker_files_uncommitted(
-    repo: Path, worktree: Path, backend: agent.AgentBackend,
+    repo: Path,
+    worktree: Path,
+    backend: agent.AgentBackend,
 ) -> None:
     """Ensure Docker files exist in *worktree* without committing.
 
@@ -534,7 +536,7 @@ def _git_worktree_mounts(repo: Path, name: str, container_root: str) -> list[str
     """
     git_dir = repo / ".git"
     mounts = [
-        f"{repo}:{container_root}:ro",          # repo root ro; .git overridden below
+        f"{repo}:{container_root}:ro",  # repo root ro; .git overridden below
         f"{git_dir}:{container_root}/.git:rw",  # unlock .git/ root for lock files
         f"{git_dir / 'objects'}:{container_root}/.git/objects:rw",
     ]
