@@ -2460,9 +2460,21 @@ class TestCliNewInclude:
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-                mock_root, _, _, _, _,
-                mock_db_path, mock_wt_dir, mock_create_wt, _,
-                mock_write, _, mock_save, mock_docker, _, _,
+                mock_root,
+                _,
+                _,
+                _,
+                _,
+                mock_db_path,
+                mock_wt_dir,
+                mock_create_wt,
+                _,
+                mock_write,
+                _,
+                mock_save,
+                mock_docker,
+                _,
+                _,
             ) = mocks
             mock_root.return_value = (Path("/repo"), True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
@@ -2472,8 +2484,9 @@ class TestCliNewInclude:
             mock_save.side_effect = saved_meta.update
 
             stack.enter_context(patch("seekr_hatchery.cli.git.create_include_worktrees"))
-            stack.enter_context(patch("seekr_hatchery.cli.docker.load_docker_config",
-                                      return_value=MagicMock(include=[])))
+            stack.enter_context(
+                patch("seekr_hatchery.cli.docker.load_docker_config", return_value=MagicMock(include=[]))
+            )
 
             result = runner.invoke(cli, ["new", "my-task", "--include", str(repo_b)])
 
@@ -2490,9 +2503,21 @@ class TestCliNewInclude:
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-                mock_root, _, _, _, _,
-                mock_db_path, mock_wt_dir, _, _,
-                mock_write, _, _, mock_docker, _, _,
+                mock_root,
+                _,
+                _,
+                _,
+                _,
+                mock_db_path,
+                mock_wt_dir,
+                _,
+                _,
+                mock_write,
+                _,
+                _,
+                mock_docker,
+                _,
+                _,
             ) = mocks
             mock_root.return_value = (Path("/repo"), True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
@@ -2500,11 +2525,10 @@ class TestCliNewInclude:
             mock_write.return_value = Path("/repo/.hatchery/tasks/task.md")
             mock_docker.return_value = None
 
-            mock_create_inc = stack.enter_context(
-                patch("seekr_hatchery.cli.git.create_include_worktrees")
+            mock_create_inc = stack.enter_context(patch("seekr_hatchery.cli.git.create_include_worktrees"))
+            stack.enter_context(
+                patch("seekr_hatchery.cli.docker.load_docker_config", return_value=MagicMock(include=[]))
             )
-            stack.enter_context(patch("seekr_hatchery.cli.docker.load_docker_config",
-                                      return_value=MagicMock(include=[])))
 
             runner.invoke(cli, ["new", "my-task", "--include", str(repo_b)])
 
@@ -2521,9 +2545,21 @@ class TestCliNewInclude:
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-                mock_root, _, _, _, _,
-                mock_db_path, mock_wt_dir, _, _,
-                mock_write, _, _, mock_docker, mock_launch, _,
+                mock_root,
+                _,
+                _,
+                _,
+                _,
+                mock_db_path,
+                mock_wt_dir,
+                _,
+                _,
+                mock_write,
+                _,
+                _,
+                mock_docker,
+                mock_launch,
+                _,
             ) = mocks
             mock_root.return_value = (Path("/repo"), True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
@@ -2532,8 +2568,9 @@ class TestCliNewInclude:
             mock_docker.return_value = None
 
             stack.enter_context(patch("seekr_hatchery.cli.git.create_include_worktrees"))
-            stack.enter_context(patch("seekr_hatchery.cli.docker.load_docker_config",
-                                      return_value=MagicMock(include=[])))
+            stack.enter_context(
+                patch("seekr_hatchery.cli.docker.load_docker_config", return_value=MagicMock(include=[]))
+            )
 
             runner.invoke(cli, ["new", "my-task", "--include", str(repo_b)])
 
@@ -2551,9 +2588,21 @@ class TestCliNewInclude:
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-                mock_root, _, _, _, _,
-                mock_db_path, mock_wt_dir, _, _,
-                mock_write, _, _, mock_docker, mock_launch, _,
+                mock_root,
+                _,
+                _,
+                _,
+                _,
+                mock_db_path,
+                mock_wt_dir,
+                _,
+                _,
+                mock_write,
+                _,
+                _,
+                mock_docker,
+                mock_launch,
+                _,
             ) = mocks
             mock_root.return_value = (Path("/repo"), True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
@@ -2562,15 +2611,12 @@ class TestCliNewInclude:
             mock_docker.return_value = None
             mock_launch.side_effect = KeyboardInterrupt
 
-            mock_remove_inc = stack.enter_context(
-                patch("seekr_hatchery.cli.git.remove_include_worktrees")
-            )
-            mock_delete_inc = stack.enter_context(
-                patch("seekr_hatchery.cli.git.delete_include_branches")
-            )
+            mock_remove_inc = stack.enter_context(patch("seekr_hatchery.cli.git.remove_include_worktrees"))
+            mock_delete_inc = stack.enter_context(patch("seekr_hatchery.cli.git.delete_include_branches"))
             stack.enter_context(patch("seekr_hatchery.cli.git.create_include_worktrees"))
-            stack.enter_context(patch("seekr_hatchery.cli.docker.load_docker_config",
-                                      return_value=MagicMock(include=[])))
+            stack.enter_context(
+                patch("seekr_hatchery.cli.docker.load_docker_config", return_value=MagicMock(include=[]))
+            )
 
             result = runner.invoke(cli, ["new", "my-task", "--include", str(repo_b)])
 
@@ -2656,15 +2702,17 @@ class TestDoMarkDoneInclude:
         worktree = Path("/my/repo/.hatchery/worktrees/my-task")
         repo_b = Path("/other/repo-b")
 
-        tasks.save_task({
-            "name": "my-task",
-            "branch": "hatchery/my-task",
-            "worktree": str(worktree),
-            "repo": str(repo),
-            "status": "in-progress",
-            "no_worktree": True,
-            "include": [str(repo_b)],
-        })
+        tasks.save_task(
+            {
+                "name": "my-task",
+                "branch": "hatchery/my-task",
+                "worktree": str(worktree),
+                "repo": str(repo),
+                "status": "in-progress",
+                "no_worktree": True,
+                "include": [str(repo_b)],
+            }
+        )
 
         import seekr_hatchery.cli as cli_mod
 
@@ -2680,15 +2728,17 @@ class TestDoMarkDoneInclude:
         wt.mkdir()
         repo_b = Path("/other/repo-b")
 
-        tasks.save_task({
-            "name": "my-task",
-            "branch": "hatchery/my-task",
-            "worktree": str(wt),
-            "repo": str(repo),
-            "status": "in-progress",
-            "no_worktree": False,
-            "include": [str(repo_b)],
-        })
+        tasks.save_task(
+            {
+                "name": "my-task",
+                "branch": "hatchery/my-task",
+                "worktree": str(wt),
+                "repo": str(repo),
+                "status": "in-progress",
+                "no_worktree": False,
+                "include": [str(repo_b)],
+            }
+        )
 
         import seekr_hatchery.cli as cli_mod
 
@@ -2707,14 +2757,16 @@ class TestDoMarkDoneInclude:
         wt = tmp_path / "wt"
         wt.mkdir()
 
-        tasks.save_task({
-            "name": "my-task",
-            "branch": "hatchery/my-task",
-            "worktree": str(wt),
-            "repo": str(repo),
-            "status": "in-progress",
-            "no_worktree": False,
-        })
+        tasks.save_task(
+            {
+                "name": "my-task",
+                "branch": "hatchery/my-task",
+                "worktree": str(wt),
+                "repo": str(repo),
+                "status": "in-progress",
+                "no_worktree": False,
+            }
+        )
 
         import seekr_hatchery.cli as cli_mod
 
@@ -2814,7 +2866,11 @@ class TestLaunchFinalizeInclude:
             patch("seekr_hatchery.cli.subprocess.run"),
         ):
             _launch_finalize(
-                repo, worktree, "my-task", "sid-1", spy_backend,
+                repo,
+                worktree,
+                "my-task",
+                "sid-1",
+                spy_backend,
                 runtime=None,  # no docker → uses subprocess path
                 branch="hatchery/my-task",
                 main_branch="main",
@@ -2841,11 +2897,17 @@ class TestLaunchFinalizeInclude:
             patch("seekr_hatchery.cli._set_task_status"),
             patch("seekr_hatchery.cli._post_exit_check"),
             patch("seekr_hatchery.cli.docker.launch_docker") as mock_launch,
-            patch("seekr_hatchery.cli._docker_context",
-                  return_value=(MagicMock(), [], "/repo/.hatchery/worktrees/my-task")),
+            patch(
+                "seekr_hatchery.cli._docker_context",
+                return_value=(MagicMock(), [], "/repo/.hatchery/worktrees/my-task"),
+            ),
         ):
             _launch_finalize(
-                repo, worktree, "my-task", "sid-1", spy_backend,
+                repo,
+                worktree,
+                "my-task",
+                "sid-1",
+                spy_backend,
                 runtime=MagicMock(),
                 branch="hatchery/my-task",
                 main_branch="main",
