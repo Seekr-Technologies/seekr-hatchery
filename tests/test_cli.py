@@ -1536,6 +1536,75 @@ class TestCliNoWorktree:
             result = runner.invoke(cli, ["new", "my-task"])
 
         assert "not in a git repository" in result.output
+        assert "Docker sandbox" not in result.output
+
+    def test_not_in_repo_docker_files_are_created(self):
+        """When not in a git repo, Docker scaffold files are still created."""
+        runner = CliRunner()
+
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in _new_patches()]
+            (
+                mock_root,
+                _,
+                _,
+                mock_ensure_df,
+                mock_ensure_dc,
+                mock_db_path,
+                mock_wt_dir,
+                _,
+                _,
+                mock_write,
+                _,
+                _,
+                mock_docker,
+                _,
+                _,
+            ) = mocks
+            mock_root.return_value = (Path("/some/dir"), False)
+            mock_db_path.return_value = MagicMock(exists=lambda: False)
+            mock_wt_dir.return_value = Path("/some/dir/.hatchery/worktrees")
+            mock_write.return_value = Path("/some/dir/.hatchery/tasks/task.md")
+            mock_docker.return_value = None
+            result = runner.invoke(cli, ["new", "my-task"])
+
+        assert result.exit_code == 0
+        assert mock_ensure_df.called
+        assert mock_ensure_dc.called
+
+    def test_not_in_repo_no_docker_flag_skips_docker_files(self):
+        """When not in a git repo and --no-docker is passed, Docker files are not created."""
+        runner = CliRunner()
+
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in _new_patches()]
+            (
+                mock_root,
+                _,
+                _,
+                mock_ensure_df,
+                mock_ensure_dc,
+                mock_db_path,
+                mock_wt_dir,
+                _,
+                _,
+                mock_write,
+                _,
+                _,
+                mock_docker,
+                _,
+                _,
+            ) = mocks
+            mock_root.return_value = (Path("/some/dir"), False)
+            mock_db_path.return_value = MagicMock(exists=lambda: False)
+            mock_wt_dir.return_value = Path("/some/dir/.hatchery/worktrees")
+            mock_write.return_value = Path("/some/dir/.hatchery/tasks/task.md")
+            mock_docker.return_value = None
+            result = runner.invoke(cli, ["new", "my-task", "--no-docker"])
+
+        assert result.exit_code == 0
+        assert not mock_ensure_df.called
+        assert not mock_ensure_dc.called
 
     def test_resume_skips_worktree_check_in_no_worktree_mode(self, fake_tasks_db):
         """cmd_resume should not error on missing worktree when no_worktree=True."""

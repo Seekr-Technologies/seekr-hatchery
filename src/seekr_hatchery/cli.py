@@ -808,8 +808,7 @@ def cmd_new(
     repo, in_repo = git.git_root_or_cwd()
     if not in_repo:
         no_worktree = True
-        no_docker = True
-        ui.note("not in a git repository — running without worktree isolation or Docker sandbox.")
+        ui.note("not in a git repository — running without worktree isolation.")
 
     cfg = user_config.UserConfig.load()
     backend = cfg.resolve_backend(agent_name)
@@ -873,6 +872,10 @@ def cmd_new(
                     ["git", "commit", "-m", "chore: add hatchery Docker configuration"],
                     cwd=worktree,
                 )
+        else:
+            if not no_docker:
+                docker.ensure_dockerfile(worktree, backend)
+                docker.ensure_docker_config(worktree)
 
         if use_editor:
             task_path = tasks.write_task_file(worktree, name, branch)
@@ -912,7 +915,7 @@ def cmd_new(
         tasks.save_task(meta)
 
         runtime = docker.resolve_runtime(repo, worktree, no_docker, backend=backend)
-        main_branch = git.get_default_branch(repo)
+        main_branch = git.get_default_branch(repo) if in_repo else ""
         _launch_new(
             repo,
             worktree,
@@ -957,8 +960,7 @@ def cmd_chat(name: str | None, agent_name: str, no_commit: bool) -> None:
     ui.hatchery_header(_version)
     repo, in_repo = git.git_root_or_cwd()
     if not in_repo:
-        ui.error("chat requires a git repository (needed for Docker scaffolding).")
-        sys.exit(1)
+        ui.note("not in a git repository — running without worktree isolation.")
 
     cfg = user_config.UserConfig.load()
     backend = cfg.resolve_backend(agent_name)
@@ -979,7 +981,7 @@ def cmd_chat(name: str | None, agent_name: str, no_commit: bool) -> None:
     # Ensure Docker scaffolding
     df_created = docker.ensure_dockerfile(repo, backend)
     dc_created = docker.ensure_docker_config(repo)
-    if not no_commit and (df_created or dc_created):
+    if in_repo and not no_commit and (df_created or dc_created):
         ui.info("  Committing...")
         tasks.run(
             ["git", "add", str(docker.dockerfile_path(repo, backend).relative_to(repo)), str(tasks.DOCKER_CONFIG)],
@@ -1007,7 +1009,7 @@ def cmd_chat(name: str | None, agent_name: str, no_commit: bool) -> None:
     }
     tasks.save_task(meta)
 
-    main_branch = git.get_default_branch(repo)
+    main_branch = git.get_default_branch(repo) if in_repo else ""
     _launch_new(repo, repo, name, session_id, backend, runtime, "", main_branch, no_worktree=True, is_chat=True)
 
 
