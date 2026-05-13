@@ -199,14 +199,13 @@ def _merge_include_updates(
     if not updates:
         return current_entries
 
-    base = meta.get("branch", "HEAD")
     by_path = {e.path: e for e in current_entries}
 
     for update in updates:
         existing = by_path.get(update.path)
         if existing is None:
-            # New path — create worktree if needed.
-            git.create_include_worktrees([update], name, base)
+            # New path — create worktree if needed (base resolved per-repo).
+            git.create_include_worktrees([update], name)
             by_path[update.path] = update
         elif existing.mode == update.mode:
             pass  # no-op
@@ -217,7 +216,7 @@ def _merge_include_updates(
                 git.remove_include_worktrees([existing], name)
             elif existing.is_reference() and not update.is_reference():
                 ui.info(f"include mode {existing.mode!r} → {update.mode!r} for {update.path}; creating worktree.")
-                git.create_include_worktrees([update], name, base)
+                git.create_include_worktrees([update], name)
             by_path[update.path] = update
 
     # Preserve original ordering, appending new entries at the end.
@@ -1167,7 +1166,7 @@ def cmd_resume(
             # Also restore include worktrees that were removed during archive.
             _archived_includes = load_include_entries(meta)
             if _archived_includes:
-                git.create_include_worktrees(_archived_includes, name, meta["branch"])
+                git.create_include_worktrees(_archived_includes, name)
             meta["status"] = "in-progress"
             tasks.save_task(meta)
             ui.success(f"Worktree restored: {worktree}")

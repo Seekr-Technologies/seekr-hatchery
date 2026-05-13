@@ -114,10 +114,14 @@ def delete_branch(repo: Path, branch: str) -> bool:
     return result.returncode == 0
 
 
-def create_include_worktrees(includes: list[IncludeEntry], name: str, base: str) -> None:
+def create_include_worktrees(includes: list[IncludeEntry], name: str, base: str | None = None) -> None:
     """Create a hatchery/<name> worktree inside each included git repo with mode="worktree".
 
     Entries with mode="ro" or mode="rw" and non-git directories are silently skipped.
+
+    For each repo, fetches from origin then bases the new branch on
+    ``origin/<default-branch>`` so it starts from the latest upstream commit.
+    Pass *base* to override this behaviour (e.g. in tests).
     """
     branch = f"hatchery/{name}"
     for entry in includes:
@@ -126,7 +130,18 @@ def create_include_worktrees(includes: list[IncludeEntry], name: str, base: str)
         path = entry.path
         if (path / ".git").exists():
             worktree = path / tasks.WORKTREES_SUBDIR / name
-            create_worktree(path, branch, worktree, base)
+            if base is not None:
+                repo_base = base
+            else:
+                default = get_default_branch(path)
+                # Fetch so the worktree starts from the latest upstream commit.
+                fetch_result = tasks.run(["git", "fetch", "origin"], cwd=path, check=False)
+                if fetch_result.returncode != 0:
+                    logger.warning("git fetch origin failed for %s; using local %s", path, default)
+                    repo_base = default
+                else:
+                    repo_base = f"origin/{default}"
+            create_worktree(path, branch, worktree, repo_base)
             logger.debug("Include worktree created at %s", worktree)
 
 
