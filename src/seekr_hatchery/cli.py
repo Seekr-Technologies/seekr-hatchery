@@ -22,6 +22,7 @@ import seekr_hatchery.git as git
 import seekr_hatchery.tasks as tasks
 import seekr_hatchery.ui as ui
 import seekr_hatchery.user_config as user_config
+from seekr_hatchery.includes import IncludeEntry, load_include_entries, serialize_include_entries
 
 logger = logging.getLogger("hatchery")
 
@@ -132,44 +133,108 @@ def _set_task_status(repo: Path, name: str, status: str) -> None:
     tasks.save_task(meta)
 
 
-def _resolve_include_repos(
-    cli_includes: tuple[Path, ...],
-    config_includes: list[str],
+def _resolve_includes(
+    cli_worktree: tuple[Path, ...],
+    cli_rw: tuple[Path, ...],
+    cli_ro: tuple[Path, ...],
+    config_includes: list[str | dict],
     repo: Path,
-) -> list[Path]:
-    """Merge --include CLI paths with docker.yaml 'include:' entries.
+) -> list[IncludeEntry]:
+    """Merge CLI --include* flags with docker.yaml 'include:' entries into IncludeEntry objects.
 
-    CLI paths are always resolved against the current working directory (they
-    come from click.Path which handles that).  Config paths are resolved
-    relative to the primary repo root.  Duplicates (by resolved absolute path)
-    are removed while preserving order (CLI paths first).
+    CLI paths are resolved against the current working directory (click.Path
+    handles that).  Config paths are resolved relative to the primary repo
+    root.  Duplicates (by resolved absolute path) are removed while preserving
+    order (CLI paths first).
     """
     seen: set[Path] = set()
-    result: list[Path] = []
+    result: list[IncludeEntry] = []
 
-    for p in cli_includes:
+    for p, mode in (
+        *((p, "worktree") for p in cli_worktree),
+        *((p, "rw") for p in cli_rw),
+        *((p, "ro") for p in cli_ro),
+    ):
         resolved = p.resolve()
         if resolved not in seen:
             seen.add(resolved)
-            result.append(resolved)
+            result.append(IncludeEntry(path=resolved, mode=mode))
 
-    for s in config_includes:
-        raw = Path(s)
+    for entry in config_includes:
+        path_str, config_mode = docker.parse_docker_include_entry(entry)
+        raw = Path(path_str)
         resolved = (repo / raw).resolve() if not raw.is_absolute() else raw.resolve()
         if not resolved.exists():
-            ui.warn(f"docker.yaml include path does not exist, skipping: {s}")
+            ui.warn(f"docker.yaml include path does not exist, skipping: {path_str}")
             continue
-        if resolved not in seen:
+        if resolved in seen:
+            # CLI flag already added this path — check for a mode conflict.
+            existing = next(e for e in result if e.path == resolved)
+            if existing.mode != config_mode:
+                ui.note(
+                    f"--include* flag overrides docker.yaml mode for {path_str}: {config_mode!r} → {existing.mode!r}"
+                )
+        else:
             seen.add(resolved)
-            result.append(resolved)
+            result.append(IncludeEntry(path=resolved, mode=config_mode))
 
+    return result
+
+
+def _merge_include_updates(
+    current_entries: list[IncludeEntry],
+    updates: list[IncludeEntry],
+    meta: dict,
+    name: str,
+) -> list[IncludeEntry]:
+    """Merge resume-time --include* flags into the existing entry list.
+
+    For each update:
+    - If a matching path already exists, replace its mode (creating or removing
+      worktrees as needed).
+    - Otherwise, append as a new entry.
+
+    Saves the updated list to meta.json before returning.
+    """
+    if not updates:
+        return current_entries
+
+    base = meta.get("branch", "HEAD")
+    by_path = {e.path: e for e in current_entries}
+
+    for update in updates:
+        existing = by_path.get(update.path)
+        if existing is None:
+            # New path — create worktree if needed.
+            git.create_include_worktrees([update], name, base)
+            by_path[update.path] = update
+        elif existing.mode == update.mode:
+            pass  # no-op
+        else:
+            if not existing.is_reference() and update.is_reference():
+                ui.info(f"include mode {existing.mode!r} → {update.mode!r} for {update.path}; removing worktree.")
+                # Pass existing (mode="worktree") so remove_include_worktrees acts on it.
+                git.remove_include_worktrees([existing], name)
+            elif existing.is_reference() and not update.is_reference():
+                ui.info(f"include mode {existing.mode!r} → {update.mode!r} for {update.path}; creating worktree.")
+                git.create_include_worktrees([update], name, base)
+            by_path[update.path] = update
+
+    # Preserve original ordering, appending new entries at the end.
+    original_paths = [e.path for e in current_entries]
+    original_path_set = {e.path for e in current_entries}
+    new_paths = [e.path for e in updates if e.path not in original_path_set]
+    result = [by_path[p] for p in original_paths] + [by_path[p] for p in new_paths]
+
+    meta["include"] = serialize_include_entries(result)
+    tasks.save_task(meta)
     return result
 
 
 def _do_mark_done(name: str, repo: Path, worktree: Path) -> None:
     meta = tasks.load_task(repo, name)
     no_worktree = meta.get("no_worktree", False)
-    include_repos = [Path(p) for p in meta.get("include", [])]
+    include_repos = load_include_entries(meta)
     no_commit = meta.get("no_commit", False)
 
     if not no_worktree:
@@ -222,7 +287,7 @@ _WRAP_UP_PROMPT = (
 def _do_delete(name: str, repo: Path, worktree: Path, meta: dict, *, confirmed: bool = False) -> None:
     branch = meta["branch"]
     no_worktree = meta.get("no_worktree", False)
-    include_repos = [Path(p) for p in meta.get("include", [])]
+    include_repos = load_include_entries(meta)
 
     if not no_worktree:
         if worktree.exists():
@@ -289,7 +354,7 @@ def _launch_finalize(
     branch: str,
     main_branch: str,
     no_worktree: bool = False,
-    include_repos: list[Path] | None = None,
+    include_repos: list[IncludeEntry] | None = None,
 ) -> None:
     include_repos = include_repos or []
     env_ctx = tasks.sandbox_context(
@@ -383,7 +448,7 @@ def _post_exit_check(
         backend = agent.from_kind(meta.get("agent", "CODEX"))
         runtime = docker.resolve_runtime(repo, worktree, no_docker=not sandbox, backend=backend)
         main_branch = git.get_default_branch(repo)
-        include_repos = [Path(p) for p in meta.get("include", [])]
+        include_repos = load_include_entries(meta)
         _launch_finalize(
             repo,
             worktree,
@@ -451,7 +516,7 @@ def _launch_new(
     no_worktree: bool = False,
     is_chat: bool = False,
     no_cache: bool = False,
-    include_repos: list[Path] | None = None,
+    include_repos: list[IncludeEntry] | None = None,
 ) -> None:
     include_repos = include_repos or []
     session_dir = tasks.task_session_dir(repo, name)
@@ -532,7 +597,7 @@ def _launch_resume(
     no_worktree: bool = False,
     is_chat: bool = False,
     no_cache: bool = False,
-    include_repos: list[Path] | None = None,
+    include_repos: list[IncludeEntry] | None = None,
 ) -> None:
     include_repos = include_repos or []
     backend.on_before_launch(worktree)
@@ -777,7 +842,31 @@ def cli(log_level: str, log_file: str | None) -> None:
     metavar="PATH",
     help=(
         "Mount an additional directory inside the container at /includes/<basename>/. "
-        "Git repos get a hatchery/<name> worktree for branch isolation. "
+        "Git repos get a hatchery/<name> worktree for branch isolation (read-write). "
+        "Repeatable; merged with docker.yaml 'include:' list."
+    ),
+)
+@click.option(
+    "--include-rw",
+    "include_rw",
+    multiple=True,
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    metavar="PATH",
+    help=(
+        "Mount an additional directory read-write inside the container at /includes/<basename>/. "
+        "No worktree is created — the directory is mounted as-is. "
+        "Repeatable; merged with docker.yaml 'include:' list."
+    ),
+)
+@click.option(
+    "--include-ro",
+    "include_ro",
+    multiple=True,
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    metavar="PATH",
+    help=(
+        "Mount an additional directory read-only inside the container at /includes/<basename>/. "
+        "No worktree is created. "
         "Repeatable; merged with docker.yaml 'include:' list."
     ),
 )
@@ -801,6 +890,8 @@ def cmd_new(
     rebuild_sandbox: bool,
     no_commit_docker: bool,
     include: tuple[Path, ...],
+    include_rw: tuple[Path, ...],
+    include_ro: tuple[Path, ...],
     no_commit: bool,
 ) -> None:
     """Start a new task."""
@@ -824,7 +915,7 @@ def cmd_new(
     # created. The worktree-based load inside _docker_context later is for
     # mount/dind settings only.
     _early_config = docker.load_docker_config(repo)
-    include_repos = _resolve_include_repos(include, _early_config.include, repo)
+    include_repos = _resolve_includes(include, include_rw, include_ro, _early_config.include, repo)
 
     name = tasks.to_name(name)
     db_path = tasks.task_db_path(repo, name)
@@ -846,8 +937,9 @@ def cmd_new(
         worktree = tasks.worktrees_dir(repo) / name
         ui.info(f"Creating task: {name}")
         git.create_worktree(repo, branch, worktree, base)
-        if include_repos:
-            git.create_include_worktrees(include_repos, name, base)
+
+    if include_repos:
+        git.create_include_worktrees(include_repos, name, base)
 
     try:
         if in_repo:
@@ -910,7 +1002,7 @@ def cmd_new(
             "no_worktree": no_worktree,
             "no_commit": no_commit,
             "agent": backend.kind,
-            "include": [str(p) for p in include_repos],
+            "include": serialize_include_entries(include_repos),
         }
         tasks.save_task(meta)
 
@@ -1022,7 +1114,42 @@ def cmd_chat(name: str | None, agent_name: str, no_commit: bool) -> None:
     is_flag=True,
     help="Rebuild the sandbox image from scratch, ignoring the layer cache",
 )
-def cmd_resume(name: str, no_docker: bool, rebuild_sandbox: bool) -> None:
+@click.option(
+    "--include",
+    "include",
+    multiple=True,
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    metavar="PATH",
+    help=(
+        "Add or update an include path in worktree mode. "
+        "If the path is already included, its mode is updated. "
+        "To change modes permanently, edit meta.json or re-run with the desired flag."
+    ),
+)
+@click.option(
+    "--include-rw",
+    "include_rw",
+    multiple=True,
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    metavar="PATH",
+    help="Add or update an include path as a read-write reference mount (no worktree).",
+)
+@click.option(
+    "--include-ro",
+    "include_ro",
+    multiple=True,
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    metavar="PATH",
+    help="Add or update an include path as a read-only reference mount (no worktree).",
+)
+def cmd_resume(
+    name: str,
+    no_docker: bool,
+    rebuild_sandbox: bool,
+    include: tuple[Path, ...],
+    include_rw: tuple[Path, ...],
+    include_ro: tuple[Path, ...],
+) -> None:
     """Resume exactly where you left off."""
     ui.hatchery_header(_version)
     repo, _ = git.git_root_or_cwd()
@@ -1037,6 +1164,10 @@ def cmd_resume(name: str, no_docker: bool, rebuild_sandbox: bool) -> None:
         if meta.get("status") == "archived":
             ui.info(f"Re-creating worktree for archived task '{name}'...")
             git.create_worktree(repo, meta["branch"], worktree, meta["branch"])
+            # Also restore include worktrees that were removed during archive.
+            _archived_includes = load_include_entries(meta)
+            if _archived_includes:
+                git.create_include_worktrees(_archived_includes, name, meta["branch"])
             meta["status"] = "in-progress"
             tasks.save_task(meta)
             ui.success(f"Worktree restored: {worktree}")
@@ -1071,7 +1202,16 @@ def cmd_resume(name: str, no_docker: bool, rebuild_sandbox: bool) -> None:
             docker.ensure_docker_files_uncommitted(repo, worktree, backend)
 
     is_chat = meta.get("type") == "chat"
-    include_repos = [Path(p) for p in meta.get("include", [])]
+    include_repos = load_include_entries(meta)
+
+    # Apply any --include* flags passed at resume time.
+    updates = [
+        *((IncludeEntry(path=p.resolve(), mode="worktree")) for p in include),
+        *((IncludeEntry(path=p.resolve(), mode="rw")) for p in include_rw),
+        *((IncludeEntry(path=p.resolve(), mode="ro")) for p in include_ro),
+    ]
+    include_repos = _merge_include_updates(include_repos, updates, meta, name)
+
     runtime = docker.resolve_runtime(repo, worktree, no_docker, backend=backend)
     main_branch = git.get_default_branch(repo)
     _launch_resume(
@@ -1169,6 +1309,8 @@ def cmd_archive(names: tuple[str, ...]) -> None:
         no_worktree = meta.get("no_worktree", False)
         no_commit = meta.get("no_commit", False)
 
+        include_repos = load_include_entries(meta)
+
         if no_worktree:
             ui.note(f"Task '{name}': no-worktree task — no worktree or branch to remove.")
         else:
@@ -1184,6 +1326,8 @@ def cmd_archive(names: tuple[str, ...]) -> None:
                 ui.info(f"Worktree removed: {worktree}")
             else:
                 ui.info(f"Task '{name}': worktree not found (may already be removed).")
+            if include_repos:
+                git.remove_include_worktrees(include_repos, name)
             ui.info(f"Branch retained: {meta['branch']}")
 
         meta["status"] = "archived"

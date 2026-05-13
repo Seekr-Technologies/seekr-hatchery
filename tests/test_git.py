@@ -113,12 +113,27 @@ class TestIncludeWorktreeHelpers:
     def _fake_run(self, returncode: int = 0):
         return SimpleNamespace(returncode=returncode, stdout="", stderr="")
 
+    def _entry(self, path, mode="worktree"):
+        from seekr_hatchery.includes import IncludeEntry
+
+        return IncludeEntry(path=path, mode=mode)
+
     def test_create_skips_non_git_dir(self, tmp_path):
         """A plain directory with no .git is silently skipped."""
         plain = tmp_path / "plain"
         plain.mkdir()
         with patch("seekr_hatchery.git.create_worktree") as mock_cw:
-            git.create_include_worktrees([plain], "my-task", "HEAD")
+            git.create_include_worktrees([self._entry(plain)], "my-task", "HEAD")
+        mock_cw.assert_not_called()
+
+    def test_create_skips_reference_mode_entries(self, tmp_path):
+        """reference mode entries (ro/rw) are skipped even if they are git repos."""
+        repo_b = tmp_path / "repo-b"
+        repo_b.mkdir()
+        (repo_b / ".git").mkdir()
+        with patch("seekr_hatchery.git.create_worktree") as mock_cw:
+            git.create_include_worktrees([self._entry(repo_b, mode="ro")], "my-task", "HEAD")
+            git.create_include_worktrees([self._entry(repo_b, mode="rw")], "my-task", "HEAD")
         mock_cw.assert_not_called()
 
     def test_create_calls_create_worktree_for_git_repo(self, tmp_path):
@@ -129,7 +144,7 @@ class TestIncludeWorktreeHelpers:
         import seekr_hatchery.tasks as tasks_mod
 
         with patch("seekr_hatchery.git.create_worktree") as mock_cw:
-            git.create_include_worktrees([repo_b], "my-task", "HEAD")
+            git.create_include_worktrees([self._entry(repo_b)], "my-task", "HEAD")
 
         expected_worktree = repo_b / tasks_mod.WORKTREES_SUBDIR / "my-task"
         mock_cw.assert_called_once_with(repo_b, "hatchery/my-task", expected_worktree, "HEAD")
@@ -143,7 +158,7 @@ class TestIncludeWorktreeHelpers:
         plain.mkdir()
 
         with patch("seekr_hatchery.git.create_worktree") as mock_cw:
-            git.create_include_worktrees([repo_b, plain], "t", "HEAD")
+            git.create_include_worktrees([self._entry(repo_b), self._entry(plain)], "t", "HEAD")
 
         assert mock_cw.call_count == 1
 
@@ -151,7 +166,17 @@ class TestIncludeWorktreeHelpers:
         plain = tmp_path / "plain"
         plain.mkdir()
         with patch("seekr_hatchery.git.remove_worktree") as mock_rw:
-            git.remove_include_worktrees([plain], "my-task")
+            git.remove_include_worktrees([self._entry(plain)], "my-task")
+        mock_rw.assert_not_called()
+
+    def test_remove_skips_reference_mode_entries(self, tmp_path):
+        """reference mode entries are not removed from worktrees."""
+        repo_b = tmp_path / "repo-b"
+        repo_b.mkdir()
+        (repo_b / ".git").mkdir()
+        with patch("seekr_hatchery.git.remove_worktree") as mock_rw:
+            git.remove_include_worktrees([self._entry(repo_b, mode="ro")], "my-task")
+            git.remove_include_worktrees([self._entry(repo_b, mode="rw")], "my-task")
         mock_rw.assert_not_called()
 
     def test_remove_calls_remove_worktree_for_git_repo(self, tmp_path):
@@ -161,7 +186,7 @@ class TestIncludeWorktreeHelpers:
         import seekr_hatchery.tasks as tasks_mod
 
         with patch("seekr_hatchery.git.remove_worktree") as mock_rw:
-            git.remove_include_worktrees([repo_b], "my-task")
+            git.remove_include_worktrees([self._entry(repo_b)], "my-task")
 
         expected_worktree = repo_b / tasks_mod.WORKTREES_SUBDIR / "my-task"
         mock_rw.assert_called_once_with(repo_b, expected_worktree, force=True)
@@ -170,7 +195,16 @@ class TestIncludeWorktreeHelpers:
         plain = tmp_path / "plain"
         plain.mkdir()
         with patch("seekr_hatchery.git.delete_branch") as mock_db:
-            git.delete_include_branches([plain], "my-task")
+            git.delete_include_branches([self._entry(plain)], "my-task")
+        mock_db.assert_not_called()
+
+    def test_delete_branches_skips_reference_mode_entries(self, tmp_path):
+        """reference mode entries don't have branches to delete."""
+        repo_b = tmp_path / "repo-b"
+        repo_b.mkdir()
+        (repo_b / ".git").mkdir()
+        with patch("seekr_hatchery.git.delete_branch") as mock_db:
+            git.delete_include_branches([self._entry(repo_b, mode="ro")], "my-task")
         mock_db.assert_not_called()
 
     def test_delete_branches_calls_delete_branch_for_git_repo(self, tmp_path):
@@ -179,6 +213,6 @@ class TestIncludeWorktreeHelpers:
         (repo_b / ".git").mkdir()
 
         with patch("seekr_hatchery.git.delete_branch") as mock_db:
-            git.delete_include_branches([repo_b], "my-task")
+            git.delete_include_branches([self._entry(repo_b)], "my-task")
 
         mock_db.assert_called_once_with(repo_b, "hatchery/my-task")

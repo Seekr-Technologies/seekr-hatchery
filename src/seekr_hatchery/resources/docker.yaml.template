@@ -19,13 +19,24 @@ mounts:
   # - "~/.ssh:/home/hatchery/.ssh:ro"
 
 # include: additional repos or directories to mount inside the container.
-# Each path is mounted read-write at /includes/<basename>/.
-# Git repos automatically get a hatchery/<task> worktree created for branch isolation.
-# Paths are relative to this repo's root, or absolute.
-# Merged with any --include flags passed to `hatchery new`.
+# Paths are mounted at /includes/<basename>/. Paths are relative to this
+# repo's root, or absolute. Merged with --include* flags passed to `hatchery new`.
+#
+# Three mount modes are supported (default: worktree):
+#   worktree  — git repos get a hatchery/<task> branch + worktree for isolation (read-write)
+#   rw        — reference mount, read-write, no worktree created
+#   ro        — reference mount, read-only, no worktree created
+#
+# String entries use "worktree" mode (unchanged from previous behaviour).
+# To change mode, use the dict form. You can switch modes while a task is paused
+# by editing this file and running `hatchery resume <name>`.
+#
 # include:
-#   - ../other-repo
-#   - /shared/data
+#   - ../other-repo                 # worktree mode (default)
+#   - path: ../shared-types         # read-write reference mount, no worktree
+#     mode: rw
+#   - path: /docs                   # read-only reference mount
+#     mode: ro
 
 # Set to true to enable Podman-in-Podman (nested container support).
 # Also uncomment the DinD section in .hatchery/Dockerfile.

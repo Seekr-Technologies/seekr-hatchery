@@ -891,6 +891,11 @@ class TestSandboxContextIncludePaths:
             include_paths=include_paths,
         )
 
+    def _entry(self, path, mode="worktree"):
+        from seekr_hatchery.includes import IncludeEntry
+
+        return IncludeEntry(path=path, mode=mode)
+
     def test_no_includes_produces_no_includes_section(self):
         result = self._ctx(use_docker=True, no_worktree=False)
         assert "Included paths" not in result
@@ -902,7 +907,7 @@ class TestSandboxContextIncludePaths:
     def test_docker_plain_dir_shows_container_path(self, tmp_path):
         plain = tmp_path / "shared-data"
         plain.mkdir()
-        result = self._ctx(use_docker=True, no_worktree=False, include_paths=[plain])
+        result = self._ctx(use_docker=True, no_worktree=False, include_paths=[self._entry(plain)])
         assert "Included paths" in result
         assert "/includes/shared-data/" in result
 
@@ -914,7 +919,7 @@ class TestSandboxContextIncludePaths:
 
         wt = repo_b / tasks_mod.WORKTREES_SUBDIR / "my-task"
         wt.mkdir(parents=True)
-        result = self._ctx(use_docker=True, no_worktree=False, include_paths=[repo_b])
+        result = self._ctx(use_docker=True, no_worktree=False, include_paths=[self._entry(repo_b)])
         assert "/includes/repo-b/" in result
         assert ".hatchery/worktrees/my-task" in result
 
@@ -923,14 +928,14 @@ class TestSandboxContextIncludePaths:
         b = tmp_path / "b" / "api"
         a.mkdir(parents=True)
         b.mkdir(parents=True)
-        result = self._ctx(use_docker=True, no_worktree=False, include_paths=[a, b])
+        result = self._ctx(use_docker=True, no_worktree=False, include_paths=[self._entry(a), self._entry(b)])
         assert "/includes/api/" in result
         assert "/includes/api-1/" in result
 
     def test_native_plain_dir_shows_host_path(self, tmp_path):
         plain = tmp_path / "shared-data"
         plain.mkdir()
-        result = self._ctx(use_docker=False, no_worktree=False, include_paths=[plain])
+        result = self._ctx(use_docker=False, no_worktree=False, include_paths=[self._entry(plain)])
         assert "Included paths" in result
         assert str(plain) in result
 
@@ -942,8 +947,23 @@ class TestSandboxContextIncludePaths:
 
         wt = repo_b / tasks_mod.WORKTREES_SUBDIR / "my-task"
         wt.mkdir(parents=True)
-        result = self._ctx(use_docker=False, no_worktree=False, include_paths=[repo_b])
+        result = self._ctx(use_docker=False, no_worktree=False, include_paths=[self._entry(repo_b)])
         assert str(wt) in result
+
+    def test_docker_ro_reference_shows_read_only_label(self, tmp_path):
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        result = self._ctx(use_docker=True, no_worktree=False, include_paths=[self._entry(docs, mode="ro")])
+        assert "Included paths" in result
+        assert "/includes/docs/" in result
+        assert "read-only" in result
+
+    def test_docker_rw_reference_shows_read_write_label(self, tmp_path):
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        result = self._ctx(use_docker=True, no_worktree=False, include_paths=[self._entry(shared, mode="rw")])
+        assert "/includes/shared/" in result
+        assert "read-write" in result
 
 
 # ---------------------------------------------------------------------------
@@ -976,3 +996,64 @@ class TestExecTaskShell:
             docker.exec_task_shell("my-task", docker.Runtime.PODMAN, repo)
         cmd = mock_run.call_args[0][0]
         assert cmd[0] == "podman"
+
+
+# ---------------------------------------------------------------------------
+# IncludeEntry — serialisation / deserialisation
+# ---------------------------------------------------------------------------
+
+
+class TestIncludeEntry:
+    def test_serialize_worktree_entry(self):
+        from seekr_hatchery.includes import IncludeEntry, serialize_include_entries
+
+        entries = [IncludeEntry(path=Path("/a/b"), mode="worktree")]
+        assert serialize_include_entries(entries) == [{"path": "/a/b", "mode": "worktree"}]
+
+    def test_serialize_reference_entries(self):
+        from seekr_hatchery.includes import IncludeEntry, serialize_include_entries
+
+        entries = [
+            IncludeEntry(path=Path("/a/b"), mode="ro"),
+            IncludeEntry(path=Path("/c/d"), mode="rw"),
+        ]
+        result = serialize_include_entries(entries)
+        assert result == [{"path": "/a/b", "mode": "ro"}, {"path": "/c/d", "mode": "rw"}]
+
+    def test_load_new_format(self):
+        from seekr_hatchery.includes import IncludeEntry, load_include_entries
+
+        meta = {"include": [{"path": "/a/b", "mode": "ro"}, {"path": "/c/d", "mode": "worktree"}]}
+        entries = load_include_entries(meta)
+        assert entries == [IncludeEntry(Path("/a/b"), "ro"), IncludeEntry(Path("/c/d"), "worktree")]
+
+    def test_load_old_format_string_list(self):
+        """Old meta.json format (plain strings) is silently upgraded to worktree mode."""
+        from seekr_hatchery.includes import IncludeEntry, load_include_entries
+
+        meta = {"include": ["/a/b", "/c/d"]}
+        entries = load_include_entries(meta)
+        assert entries == [IncludeEntry(Path("/a/b"), "worktree"), IncludeEntry(Path("/c/d"), "worktree")]
+
+    def test_load_missing_key_returns_empty(self):
+        from seekr_hatchery.tasks import load_include_entries
+
+        assert load_include_entries({}) == []
+
+    def test_is_reference_true_for_ro_rw(self):
+        from seekr_hatchery.includes import IncludeEntry
+
+        assert IncludeEntry(Path("/x"), mode="ro").is_reference() is True
+        assert IncludeEntry(Path("/x"), mode="rw").is_reference() is True
+
+    def test_is_reference_false_for_worktree(self):
+        from seekr_hatchery.includes import IncludeEntry
+
+        assert IncludeEntry(Path("/x"), mode="worktree").is_reference() is False
+
+    def test_load_unknown_mode_defaults_to_worktree(self):
+        from seekr_hatchery.includes import IncludeEntry, load_include_entries
+
+        meta = {"include": [{"path": "/a/b", "mode": "bogus"}]}
+        entries = load_include_entries(meta)
+        assert entries == [IncludeEntry(Path("/a/b"), "worktree")]

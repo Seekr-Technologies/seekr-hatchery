@@ -7,6 +7,7 @@ from pathlib import Path
 
 import seekr_hatchery.tasks as tasks
 import seekr_hatchery.ui as ui
+from seekr_hatchery.includes import IncludeEntry
 
 logger = logging.getLogger("hatchery")
 
@@ -113,37 +114,47 @@ def delete_branch(repo: Path, branch: str) -> bool:
     return result.returncode == 0
 
 
-def create_include_worktrees(includes: list[Path], name: str, base: str) -> None:
-    """Create a hatchery/<name> worktree inside each included path that is a git repo.
+def create_include_worktrees(includes: list[IncludeEntry], name: str, base: str) -> None:
+    """Create a hatchery/<name> worktree inside each included git repo with mode="worktree".
 
-    Non-git directories are silently skipped.
+    Entries with mode="ro" or mode="rw" and non-git directories are silently skipped.
     """
     branch = f"hatchery/{name}"
-    for path in includes:
+    for entry in includes:
+        if entry.mode != "worktree":
+            continue
+        path = entry.path
         if (path / ".git").exists():
             worktree = path / tasks.WORKTREES_SUBDIR / name
             create_worktree(path, branch, worktree, base)
             logger.debug("Include worktree created at %s", worktree)
 
 
-def remove_include_worktrees(includes: list[Path], name: str) -> None:
-    """Remove the hatchery/<name> worktree from each included git repo.
+def remove_include_worktrees(includes: list[IncludeEntry], name: str) -> None:
+    """Remove the hatchery/<name> worktree from included git repos with mode="worktree".
 
-    Non-git directories and missing worktrees are silently skipped.
+    Reference-mode entries (ro/rw), non-git directories, and missing worktrees
+    are silently skipped.
     """
-    for path in includes:
+    for entry in includes:
+        if entry.mode != "worktree":
+            continue
+        path = entry.path
         if (path / ".git").exists():
             worktree = path / tasks.WORKTREES_SUBDIR / name
             remove_worktree(path, worktree, force=True)
 
 
-def delete_include_branches(includes: list[Path], name: str) -> None:
-    """Delete the hatchery/<name> branch from each included git repo.
+def delete_include_branches(includes: list[IncludeEntry], name: str) -> None:
+    """Delete the hatchery/<name> branch from included git repos with mode="worktree".
 
-    Non-git directories and missing branches are silently skipped.
+    Reference-mode entries (ro/rw) and non-git directories are silently skipped.
     """
     branch = f"hatchery/{name}"
-    for path in includes:
+    for entry in includes:
+        if entry.mode != "worktree":
+            continue
+        path = entry.path
         if (path / ".git").exists():
             delete_branch(path, branch)
 
