@@ -935,10 +935,20 @@ def cmd_new(
         branch = f"hatchery/{name}"
         worktree = tasks.worktrees_dir(repo) / name
         ui.info(f"Creating task: {name}")
+        # When the user hasn't specified a base ref, resolve to origin/<default>
+        # so the task starts from the latest upstream commit rather than whatever
+        # local HEAD happens to be.
+        if base == tasks.DEFAULT_BASE and in_repo:
+            default = git.get_default_branch(repo)
+            fetch_result = tasks.run(["git", "fetch", "origin"], cwd=repo, check=False)
+            if fetch_result.returncode == 0:
+                base = f"origin/{default}"
+            else:
+                logger.debug("git fetch origin failed; using local %s as base", base)
         git.create_worktree(repo, branch, worktree, base)
 
     if include_repos:
-        git.create_include_worktrees(include_repos, name, base)
+        git.create_include_worktrees(include_repos, name)
 
     try:
         if in_repo:
