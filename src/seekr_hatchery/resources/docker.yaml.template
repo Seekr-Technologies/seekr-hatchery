@@ -31,6 +31,22 @@ mounts:
 # Also uncomment the DinD section in .hatchery/Dockerfile.
 dind: false
 
+# When true, hatchery scans the worktree (or cwd in --no-worktree mode) on
+# launch, finds symlinks whose targets sit outside the mounted area, and
+# bind-mounts each target at the same absolute host path (read-write) so the
+# symlink resolves inside the container. Targets already covered by an
+# existing mount or living under system paths (/usr, /bin, /lib, /etc, ...)
+# are skipped. Walks skip .git, node_modules, .venv, and similar heavyweight
+# directories to keep startup fast on large repos.
+#
+# Each symlink must be one of:
+#   - relative,  target inside  the mounted directory  (works as-is)
+#   - absolute,  target outside the mounted directory  (target gets bind-mounted)
+# The other two shapes (absolute-internal, relative-external) don't survive
+# the host→container path remap and will cause launch to fail with an error
+# naming the offending link.
+follow_symlinks: false
+
 # cap_add: extra Linux capabilities to grant inside the DinD container.
 # Only takes effect when dind: true. Values are validated against
 # capabilities(7); invalid names are rejected at load time.
