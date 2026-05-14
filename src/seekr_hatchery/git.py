@@ -2,6 +2,7 @@
 
 import logging
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -62,7 +63,13 @@ def create_worktree(repo: Path, branch: str, worktree: Path, base: str) -> None:
     """
     worktree.parent.mkdir(parents=True, exist_ok=True)
     tasks.run(["git", "worktree", "remove", "--force", str(worktree)], cwd=repo, check=False)
-    tasks.run(["git", "worktree", "add", "-B", branch, str(worktree), base], cwd=repo)
+    try:
+        tasks.run(["git", "worktree", "add", "-B", branch, str(worktree), base], cwd=repo)
+    except subprocess.CalledProcessError as e:
+        if "invalid reference" in e.stderr:
+            ui.error(f"base ref {base!r} does not exist in {repo}. Use --from <branch> to specify a valid ref.")
+            sys.exit(1)
+        raise
     logger.debug("Worktree created at %s", worktree)
 
 
