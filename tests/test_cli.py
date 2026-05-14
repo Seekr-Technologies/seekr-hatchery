@@ -178,17 +178,31 @@ class TestCliNew:
         assert result.exit_code == 0
         assert mock_launch.called
 
-    def test_new_default_base_is_head(self):
+    def test_new_default_base_fetches_and_uses_origin(self):
+        """Without --from, cmd_new fetches origin and bases the branch on origin/<default>."""
         runner = CliRunner()
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
-            mock_create_wt, _, mock_save, _, _ = self._setup_mocks(mocks)
-            saved_meta = {}
-            mock_save.side_effect = saved_meta.update
+            mock_create_wt, mock_run, _, _, _ = self._setup_mocks(mocks)
+            # Simulate successful fetch; get_default_branch returns "main".
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            stack.enter_context(patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"))
             runner.invoke(cli, ["new", "my-task"])
 
-        # create_worktree called with base=DEFAULT_BASE ("HEAD")
+        assert mock_create_wt.call_args[0][3] == "origin/main"
+
+    def test_new_default_base_falls_back_to_head_when_fetch_fails(self):
+        """If git fetch fails (offline/no remote), HEAD is used as base."""
+        runner = CliRunner()
+
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in _new_patches()]
+            mock_create_wt, mock_run, _, _, _ = self._setup_mocks(mocks)
+            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
+            stack.enter_context(patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"))
+            runner.invoke(cli, ["new", "my-task"])
+
         assert mock_create_wt.call_args[0][3] == tasks.DEFAULT_BASE
 
     def test_new_with_from_flag(self):
@@ -2757,6 +2771,51 @@ class TestCliNewInclude:
             result = runner.invoke(cli, ["new", "my-task"])
 
         assert result.exit_code == 0, result.output
+        include = saved_meta.get("include", [])
+        assert any(e.get("path") == str(repo_b.resolve()) and e.get("mode") == "ro" for e in include)
+
+    def test_includes_added_to_docker_yaml_during_edit_are_respected(self, tmp_path):
+        """Include entries added to docker.yaml during the setup prompt are picked up."""
+        from seekr_hatchery.includes import IncludeItem
+
+        runner = CliRunner()
+        repo_b = tmp_path / "ref"
+        repo_b.mkdir()
+        saved_meta = {}
+
+        # First load_docker_config (pre-worktree) returns empty includes.
+        # Second load (post-edit reconciliation) returns the entry the user added.
+        post_edit_config = MagicMock(include=[IncludeItem(path=str(repo_b), mode="ro")])
+
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in _new_patches()]
+            (mock_root, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, mock_save, mock_docker, _, _) = (
+                mocks
+            )
+            mock_root.return_value = (tmp_path, True)
+            mock_db_path.return_value = MagicMock(exists=lambda: False)
+            mock_wt_dir.return_value = tmp_path / ".hatchery/worktrees"
+            mock_write.return_value = tmp_path / ".hatchery/tasks/task.md"
+            mock_docker.return_value = None
+            mock_save.side_effect = saved_meta.update
+
+            mock_create_inc = stack.enter_context(patch("seekr_hatchery.cli.git.create_include_worktrees"))
+            # Pre-worktree load: no includes. Post-edit load: one include added.
+            stack.enter_context(
+                patch(
+                    "seekr_hatchery.cli.docker.load_docker_config",
+                    side_effect=[MagicMock(include=[]), post_edit_config],
+                )
+            )
+
+            result = runner.invoke(cli, ["new", "my-task"])
+
+        assert result.exit_code == 0, result.output
+        # create_include_worktrees called with the newly-added entry
+        mock_create_inc.assert_called_once()
+        call_entries = mock_create_inc.call_args[0][0]
+        assert any(e.path == repo_b.resolve() and e.mode == "ro" for e in call_entries)
+        # entry persisted to meta.json
         include = saved_meta.get("include", [])
         assert any(e.get("path") == str(repo_b.resolve()) and e.get("mode") == "ro" for e in include)
 

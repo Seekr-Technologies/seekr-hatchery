@@ -199,14 +199,13 @@ def _merge_include_updates(
     if not updates:
         return current_entries
 
-    base = meta.get("branch", "HEAD")
     by_path = {e.path: e for e in current_entries}
 
     for update in updates:
         existing = by_path.get(update.path)
         if existing is None:
-            # New path — create worktree if needed.
-            git.create_include_worktrees([update], name, base)
+            # New path — create worktree if needed (base resolved per-repo).
+            git.create_include_worktrees([update], name)
             by_path[update.path] = update
         elif existing.mode == update.mode:
             pass  # no-op
@@ -217,7 +216,7 @@ def _merge_include_updates(
                 git.remove_include_worktrees([existing], name)
             elif existing.is_reference() and not update.is_reference():
                 ui.info(f"include mode {existing.mode!r} → {update.mode!r} for {update.path}; creating worktree.")
-                git.create_include_worktrees([update], name, base)
+                git.create_include_worktrees([update], name)
             by_path[update.path] = update
 
     # Preserve original ordering, appending new entries at the end.
@@ -936,10 +935,23 @@ def cmd_new(
         branch = f"hatchery/{name}"
         worktree = tasks.worktrees_dir(repo) / name
         ui.info(f"Creating task: {name}")
+        # When the user hasn't specified a base ref, resolve to origin/<default>
+        # so the task starts from the latest upstream commit rather than whatever
+        # local HEAD happens to be.
+        if base == tasks.DEFAULT_BASE and in_repo:
+            default = git.get_default_branch(repo)
+            fetch_result = tasks.run(["git", "fetch", "origin"], cwd=repo, check=False)
+            if fetch_result.returncode == 0:
+                base = f"origin/{default}"
+            else:
+                logger.debug("git fetch origin failed; using local %s as base", base)
+        elif in_repo:
+            # Explicit --from: fetch the owning remote if the ref is a remote-tracking branch.
+            git._fetch_if_remote(base, repo)
         git.create_worktree(repo, branch, worktree, base)
 
     if include_repos:
-        git.create_include_worktrees(include_repos, name, base)
+        git.create_include_worktrees(include_repos, name)
 
     try:
         if in_repo:
@@ -968,6 +980,16 @@ def cmd_new(
             if not no_docker:
                 docker.ensure_dockerfile(worktree, backend)
                 docker.ensure_docker_config(worktree)
+
+        # Re-read docker.yaml from the worktree now that the user has had a
+        # chance to edit it.  Any include entries added there that weren't in
+        # the pre-worktree load are resolved and merged in.
+        _post_config = docker.load_docker_config(worktree)
+        _post_includes = _resolve_includes((), (), (), _post_config.include, worktree)
+        _new_includes = [e for e in _post_includes if e.path not in {x.path for x in include_repos}]
+        if _new_includes:
+            git.create_include_worktrees(_new_includes, name)
+            include_repos = include_repos + _new_includes
 
         if use_editor:
             task_path = tasks.write_task_file(worktree, name, branch)
@@ -1167,7 +1189,7 @@ def cmd_resume(
             # Also restore include worktrees that were removed during archive.
             _archived_includes = load_include_entries(meta)
             if _archived_includes:
-                git.create_include_worktrees(_archived_includes, name, meta["branch"])
+                git.create_include_worktrees(_archived_includes, name)
             meta["status"] = "in-progress"
             tasks.save_task(meta)
             ui.success(f"Worktree restored: {worktree}")
