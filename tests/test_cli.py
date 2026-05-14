@@ -187,9 +187,7 @@ class TestCliNew:
             mock_create_wt, mock_run, _, _, _ = self._setup_mocks(mocks)
             # Simulate successful fetch; get_default_branch returns "main".
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-            stack.enter_context(
-                patch("seekr_hatchery.cli.git.get_default_branch", return_value="main")
-            )
+            stack.enter_context(patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"))
             runner.invoke(cli, ["new", "my-task"])
 
         assert mock_create_wt.call_args[0][3] == "origin/main"
@@ -202,9 +200,7 @@ class TestCliNew:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             mock_create_wt, mock_run, _, _, _ = self._setup_mocks(mocks)
             mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
-            stack.enter_context(
-                patch("seekr_hatchery.cli.git.get_default_branch", return_value="main")
-            )
+            stack.enter_context(patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"))
             runner.invoke(cli, ["new", "my-task"])
 
         assert mock_create_wt.call_args[0][3] == tasks.DEFAULT_BASE
