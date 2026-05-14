@@ -978,6 +978,16 @@ def cmd_new(
                 docker.ensure_dockerfile(worktree, backend)
                 docker.ensure_docker_config(worktree)
 
+        # Re-read docker.yaml from the worktree now that the user has had a
+        # chance to edit it.  Any include entries added there that weren't in
+        # the pre-worktree load are resolved and merged in.
+        _post_config = docker.load_docker_config(worktree)
+        _post_includes = _resolve_includes((), (), (), _post_config.include, worktree)
+        _new_includes = [e for e in _post_includes if e.path not in {x.path for x in include_repos}]
+        if _new_includes:
+            git.create_include_worktrees(_new_includes, name)
+            include_repos = include_repos + _new_includes
+
         if use_editor:
             task_path = tasks.write_task_file(worktree, name, branch)
             content_before = task_path.read_text()
