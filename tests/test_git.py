@@ -8,7 +8,6 @@ import seekr_hatchery.git as git
 import seekr_hatchery.tasks as tasks_mod
 from seekr_hatchery.includes import IncludeEntry
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -21,8 +20,7 @@ def _git_repo(path: Path) -> Path:
     tasks_mod.run(["git", "init", str(path)], check=False)
     (path / "README").write_text("hi")
     tasks_mod.run(["git", "add", "README"], cwd=path)
-    tasks_mod.run(["git", "-c", "user.email=t@t.com", "-c", "user.name=T",
-                   "commit", "-m", "init"], cwd=path)
+    tasks_mod.run(["git", "-c", "user.email=t@t.com", "-c", "user.name=T", "commit", "-m", "init"], cwd=path)
     return path
 
 
@@ -180,8 +178,7 @@ class TestIncludeWorktreeHelpers:
         tasks_mod.run(["git", "clone", str(remote), str(local)])
         (local / "README").write_text("hi")
         tasks_mod.run(["git", "add", "README"], cwd=local)
-        tasks_mod.run(["git", "-c", "user.email=t@t.com", "-c", "user.name=T",
-                       "commit", "-m", "init"], cwd=local)
+        tasks_mod.run(["git", "-c", "user.email=t@t.com", "-c", "user.name=T", "commit", "-m", "init"], cwd=local)
         tasks_mod.run(["git", "push", "origin", "main"], cwd=local)
 
         git.create_include_worktrees([_entry(local)], "my-task")
@@ -220,8 +217,7 @@ class TestFetchIfRemote:
         tasks_mod.run(["git", "clone", str(remote), str(local)])
         (local / "README").write_text("hi")
         tasks_mod.run(["git", "add", "README"], cwd=local)
-        tasks_mod.run(["git", "-c", "user.email=t@t.com", "-c", "user.name=T",
-                       "commit", "-m", "init"], cwd=local)
+        tasks_mod.run(["git", "-c", "user.email=t@t.com", "-c", "user.name=T", "commit", "-m", "init"], cwd=local)
         tasks_mod.run(["git", "push", "origin", "main"], cwd=local)
         return local, remote
 
@@ -232,8 +228,9 @@ class TestFetchIfRemote:
         tasks_mod.run(["git", "clone", str(remote), str(tmp_path / "other")])
         (tmp_path / "other" / "NEW").write_text("new")
         tasks_mod.run(["git", "add", "NEW"], cwd=tmp_path / "other")
-        tasks_mod.run(["git", "-c", "user.email=t@t.com", "-c", "user.name=T",
-                       "commit", "-m", "second"], cwd=tmp_path / "other")
+        tasks_mod.run(
+            ["git", "-c", "user.email=t@t.com", "-c", "user.name=T", "commit", "-m", "second"], cwd=tmp_path / "other"
+        )
         tasks_mod.run(["git", "push", "origin", "main"], cwd=tmp_path / "other")
 
         before = tasks_mod.run(["git", "rev-parse", "origin/main"], cwd=local).stdout.strip()
@@ -276,8 +273,7 @@ class TestFetchIfRemote:
         tasks_mod.run(["git", "clone", str(remote), str(seed)])
         (seed / "README").write_text("hi")
         tasks_mod.run(["git", "add", "README"], cwd=seed)
-        tasks_mod.run(["git", "-c", "user.email=t@t.com", "-c", "user.name=T",
-                       "commit", "-m", "init"], cwd=seed)
+        tasks_mod.run(["git", "-c", "user.email=t@t.com", "-c", "user.name=T", "commit", "-m", "init"], cwd=seed)
         tasks_mod.run(["git", "push", "origin", "main"], cwd=seed)
 
         # Clone again but clear the remote-tracking ref to simulate "not yet fetched".
