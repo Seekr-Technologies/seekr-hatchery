@@ -59,7 +59,8 @@ def create_worktree(repo: Path, branch: str, worktree: Path, base: str) -> None:
     """Create a git worktree on *branch* (force-reset to *base*).
 
     Removes any stale worktree registration for *worktree* first so that a
-    previous failed run doesn't block re-creation.
+    previous failed run doesn't block re-creation.  Exits cleanly with an
+    informative message if *base* does not exist in *repo*.
     """
     worktree.parent.mkdir(parents=True, exist_ok=True)
     tasks.run(["git", "worktree", "remove", "--force", str(worktree)], cwd=repo, check=False)

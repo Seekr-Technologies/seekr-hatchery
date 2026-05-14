@@ -946,6 +946,7 @@ def cmd_new(
             else:
                 logger.debug("git fetch origin failed; using local %s as base", base)
         elif in_repo:
+            # Explicit --from: fetch the owning remote if the ref is a remote-tracking branch.
             git._fetch_if_remote(base, repo)
         git.create_worktree(repo, branch, worktree, base)
 
