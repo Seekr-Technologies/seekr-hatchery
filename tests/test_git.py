@@ -206,6 +206,92 @@ class TestIncludeWorktreeHelpers:
 
 
 # ---------------------------------------------------------------------------
+# _fetch_if_remote
+# ---------------------------------------------------------------------------
+
+
+class TestFetchIfRemote:
+    """_fetch_if_remote fetches the right remote (or nothing) based on the ref."""
+
+    def _repo_with_remote(self, tmp_path: Path) -> tuple[Path, Path]:
+        """Returns (local, remote) — local cloned from bare remote, one commit pushed."""
+        remote = _bare_remote(tmp_path / "remote")
+        local = tmp_path / "local"
+        tasks_mod.run(["git", "clone", str(remote), str(local)])
+        (local / "README").write_text("hi")
+        tasks_mod.run(["git", "add", "README"], cwd=local)
+        tasks_mod.run(["git", "-c", "user.email=t@t.com", "-c", "user.name=T",
+                       "commit", "-m", "init"], cwd=local)
+        tasks_mod.run(["git", "push", "origin", "main"], cwd=local)
+        return local, remote
+
+    def test_remote_tracking_branch_fetches(self, tmp_path):
+        """origin/main resolves to refs/remotes/origin/main — origin is fetched."""
+        local, remote = self._repo_with_remote(tmp_path)
+        # Add a new commit to the remote directly so a fetch would advance origin/main.
+        tasks_mod.run(["git", "clone", str(remote), str(tmp_path / "other")])
+        (tmp_path / "other" / "NEW").write_text("new")
+        tasks_mod.run(["git", "add", "NEW"], cwd=tmp_path / "other")
+        tasks_mod.run(["git", "-c", "user.email=t@t.com", "-c", "user.name=T",
+                       "commit", "-m", "second"], cwd=tmp_path / "other")
+        tasks_mod.run(["git", "push", "origin", "main"], cwd=tmp_path / "other")
+
+        before = tasks_mod.run(["git", "rev-parse", "origin/main"], cwd=local).stdout.strip()
+        git._fetch_if_remote("origin/main", local)
+        after = tasks_mod.run(["git", "rev-parse", "origin/main"], cwd=local).stdout.strip()
+        assert before != after  # fetch advanced origin/main
+
+    def test_local_branch_with_slash_not_fetched(self, tmp_path):
+        """hatchery/my-task is a local branch — no fetch."""
+        local, _ = self._repo_with_remote(tmp_path)
+        tasks_mod.run(["git", "branch", "hatchery/my-task"], cwd=local)
+        # Record origin/main before; if a fetch happened it would be a no-op here,
+        # but the key test is no exception and no remote activity.
+        before = tasks_mod.run(["git", "rev-parse", "origin/main"], cwd=local).stdout.strip()
+        git._fetch_if_remote("hatchery/my-task", local)
+        after = tasks_mod.run(["git", "rev-parse", "origin/main"], cwd=local).stdout.strip()
+        assert before == after  # origin/main unchanged (no fetch)
+
+    def test_no_slash_not_fetched(self, tmp_path):
+        """HEAD and plain branch names have no slash — nothing happens."""
+        local, _ = self._repo_with_remote(tmp_path)
+        before = tasks_mod.run(["git", "rev-parse", "origin/main"], cwd=local).stdout.strip()
+        git._fetch_if_remote("HEAD", local)
+        git._fetch_if_remote("main", local)
+        after = tasks_mod.run(["git", "rev-parse", "origin/main"], cwd=local).stdout.strip()
+        assert before == after
+
+    def test_unknown_remote_prefix_not_fetched(self, tmp_path):
+        """upstream/main where 'upstream' is not a configured remote — no fetch."""
+        local, _ = self._repo_with_remote(tmp_path)
+        # Should not raise; 'upstream' is not a real remote.
+        git._fetch_if_remote("upstream/main", local)
+
+    def test_origin_ref_before_first_fetch_uses_heuristic(self, tmp_path):
+        """origin/main doesn't exist yet (fresh clone, never fetched) — heuristic
+        detects 'origin' is a real remote and fetches it."""
+        remote = _bare_remote(tmp_path / "remote")
+        # Push a commit to the remote via a separate clone.
+        seed = tmp_path / "seed"
+        tasks_mod.run(["git", "clone", str(remote), str(seed)])
+        (seed / "README").write_text("hi")
+        tasks_mod.run(["git", "add", "README"], cwd=seed)
+        tasks_mod.run(["git", "-c", "user.email=t@t.com", "-c", "user.name=T",
+                       "commit", "-m", "init"], cwd=seed)
+        tasks_mod.run(["git", "push", "origin", "main"], cwd=seed)
+
+        # Clone again but clear the remote-tracking ref to simulate "not yet fetched".
+        local = tmp_path / "local"
+        tasks_mod.run(["git", "clone", str(remote), str(local)])
+        tasks_mod.run(["git", "update-ref", "-d", "refs/remotes/origin/main"], cwd=local)
+
+        # origin/main no longer resolves — heuristic should kick in and fetch.
+        git._fetch_if_remote("origin/main", local)
+        result = tasks_mod.run(["git", "rev-parse", "origin/main"], cwd=local, check=False)
+        assert result.returncode == 0  # fetch restored it
+
+
+# ---------------------------------------------------------------------------
 # create_worktree — invalid ref error handling
 # ---------------------------------------------------------------------------
 

@@ -121,6 +121,36 @@ def delete_branch(repo: Path, branch: str) -> bool:
     return result.returncode == 0
 
 
+def _fetch_if_remote(ref: str, cwd: Path) -> None:
+    """Fetch the remote that owns *ref*, if it resolves to a remote-tracking branch.
+
+    Uses ``git rev-parse --symbolic-full-name`` to ask git whether *ref* is a
+    remote-tracking branch (``refs/remotes/<remote>/...``).  If the ref is not
+    yet known to git (e.g. ``origin/main`` before the first fetch), falls back
+    to splitting on ``/`` and confirming the left-hand side is a configured
+    remote via ``git remote get-url``.
+
+    Non-remote refs (local branches, HEAD, bare SHAs) are silently skipped.
+    """
+    result = tasks.run(["git", "rev-parse", "--symbolic-full-name", ref], cwd=cwd, check=False)
+    if result.returncode == 0:
+        full_name = result.stdout.strip()
+        if not full_name.startswith("refs/remotes/"):
+            return
+        remote = full_name.split("/")[2]
+    else:
+        # Ref not in the repo yet — fall back to name heuristic.
+        if "/" not in ref:
+            return
+        remote = ref.split("/", 1)[0]
+        r = tasks.run(["git", "remote", "get-url", remote], cwd=cwd, check=False)
+        if r.returncode != 0:
+            return
+    fetch_result = tasks.run(["git", "fetch", remote], cwd=cwd, check=False)
+    if fetch_result.returncode != 0:
+        logger.warning("git fetch %s failed for %s", remote, cwd)
+
+
 def create_include_worktrees(includes: list[IncludeEntry], name: str, base: str | None = None) -> None:
     """Create a hatchery/<name> worktree inside each included git repo with mode="worktree".
 
@@ -139,6 +169,7 @@ def create_include_worktrees(includes: list[IncludeEntry], name: str, base: str 
             worktree = path / tasks.WORKTREES_SUBDIR / name
             if base is not None:
                 repo_base = base
+                _fetch_if_remote(repo_base, path)
             else:
                 default = get_default_branch(path)
                 # Fetch so the worktree starts from the latest upstream commit.

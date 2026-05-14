@@ -945,6 +945,8 @@ def cmd_new(
                 base = f"origin/{default}"
             else:
                 logger.debug("git fetch origin failed; using local %s as base", base)
+        elif in_repo:
+            git._fetch_if_remote(base, repo)
         git.create_worktree(repo, branch, worktree, base)
 
     if include_repos:
