@@ -31,6 +31,10 @@ from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from typing import Any
 
+import urllib3
+
+_UPSTREAM_TIMEOUT = urllib3.Timeout(connect=10, read=60)
+
 logger = logging.getLogger("hatchery")
 
 _CHUNK_SIZE = 8192
@@ -71,6 +75,7 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
     proxy_token: str = ""
     target_host: str = "api.anthropic.com"
     path_prefix: str = ""  # prepended to every forwarded path (e.g. "/backend-api/codex")
+    pool: urllib3.PoolManager  # set per-instance by api_server()
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         pass  # suppress per-request access log lines
@@ -173,67 +178,119 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
         body = self.rfile.read(content_length) if content_length else None
 
         # ── 3. Forward to target host ─────────────────────────────────────────
-        conn = http.client.HTTPSConnection(self.target_host)
-        try:
-            conn.request(self.command, self.path_prefix + self.path, body=body, headers=out_headers)
-            resp = conn.getresponse()
-
-            # ── 3a. 101 Switching Protocols — WebSocket relay ─────────────────
-            # Forward the upgrade response (including hop-by-hop headers required
-            # by RFC 6455) then relay raw bytes bidirectionally.
-            if resp.status == 101:
-                logger.debug("proxy: WebSocket upgrade to %s, starting relay", self.target_host)
-                self.send_response(101)
+        # WebSocket upgrades need raw socket access for bidirectional relay;
+        # urllib3 does not support 101, so keep http.client for that path only.
+        if self.headers.get("upgrade", "").lower() == "websocket":
+            conn = http.client.HTTPSConnection(self.target_host, timeout=60)
+            try:
+                conn.request(self.command, self.path_prefix + self.path, body=body, headers=out_headers)
+                resp = conn.getresponse()
+                if resp.status == 101:
+                    logger.debug("proxy: WebSocket upgrade to %s, starting relay", self.target_host)
+                    self.send_response(101)
+                    for key, value in resp.getheaders():
+                        if key.lower() in _HOP_BY_HOP and key.lower() not in self._WS_KEEP:
+                            continue
+                        self.send_header(_sanitize_header(key), _sanitize_header(value))
+                    self.end_headers()
+                    upstream_sock = conn.sock
+                    conn.sock = None
+                    self._relay_websocket(resp.fp, upstream_sock)
+                    return
+                # Upgrade refused — forward the error response.
+                self.send_response(resp.status)
                 for key, value in resp.getheaders():
-                    if key.lower() in _HOP_BY_HOP and key.lower() not in self._WS_KEEP:
+                    if key.lower() in _HOP_BY_HOP:
                         continue
                     self.send_header(_sanitize_header(key), _sanitize_header(value))
                 self.end_headers()
-                # Detach conn.sock before conn.close() so the relay keeps the
-                # SSL socket open.  resp.fp is the BufferedReader wrapping the
-                # same socket and may already hold read-ahead bytes.
-                upstream_sock = conn.sock
-                conn.sock = None
-                self._relay_websocket(resp.fp, upstream_sock)
+                while True:
+                    chunk = resp.read(_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+            except Exception as exc:
+                logger.debug("proxy: upstream error: %s", exc)
+                try:
+                    self._send_simple(502, f"Bad Gateway: {exc}")
+                except Exception:
+                    pass
+            finally:
+                conn.close()
+            return
+
+        # Normal request — use the shared connection pool.
+        url = f"https://{self.target_host}{self.path_prefix}{self.path}"
+        try:
+            resp = self.pool.urlopen(
+                self.command,
+                url,
+                body=body,
+                headers=out_headers,
+                preload_content=False,
+                decode_content=False,
+                redirect=False,
+                timeout=_UPSTREAM_TIMEOUT,
+            )
+        except Exception as exc:
+            logger.debug("proxy: upstream error: %s", exc)
+            try:
+                self._send_simple(502, f"Bad Gateway: {exc}")
+            except Exception:
+                pass
+            return
+
+        # ── 3a. 401 retry — refresh credentials once ─────────────────────────
+        if resp.status == 401 and not _retried:
+            try:
+                resp.drain_conn()
+            except Exception:
+                pass
+            refreshed_headers = self.header_mutator(pre_auth_headers, refresh=True)
+            refreshed_headers["host"] = self.target_host
+            try:
+                resp = self.pool.urlopen(
+                    self.command,
+                    url,
+                    body=body,
+                    headers=refreshed_headers,
+                    preload_content=False,
+                    decode_content=False,
+                    redirect=False,
+                    timeout=_UPSTREAM_TIMEOUT,
+                )
+            except Exception as exc:
+                logger.debug("proxy: upstream error: %s", exc)
+                try:
+                    self._send_simple(502, f"Bad Gateway: {exc}")
+                except Exception:
+                    pass
                 return
 
-            # ── 3b. 401 retry — refresh credentials once ──────────────────────
-            if resp.status == 401 and not _retried:
-                # Drain and discard the 401 body (always small).
-                resp.read()
-                conn.close()
-                # Ask the backend to refresh credentials, then retry.
-                refreshed_headers = self.header_mutator(pre_auth_headers, refresh=True)
-                refreshed_headers["host"] = self.target_host
-                conn = http.client.HTTPSConnection(self.target_host)
-                conn.request(self.command, self.path_prefix + self.path, body=body, headers=refreshed_headers)
-                resp = conn.getresponse()
+        # Forward status + headers (strip hop-by-hop).
+        self.send_response(resp.status)
+        for key, value in resp.headers.items():
+            if key.lower() in _HOP_BY_HOP:
+                continue
+            self.send_header(_sanitize_header(key), _sanitize_header(value))
+        self.end_headers()
 
-            # Forward status + headers (strip hop-by-hop; http.client decodes
-            # chunked encoding for us so transfer-encoding is no longer accurate).
-            self.send_response(resp.status)
-            for key, value in resp.getheaders():
-                if key.lower() in _HOP_BY_HOP:
-                    continue
-                self.send_header(_sanitize_header(key), _sanitize_header(value))
-            self.end_headers()
-
-            # Stream response body in chunks (handles SSE correctly).
+        # Stream response body in chunks (handles SSE correctly).
+        try:
             while True:
                 chunk = resp.read(_CHUNK_SIZE)
                 if not chunk:
                     break
                 self.wfile.write(chunk)
                 self.wfile.flush()
-
-        except Exception as exc:
-            logger.debug("proxy: upstream error: %s", exc)
-            try:
-                self._send_simple(502, f"Bad Gateway: {exc}")
-            except Exception:
-                pass  # response headers may already be sent
+        except Exception:
+            pass
         finally:
-            conn.close()
+            try:
+                resp.drain_conn()
+            except Exception:
+                pass
 
     def do_GET(self) -> None:  # noqa: N802
         self._handle_request()
@@ -289,6 +346,8 @@ def api_server(
     proxy_token: str,
     target_host: str = "api.anthropic.com",
     path_prefix: str = "",
+    *,
+    _pool: urllib3.PoolManager | None = None,
 ) -> Generator[APIServer, None, None]:
     """Start the reverse proxy, yield an :class:`APIServer`, and shut it down on exit.
 
@@ -320,6 +379,7 @@ def api_server(
     _BoundHandler.proxy_token = proxy_token
     _BoundHandler.target_host = target_host
     _BoundHandler.path_prefix = path_prefix
+    _BoundHandler.pool = _pool if _pool is not None else urllib3.PoolManager(maxsize=16)
 
     server = _ThreadingHTTPServer(("0.0.0.0", 0), _BoundHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)

@@ -393,7 +393,7 @@ class TestContainerEnv:
 # ---------------------------------------------------------------------------
 
 
-def _mutator(headers: dict) -> dict:
+def _mutator(headers: dict, **kwargs) -> dict:
     out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")} | {
         "Authorization": "Bearer fake-real-key"
     }

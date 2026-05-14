@@ -2,11 +2,13 @@
 
 import logging
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
 import seekr_hatchery.tasks as tasks
 import seekr_hatchery.ui as ui
+from seekr_hatchery.includes import IncludeEntry
 
 logger = logging.getLogger("hatchery")
 
@@ -57,11 +59,18 @@ def create_worktree(repo: Path, branch: str, worktree: Path, base: str) -> None:
     """Create a git worktree on *branch* (force-reset to *base*).
 
     Removes any stale worktree registration for *worktree* first so that a
-    previous failed run doesn't block re-creation.
+    previous failed run doesn't block re-creation.  Exits cleanly with an
+    informative message if *base* does not exist in *repo*.
     """
     worktree.parent.mkdir(parents=True, exist_ok=True)
     tasks.run(["git", "worktree", "remove", "--force", str(worktree)], cwd=repo, check=False)
-    tasks.run(["git", "worktree", "add", "-B", branch, str(worktree), base], cwd=repo)
+    try:
+        tasks.run(["git", "worktree", "add", "-B", branch, str(worktree), base], cwd=repo)
+    except subprocess.CalledProcessError as e:
+        if "invalid reference" in e.stderr:
+            ui.error(f"base ref {base!r} does not exist in {repo}. Use --from <branch> to specify a valid ref.")
+            sys.exit(1)
+        raise
     logger.debug("Worktree created at %s", worktree)
 
 
@@ -113,37 +122,94 @@ def delete_branch(repo: Path, branch: str) -> bool:
     return result.returncode == 0
 
 
-def create_include_worktrees(includes: list[Path], name: str, base: str) -> None:
-    """Create a hatchery/<name> worktree inside each included path that is a git repo.
+def _fetch_if_remote(ref: str, cwd: Path) -> None:
+    """Fetch the remote that owns *ref*, if it resolves to a remote-tracking branch.
 
-    Non-git directories are silently skipped.
+    Uses ``git rev-parse --symbolic-full-name`` to ask git whether *ref* is a
+    remote-tracking branch (``refs/remotes/<remote>/...``).  If the ref is not
+    yet known to git (e.g. ``origin/main`` before the first fetch), falls back
+    to splitting on ``/`` and confirming the left-hand side is a configured
+    remote via ``git remote get-url``.
+
+    Non-remote refs (local branches, HEAD, bare SHAs) are silently skipped.
+    """
+    result = tasks.run(["git", "rev-parse", "--symbolic-full-name", ref], cwd=cwd, check=False)
+    if result.returncode == 0:
+        full_name = result.stdout.strip()
+        if not full_name.startswith("refs/remotes/"):
+            return
+        remote = full_name.split("/")[2]
+    else:
+        # Ref not in the repo yet — fall back to name heuristic.
+        if "/" not in ref:
+            return
+        remote = ref.split("/", 1)[0]
+        r = tasks.run(["git", "remote", "get-url", remote], cwd=cwd, check=False)
+        if r.returncode != 0:
+            return
+    fetch_result = tasks.run(["git", "fetch", remote], cwd=cwd, check=False)
+    if fetch_result.returncode != 0:
+        logger.warning("git fetch %s failed for %s", remote, cwd)
+
+
+def create_include_worktrees(includes: list[IncludeEntry], name: str, base: str | None = None) -> None:
+    """Create a hatchery/<name> worktree inside each included git repo with mode="worktree".
+
+    Entries with mode="ro" or mode="rw" and non-git directories are silently skipped.
+
+    When *base* is omitted, each repo's default branch is resolved and origin is
+    fetched so the worktree starts from the latest upstream commit.  When *base*
+    is supplied, ``_fetch_if_remote`` fetches the owning remote first if the ref
+    is a remote-tracking branch (e.g. ``origin/main``).
     """
     branch = f"hatchery/{name}"
-    for path in includes:
+    for entry in includes:
+        if entry.mode != "worktree":
+            continue
+        path = entry.path
         if (path / ".git").exists():
             worktree = path / tasks.WORKTREES_SUBDIR / name
-            create_worktree(path, branch, worktree, base)
+            if base is not None:
+                repo_base = base
+                _fetch_if_remote(repo_base, path)
+            else:
+                default = get_default_branch(path)
+                # Fetch so the worktree starts from the latest upstream commit.
+                fetch_result = tasks.run(["git", "fetch", "origin"], cwd=path, check=False)
+                if fetch_result.returncode != 0:
+                    logger.warning("git fetch origin failed for %s; using local %s", path, default)
+                    repo_base = default
+                else:
+                    repo_base = f"origin/{default}"
+            create_worktree(path, branch, worktree, repo_base)
             logger.debug("Include worktree created at %s", worktree)
 
 
-def remove_include_worktrees(includes: list[Path], name: str) -> None:
-    """Remove the hatchery/<name> worktree from each included git repo.
+def remove_include_worktrees(includes: list[IncludeEntry], name: str) -> None:
+    """Remove the hatchery/<name> worktree from included git repos with mode="worktree".
 
-    Non-git directories and missing worktrees are silently skipped.
+    Reference-mode entries (ro/rw), non-git directories, and missing worktrees
+    are silently skipped.
     """
-    for path in includes:
+    for entry in includes:
+        if entry.mode != "worktree":
+            continue
+        path = entry.path
         if (path / ".git").exists():
             worktree = path / tasks.WORKTREES_SUBDIR / name
             remove_worktree(path, worktree, force=True)
 
 
-def delete_include_branches(includes: list[Path], name: str) -> None:
-    """Delete the hatchery/<name> branch from each included git repo.
+def delete_include_branches(includes: list[IncludeEntry], name: str) -> None:
+    """Delete the hatchery/<name> branch from included git repos with mode="worktree".
 
-    Non-git directories and missing branches are silently skipped.
+    Reference-mode entries (ro/rw) and non-git directories are silently skipped.
     """
     branch = f"hatchery/{name}"
-    for path in includes:
+    for entry in includes:
+        if entry.mode != "worktree":
+            continue
+        path = entry.path
         if (path / ".git").exists():
             delete_branch(path, branch)
 
