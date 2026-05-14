@@ -416,14 +416,21 @@ class _ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 # ── TLS cert generation ───────────────────────────────────────────────────────
 
 
-def _generate_self_signed_cert() -> tuple[bytes, bytes]:
+def _generate_self_signed_cert(validity_days: int = 365) -> tuple[bytes, bytes]:
     """Generate a throwaway self-signed TLS certificate and private key.
 
     Returns ``(cert_pem, key_pem)`` as bytes.
 
     Requires the ``cryptography`` package (a declared project dependency).
-    The certificate is valid for 24 hours and has ``host.docker.internal``
-    as the only SAN, which is sufficient for the container→host RBAC proxy.
+    The certificate has ``host.docker.internal`` as the only SAN, which is
+    sufficient for the container→host RBAC proxy.
+
+    *validity_days* is intentionally long: the cert is meaningless without
+    the proxy process that signed it (the kubeconfig pins this cert as CA
+    and points at an ephemeral port on ``host.docker.internal`` that's
+    only reachable while this process is alive), so cert rotation defends
+    against no realistic threat — but a too-short validity silently breaks
+    sandboxes that outlive the cert.
     """
     try:
         import datetime
@@ -447,7 +454,7 @@ def _generate_self_signed_cert() -> tuple[bytes, bytes]:
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(now)
-        .not_valid_after(now + datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=validity_days))
         .add_extension(
             x509.SubjectAlternativeName([x509.DNSName("host.docker.internal")]),
             critical=False,

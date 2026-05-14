@@ -14,6 +14,7 @@ import pytest
 from seekr_hatchery.kubectl_proxy import (
     KubectlConfig,
     KubectlRBACRule,
+    _generate_self_signed_cert,
     check_rbac,
     http_method_to_k8s_verbs,
     make_kubeconfig,
@@ -367,3 +368,21 @@ class TestRBACProxyIntegration:
         _, port, token, cert_pem = rbac_proxy
         status, _ = _request(port, "/version", token=token, cert_pem=cert_pem)
         assert status == 200
+
+
+class TestCertGeneration:
+    def test_validity_outlives_long_sessions(self) -> None:
+        """Cert validity must outlive any realistic session.
+
+        See ``_generate_self_signed_cert`` for why rotation is unnecessary
+        in this system; this test guards against a quiet revert to a short
+        validity that would silently break long-running sandboxes.
+        """
+        import datetime
+
+        from cryptography import x509
+
+        cert_pem, _ = _generate_self_signed_cert()
+        cert = x509.load_pem_x509_certificate(cert_pem)
+        delta = cert.not_valid_after_utc - cert.not_valid_before_utc
+        assert delta >= datetime.timedelta(days=365)
