@@ -156,9 +156,10 @@ def create_include_worktrees(includes: list[IncludeEntry], name: str, base: str 
 
     Entries with mode="ro" or mode="rw" and non-git directories are silently skipped.
 
-    For each repo, fetches from origin then bases the new branch on
-    ``origin/<default-branch>`` so it starts from the latest upstream commit.
-    Pass *base* to override this behaviour (e.g. in tests).
+    When *base* is omitted, each repo's default branch is resolved and origin is
+    fetched so the worktree starts from the latest upstream commit.  When *base*
+    is supplied, ``_fetch_if_remote`` fetches the owning remote first if the ref
+    is a remote-tracking branch (e.g. ``origin/main``).
     """
     branch = f"hatchery/{name}"
     for entry in includes:
