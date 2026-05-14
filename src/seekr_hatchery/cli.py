@@ -1414,6 +1414,112 @@ def cmd_shell(name: str) -> None:
     subprocess.run([shell], cwd=worktree)
 
 
+def _read_clipboard_image() -> bytes:
+    """Read PNG image bytes from the host clipboard. Raises RuntimeError on failure."""
+    import tempfile
+
+    if sys.platform == "darwin":
+        # macOS: osascript reads clipboard PNG data directly to a temp file.
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            tmp = f.name
+        try:
+            script = (
+                f'set theFile to POSIX file "{tmp}"\n'
+                'set theData to the clipboard as \u00abclass PNGf\u00bb\n'
+                "set fileRef to open for access theFile with write permission\n"
+                "write theData to fileRef\n"
+                "close access fileRef"
+            )
+            result = subprocess.run(["osascript", "-e", script], capture_output=True)
+            if result.returncode != 0:
+                raise RuntimeError(
+                    "Could not read image from clipboard. Copy an image first.\n"
+                    f"(osascript: {result.stderr.decode().strip()})"
+                )
+            data = open(tmp, "rb").read()
+            if not data:
+                raise RuntimeError("Clipboard does not contain an image. Copy an image first.")
+            return data
+        finally:
+            os.unlink(tmp)
+    else:
+        # Linux: try wl-paste (Wayland) then xclip (X11).
+        for cmd in (
+            ["wl-paste", "--type", "image/png"],
+            ["xclip", "-selection", "clipboard", "-t", "image/png", "-o"],
+        ):
+            try:
+                result = subprocess.run(cmd, capture_output=True)
+                if result.returncode == 0 and result.stdout:
+                    return result.stdout
+            except FileNotFoundError:
+                continue
+        raise RuntimeError(
+            "Could not read image from clipboard.\n"
+            "Install wl-clipboard (wl-paste) for Wayland or xclip for X11, then copy an image."
+        )
+
+
+def _resolve_img_task(repo: Path, name: str | None) -> dict:
+    """Resolve task meta for the img command; auto-select if exactly one task is in-progress."""
+    if name:
+        return tasks.load_task(repo, name)
+    running = [
+        t for t in tasks.repo_tasks_for_current_repo(repo) if t.get("status") in ("in-progress", "running")
+    ]
+    if len(running) == 1:
+        return running[0]
+    if not running:
+        ui.error("No in-progress tasks found. Specify a task name.")
+    else:
+        names = ", ".join(t["name"] for t in running)
+        ui.error(f"Multiple tasks in progress ({names}). Specify one: hatchery img <name>")
+    sys.exit(1)
+
+
+@cli.command("img")
+@click.argument("name", required=False, default=None, type=TASK_NAME)
+@click.option("--file", "file_path", type=click.Path(exists=True), default=None, help="Image file to use instead of clipboard")
+def cmd_img(name: str | None, file_path: str | None) -> None:
+    """Save a clipboard image to the task worktree so the agent can see it.
+
+    Reads an image from the system clipboard (or --file) and writes it into
+    the task's worktree as a timestamped PNG.  Prints the path to paste into
+    the agent chat — the path works both on the host and inside the container.
+    """
+    repo, _ = git.git_root_or_cwd()
+    meta = _resolve_img_task(repo, name)
+    worktree = Path(meta["worktree"])
+
+    if file_path:
+        data = Path(file_path).read_bytes()
+    else:
+        try:
+            data = _read_clipboard_image()
+        except RuntimeError as e:
+            ui.error(str(e))
+            sys.exit(1)
+
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    dest = worktree / f"paste-{timestamp}.png"
+    dest.write_bytes(data)
+
+    # Compute the path the agent sees inside the container.
+    # The repo is mounted at CONTAINER_REPO_ROOT, so the relative path from
+    # the repo root maps directly to the container path.
+    try:
+        rel = dest.relative_to(repo)
+        container_path = f"{tasks.CONTAINER_REPO_ROOT}/{rel}"
+    except ValueError:
+        # Worktree is outside the repo (shouldn't happen in normal usage).
+        container_path = str(dest)
+
+    ui.success(f"Image saved: {dest}")
+    click.echo()
+    click.echo("Paste this path into the agent chat:")
+    click.echo(f"  {container_path}")
+
+
 # ---------------------------------------------------------------------------
 # Config command group
 # ---------------------------------------------------------------------------
