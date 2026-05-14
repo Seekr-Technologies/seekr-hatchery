@@ -18,12 +18,14 @@ from typing import Literal
 import click
 import yaml
 from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import ValidationError as _PydanticValidationError
 
 import seekr_hatchery.agents as agent
 import seekr_hatchery.kubectl_proxy as _kubectl_proxy
 import seekr_hatchery.proxy as proxy
 import seekr_hatchery.tasks as tasks
 import seekr_hatchery.ui as ui
+from seekr_hatchery.includes import IncludeEntry, IncludeItem
 from seekr_hatchery.kubectl_proxy import KubectlConfig
 
 logger = logging.getLogger("hatchery")
@@ -128,7 +130,7 @@ class DockerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     schema_version: Literal["1"] = "1"
     mounts: list[str] = []
-    include: list[str] = []
+    include: list[str | IncludeItem] = []
     dind: bool = False
     follow_symlinks: bool = False
     cap_add: list[str] = []
@@ -165,6 +167,37 @@ class DockerConfig(BaseModel):
             if len(parts) == 3 and parts[2] not in ("ro", "rw"):
                 raise ValueError(f'mounts[{i}]: invalid mode {parts[2]!r} in {entry!r} — must be "ro" or "rw"')
         return v
+
+    @field_validator("include", mode="before")
+    @classmethod
+    def validate_include(cls, v: list | None) -> list:
+        if v is None:
+            return []
+        result = []
+        for i, entry in enumerate(v):
+            if isinstance(entry, str):
+                result.append(entry)
+            elif isinstance(entry, dict):
+                try:
+                    result.append(IncludeItem.model_validate(entry))
+                except _PydanticValidationError as exc:
+                    raise ValueError(f"include[{i}]: {exc}") from exc
+            else:
+                raise ValueError(f"include[{i}]: expected a string or dict, got {type(entry).__name__!r}")
+        return result
+
+
+def parse_docker_include_entry(entry: str | IncludeItem) -> tuple[str, str]:
+    """Parse a single docker.yaml include entry into (path_str, mode).
+
+    Accepts the legacy string form or a validated IncludeItem::
+
+        "../other-repo"                          → ("../other-repo", "worktree")
+        IncludeItem(path="../ref", mode="ro")    → ("../ref", "ro")
+    """
+    if isinstance(entry, str):
+        return entry, "worktree"
+    return entry.path, entry.mode
 
 
 # ── Authentication ────────────────────────────────────────────────────────────
@@ -791,46 +824,62 @@ _unique_basename = tasks._unique_basename
 
 
 def _docker_mounts_includes(
-    include_paths: list[Path],
+    include_entries: list[IncludeEntry],
     name: str,
     session_dir: Path,
     no_worktree: bool,
 ) -> list[str]:
-    """Return -v flags for paths included via --include.
+    """Return -v flags for paths included via --include / --include-rw / --include-ro.
 
     Each path is mounted at /includes/<basename>/.  If two included paths share
     a basename the second gets a numeric suffix (e.g. api-1).
 
-    For git repos with a hatchery/<name> worktree the same layered mount
-    strategy as the primary repo is applied (root:ro, targeted .git sub-dirs:rw,
-    worktree:rw) and a corrected .git pointer file is written to *session_dir*
-    and bind-mounted over the worktree's .git file.
+    mode="worktree": For git repos with a hatchery/<name> worktree the same
+    layered mount strategy as the primary repo is applied (root:ro, targeted
+    .git sub-dirs:rw, worktree:rw) and a corrected .git pointer file is
+    written to *session_dir* and bind-mounted over the worktree's .git file.
 
-    Plain directories and no-worktree mode receive a simple rw mount.
+    mode="rw" or mode="ro": Simple bind-mount with the corresponding access
+    mode.  No worktree is expected or created.
+
+    In no-worktree mode all entries fall back to a simple mount using their
+    access mode (worktree entries are treated as rw).
     """
     mounts: list[str] = []
     used_basenames: set[str] = set()
 
-    for path in include_paths:
+    for entry in include_entries:
+        path = entry.path
         basename = _unique_basename(path.name, used_basenames)
         used_basenames.add(basename)
         container_path = f"{tasks.CONTAINER_INCLUDES_ROOT}/{basename}"
 
-        is_git = (path / ".git").exists()
-        if not no_worktree and is_git:
-            worktree = path / tasks.WORKTREES_SUBDIR / name
-            if worktree.exists():
-                # Layered mounts: root ro + targeted .git rw (same as primary repo)
-                mounts.extend(_git_worktree_mounts(path, name, container_path))
-                container_worktree = f"{container_path}/.hatchery/worktrees/{name}"
-                mounts.append(f"{worktree}:{container_worktree}:rw")
-                # Rewrite .git pointer to use container-relative path
-                git_ptr_file = session_dir / f"git_ptr_include_{basename}"
-                git_ptr_file.write_text(f"gitdir: {container_path}/.git/worktrees/{name}\n")
-                mounts.append(f"{git_ptr_file}:{container_worktree}/.git:rw")
-                continue
-        # Plain directory or no-worktree: simple rw mount
-        mounts.append(f"{path}:{container_path}:rw")
+        if entry.mode == "worktree" and not no_worktree:
+            is_git = (path / ".git").exists()
+            if is_git:
+                worktree = path / tasks.WORKTREES_SUBDIR / name
+                if worktree.exists():
+                    # Layered mounts: root ro + targeted .git rw (same as primary repo)
+                    mounts.extend(_git_worktree_mounts(path, name, container_path))
+                    container_worktree = f"{container_path}/.hatchery/worktrees/{name}"
+                    mounts.append(f"{worktree}:{container_worktree}:rw")
+                    # Rewrite .git pointer to use container-relative path
+                    git_ptr_file = session_dir / f"git_ptr_include_{basename}"
+                    git_ptr_file.write_text(f"gitdir: {container_path}/.git/worktrees/{name}\n")
+                    mounts.append(f"{git_ptr_file}:{container_worktree}/.git:rw")
+                    continue
+                logger.warning(
+                    "include worktree not found for %s (expected %s); "
+                    "falling back to plain rw mount — branch isolation unavailable.",
+                    path,
+                    worktree,
+                )
+            # Git repo without worktree, or plain dir in worktree mode → rw
+            mounts.append(f"{path}:{container_path}:rw")
+        else:
+            # reference mode (ro/rw), or no_worktree fallback
+            access = entry.mode if entry.is_reference() else "rw"
+            mounts.append(f"{path}:{container_path}:{access}")
 
     return mounts
 
@@ -1088,7 +1137,7 @@ def launch_docker(
     config: DockerConfig,
     runtime: Runtime = Runtime.DOCKER,
     no_cache: bool = False,
-    include_repos: list[Path] | None = None,
+    include_repos: list[IncludeEntry] | None = None,
 ) -> None:
     """Replace the current process with a Docker-sandboxed agent session.
 
@@ -1097,8 +1146,8 @@ def launch_docker(
     *agent_cmd* must be the full command already built for Docker mode
     (``backend.build_*_command(docker=True, workdir=container_workdir)``).
 
-    *include_repos* — additional paths to mount at /includes/<basename>/ rw.
-    Git repos in this list that have a hatchery/<name> worktree will also have
+    *include_repos* — additional paths to mount at /includes/<basename>/.
+    Git repos with mode="worktree" and a hatchery/<name> worktree also have
     their .git pointer corrected for the container environment.
     """
     try:
@@ -1175,7 +1224,7 @@ def launch_docker_no_worktree(
     config: DockerConfig,
     runtime: Runtime = Runtime.DOCKER,
     no_cache: bool = False,
-    include_repos: list[Path] | None = None,
+    include_repos: list[IncludeEntry] | None = None,
 ) -> None:
     """Launch a Docker-sandboxed agent session with cwd mounted as /workspace.
 
@@ -1184,7 +1233,7 @@ def launch_docker_no_worktree(
     *agent_cmd* must be the full command already built for Docker mode
     (``backend.build_*_command(docker=True, workdir="/workspace")``).
 
-    *include_repos* — additional paths to mount at /includes/<basename>/ rw.
+    *include_repos* — additional paths to mount at /includes/<basename>/.
     """
     try:
         mutator = backend.make_header_mutator()

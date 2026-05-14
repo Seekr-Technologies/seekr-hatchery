@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 import seekr_hatchery.ui as ui
+from seekr_hatchery.includes import IncludeEntry, load_include_entries, serialize_include_entries
 
 logger = logging.getLogger("hatchery")
 
@@ -92,6 +93,9 @@ Your workflow:
    This file will be merged into main as the permanent record of this task.
 """
 
+# Re-export for callers that import these from tasks (backward compat).
+__all__ = ["IncludeEntry", "load_include_entries", "serialize_include_entries"]
+
 
 def _unique_basename(name: str, used: set[str]) -> str:
     """Return *name* if not in *used*, else *name*-1, *name*-2, … — first unused variant.
@@ -114,7 +118,7 @@ def sandbox_context(
     main_branch: str,
     use_docker: bool,
     no_worktree: bool = False,
-    include_paths: list[Path] | None = None,
+    include_paths: list[IncludeEntry] | None = None,
 ) -> str:
     """Return a system-prompt section describing the sandbox environment."""
     include_paths = include_paths or []
@@ -183,28 +187,32 @@ def sandbox_context(
         ]
 
     if include_paths:
-        lines += ["", "**Included paths** (read-write):"]
+        lines.append("")
+        lines.append("**Included paths:**")
         used_basenames: set[str] = set()
-        for inc in include_paths:
+        for entry in include_paths:
+            inc = entry.path
             is_git = (inc / ".git").exists()
             if use_docker:
                 basename = _unique_basename(inc.name, used_basenames)
                 used_basenames.add(basename)
                 container_inc = f"{CONTAINER_INCLUDES_ROOT}/{basename}"
-                if is_git and not no_worktree:
+                if entry.mode == "worktree" and is_git and not no_worktree:
                     container_inc_wt = f"{container_inc}/.hatchery/worktrees/{name}"
-                    lines.append(f"- `{container_inc}/` — git repo; your worktree: `{container_inc_wt}/`")
+                    lines.append(f"- `{container_inc}/` — git repo (read-write); your worktree: `{container_inc_wt}/`")
                 else:
+                    access_label = "read-only" if entry.mode == "ro" else "read-write"
                     kind = "git repo" if is_git else "directory"
-                    lines.append(f"- `{container_inc}/` — {kind}")
+                    lines.append(f"- `{container_inc}/` — {kind} ({access_label})")
             else:
                 # Native mode: report host paths
-                if is_git and not no_worktree:
+                if entry.mode == "worktree" and is_git and not no_worktree:
                     wt = inc / WORKTREES_SUBDIR / name
-                    lines.append(f"- `{wt}/` — git repo worktree (host path)")
+                    lines.append(f"- `{wt}/` — git repo worktree (host path, read-write)")
                 else:
+                    access_label = "read-only" if entry.mode == "ro" else "read-write"
                     kind = "git repo" if is_git else "directory"
-                    lines.append(f"- `{inc}/` — {kind} (host path)")
+                    lines.append(f"- `{inc}/` — {kind} (host path, {access_label})")
 
     return "\n".join(lines)
 

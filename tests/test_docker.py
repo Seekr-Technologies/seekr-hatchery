@@ -604,34 +604,37 @@ class TestStreamBuild:
 
 
 class TestDockerMountsIncludes:
+    def _entry(self, path, mode="worktree"):
+        from seekr_hatchery.includes import IncludeEntry
+
+        return IncludeEntry(path=path, mode=mode)
+
     def test_plain_dir_gets_rw_mount(self, tmp_path):
-        """A plain (non-git) directory is mounted rw at /includes/<basename>/."""
+        """A plain (non-git) directory in worktree mode is mounted rw."""
         plain = tmp_path / "shared-data"
         plain.mkdir()
         session_dir = tmp_path / "session"
         session_dir.mkdir()
 
-        mounts = docker._docker_mounts_includes([plain], "my-task", session_dir, no_worktree=False)
+        mounts = docker._docker_mounts_includes([self._entry(plain)], "my-task", session_dir, no_worktree=False)
 
         assert f"{plain}:/includes/shared-data:rw" in mounts
 
     def test_git_repo_without_worktree_gets_rw_mount(self, tmp_path):
-        """A git repo with no worktree for the task falls back to a simple rw mount."""
+        """A git repo in worktree mode with no worktree for the task falls back to rw mount."""
         repo = tmp_path / "repo-b"
         repo.mkdir()
         (repo / ".git").mkdir()
-        # No worktree created
         session_dir = tmp_path / "session"
         session_dir.mkdir()
 
-        mounts = docker._docker_mounts_includes([repo], "my-task", session_dir, no_worktree=False)
+        mounts = docker._docker_mounts_includes([self._entry(repo)], "my-task", session_dir, no_worktree=False)
 
         assert f"{repo}:/includes/repo-b:rw" in mounts
-        # No git_ptr mount since worktree doesn't exist
         assert not any("git_ptr" in m for m in mounts)
 
     def test_git_repo_with_worktree_gets_layered_mounts(self, tmp_path):
-        """A git repo with a task worktree gets layered mounts (root:ro, .git:rw, worktree:rw)."""
+        """A git repo in worktree mode with a task worktree gets layered mounts."""
         import seekr_hatchery.tasks as tasks_mod
 
         repo = tmp_path / "repo-b"
@@ -644,22 +647,17 @@ class TestDockerMountsIncludes:
         session_dir = tmp_path / "session"
         session_dir.mkdir()
 
-        mounts = docker._docker_mounts_includes([repo], "my-task", session_dir, no_worktree=False)
+        mounts = docker._docker_mounts_includes([self._entry(repo)], "my-task", session_dir, no_worktree=False)
 
-        # Root is read-only
         assert f"{repo}:/includes/repo-b:ro" in mounts
-        # .git sub-dirs are rw
         assert f"{git_dir}:/includes/repo-b/.git:rw" in mounts
         assert f"{git_dir / 'objects'}:/includes/repo-b/.git/objects:rw" in mounts
-        # Worktree itself is rw
         container_wt = "/includes/repo-b/.hatchery/worktrees/my-task"
         assert f"{worktree}:{container_wt}:rw" in mounts
-        # git pointer file is written and mounted
         git_ptr_file = session_dir / "git_ptr_include_repo-b"
         assert git_ptr_file.exists()
         assert "gitdir: /includes/repo-b/.git/worktrees/my-task" in git_ptr_file.read_text()
         assert f"{git_ptr_file}:{container_wt}/.git:rw" in mounts
-        # No single full rw mount for root
         assert f"{repo}:/includes/repo-b:rw" not in mounts
 
     def test_basename_collision_gets_numeric_suffix(self, tmp_path):
@@ -671,13 +669,15 @@ class TestDockerMountsIncludes:
         session_dir = tmp_path / "session"
         session_dir.mkdir()
 
-        mounts = docker._docker_mounts_includes([a, b], "task", session_dir, no_worktree=False)
+        mounts = docker._docker_mounts_includes(
+            [self._entry(a), self._entry(b)], "task", session_dir, no_worktree=False
+        )
 
         assert f"{a}:/includes/api:rw" in mounts
         assert f"{b}:/includes/api-1:rw" in mounts
 
     def test_no_worktree_skips_layered_mounts(self, tmp_path):
-        """In no-worktree mode, git repos get a simple rw mount (no layering, no git_ptr)."""
+        """In no-worktree mode, worktree-mode git repos get a simple rw mount."""
         repo = tmp_path / "repo-b"
         repo.mkdir()
         (repo / ".git").mkdir()
@@ -688,10 +688,9 @@ class TestDockerMountsIncludes:
         session_dir = tmp_path / "session"
         session_dir.mkdir()
 
-        mounts = docker._docker_mounts_includes([repo], "my-task", session_dir, no_worktree=True)
+        mounts = docker._docker_mounts_includes([self._entry(repo)], "my-task", session_dir, no_worktree=True)
 
         assert f"{repo}:/includes/repo-b:rw" in mounts
-        # No git_ptr pointer file should be written or mounted in no-worktree mode
         git_ptr_file = session_dir / "git_ptr_include_repo-b"
         assert not git_ptr_file.exists()
         assert not any(str(git_ptr_file) in m for m in mounts)
@@ -699,6 +698,104 @@ class TestDockerMountsIncludes:
     def test_empty_list_returns_empty(self, tmp_path):
         mounts = docker._docker_mounts_includes([], "task", tmp_path, no_worktree=False)
         assert mounts == []
+
+    # ── reference mode tests ─────────────────────────────────────────────────
+
+    def test_reference_rw_plain_dir(self, tmp_path):
+        """mode='rw' gives a simple rw mount, no worktree logic."""
+        plain = tmp_path / "shared-data"
+        plain.mkdir()
+        session_dir = tmp_path / "session"
+        session_dir.mkdir()
+
+        mounts = docker._docker_mounts_includes(
+            [self._entry(plain, mode="rw")], "my-task", session_dir, no_worktree=False
+        )
+
+        assert f"{plain}:/includes/shared-data:rw" in mounts
+
+    def test_reference_ro_plain_dir(self, tmp_path):
+        """mode='ro' gives a simple ro mount."""
+        plain = tmp_path / "docs"
+        plain.mkdir()
+        session_dir = tmp_path / "session"
+        session_dir.mkdir()
+
+        mounts = docker._docker_mounts_includes(
+            [self._entry(plain, mode="ro")], "my-task", session_dir, no_worktree=False
+        )
+
+        assert f"{plain}:/includes/docs:ro" in mounts
+        assert f"{plain}:/includes/docs:rw" not in mounts
+
+    def test_reference_mode_git_repo_no_layered_mounts(self, tmp_path):
+        """mode='ro' on a git repo with a worktree still just does a simple ro mount."""
+        import seekr_hatchery.tasks as tasks_mod
+
+        repo = tmp_path / "repo-b"
+        repo.mkdir()
+        git_dir = repo / ".git"
+        git_dir.mkdir()
+        (git_dir / "objects").mkdir()
+        # Create a worktree — it should be ignored in reference mode
+        worktree = repo / tasks_mod.WORKTREES_SUBDIR / "my-task"
+        worktree.mkdir(parents=True)
+        session_dir = tmp_path / "session"
+        session_dir.mkdir()
+
+        mounts = docker._docker_mounts_includes(
+            [self._entry(repo, mode="ro")], "my-task", session_dir, no_worktree=False
+        )
+
+        assert f"{repo}:/includes/repo-b:ro" in mounts
+        # No layered mounts
+        assert f"{repo}:/includes/repo-b:rw" not in mounts
+        assert not any("git_ptr" in m for m in mounts)
+        assert not any("worktrees" in m for m in mounts)
+
+    def test_reference_rw_git_repo_no_layered_mounts(self, tmp_path):
+        """mode='rw' on a git repo with a worktree still just does a simple rw reference mount."""
+        import seekr_hatchery.tasks as tasks_mod
+
+        repo = tmp_path / "repo-c"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        worktree = repo / tasks_mod.WORKTREES_SUBDIR / "my-task"
+        worktree.mkdir(parents=True)
+        session_dir = tmp_path / "session"
+        session_dir.mkdir()
+
+        mounts = docker._docker_mounts_includes(
+            [self._entry(repo, mode="rw")], "my-task", session_dir, no_worktree=False
+        )
+
+        assert f"{repo}:/includes/repo-c:rw" in mounts
+        assert not any("git_ptr" in m for m in mounts)
+        assert not any("worktrees" in m for m in mounts)
+
+    def test_mixed_modes(self, tmp_path):
+        """Mixed worktree and reference entries produce correct mounts each."""
+
+        wt_repo = tmp_path / "wt-repo"
+        wt_repo.mkdir()
+        (wt_repo / ".git").mkdir()
+        ro_dir = tmp_path / "docs"
+        ro_dir.mkdir()
+        session_dir = tmp_path / "session"
+        session_dir.mkdir()
+
+        from seekr_hatchery.includes import IncludeEntry
+
+        entries = [
+            IncludeEntry(path=wt_repo, mode="worktree"),
+            IncludeEntry(path=ro_dir, mode="ro"),
+        ]
+        mounts = docker._docker_mounts_includes(entries, "my-task", session_dir, no_worktree=False)
+
+        # worktree entry without an actual worktree → rw fallback
+        assert f"{wt_repo}:/includes/wt-repo:rw" in mounts
+        # ro reference entry
+        assert f"{ro_dir}:/includes/docs:ro" in mounts
 
 
 # ---------------------------------------------------------------------------
@@ -711,9 +808,40 @@ class TestDockerConfigInclude:
         config = docker.DockerConfig()
         assert config.include == []
 
-    def test_parses_include_list(self):
+    def test_parses_string_include_list(self):
         config = docker.DockerConfig(include=["../repo-b", "/abs/path"])
         assert config.include == ["../repo-b", "/abs/path"]
+
+    def test_parses_dict_include_entry(self):
+        from seekr_hatchery.includes import IncludeItem
+
+        config = docker.DockerConfig(include=[{"path": "../ref", "mode": "ro"}])
+        assert config.include == [IncludeItem(path="../ref", mode="ro")]
+
+    def test_parses_mixed_include_list(self):
+        from seekr_hatchery.includes import IncludeItem
+
+        config = docker.DockerConfig(include=["../wt-repo", {"path": "../ref", "mode": "rw"}])
+        assert config.include[0] == "../wt-repo"
+        assert config.include[1] == IncludeItem(path="../ref", mode="rw")
+
+    def test_dict_without_path_is_invalid(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            docker.DockerConfig(include=[{"mode": "ro"}])
+
+    def test_dict_invalid_mode_is_rejected(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            docker.DockerConfig(include=[{"path": "../foo", "mode": "readwrite"}])
+
+    def test_dict_extra_keys_are_rejected(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            docker.DockerConfig(include=[{"path": "../foo", "mode": "ro", "extra": "oops"}])
 
     def test_extra_fields_still_forbidden(self):
         from pydantic import ValidationError
@@ -722,7 +850,6 @@ class TestDockerConfigInclude:
             docker.DockerConfig(unknown_field="oops")
 
 
-# ---------------------------------------------------------------------------
 # ensure_docker_files_uncommitted
 # ---------------------------------------------------------------------------
 
@@ -782,6 +909,39 @@ class TestEnsureDockerFilesUncommitted:
         # Worktree files should be untouched
         assert (worktree / ".hatchery" / "Dockerfile.codex").read_text() == original_df
         assert (worktree / tasks.DOCKER_CONFIG).read_text() == original_cfg
+
+
+# ---------------------------------------------------------------------------
+# parse_docker_include_entry()
+# ---------------------------------------------------------------------------
+
+
+class TestParseDockerIncludeEntry:
+    def test_string_gives_worktree_mode(self):
+        assert docker.parse_docker_include_entry("../repo") == ("../repo", "worktree")
+
+    def test_item_with_mode_ro(self):
+        from seekr_hatchery.includes import IncludeItem
+
+        assert docker.parse_docker_include_entry(IncludeItem(path="../docs", mode="ro")) == ("../docs", "ro")
+
+    def test_item_with_mode_rw(self):
+        from seekr_hatchery.includes import IncludeItem
+
+        assert docker.parse_docker_include_entry(IncludeItem(path="../shared", mode="rw")) == ("../shared", "rw")
+
+    def test_item_with_mode_worktree(self):
+        from seekr_hatchery.includes import IncludeItem
+
+        assert docker.parse_docker_include_entry(IncludeItem(path="../repo", mode="worktree")) == (
+            "../repo",
+            "worktree",
+        )
+
+    def test_item_without_mode_defaults_to_worktree(self):
+        from seekr_hatchery.includes import IncludeItem
+
+        assert docker.parse_docker_include_entry(IncludeItem(path="../repo")) == ("../repo", "worktree")
 
 
 # ---------------------------------------------------------------------------

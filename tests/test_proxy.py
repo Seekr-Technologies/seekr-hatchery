@@ -3,6 +3,7 @@
 import http.client
 import threading
 import time
+from urllib.parse import urlparse
 
 import pytest
 
@@ -37,21 +38,54 @@ def _make_bearer_mutator(key: str):
     return _mutate
 
 
-class _MockHTTPSConn:
-    """Minimal stand-in for http.client.HTTPSConnection that records requests."""
+class _MockPoolResp:
+    """Mock urllib3 response returned by _MockPool.urlopen()."""
 
-    def __init__(self, host: str) -> None:
-        self.host = host
-        self._recorded: dict = {}
+    def __init__(self, status: int = 200, headers=None, body: bytes = b"{}") -> None:
+        self.status = status
+        _h = headers if headers is not None else {"content-type": "application/json"}
+        # Accept either a plain dict or a list of (name, value) pairs.
+        if isinstance(_h, dict):
+            self.headers = _h
+        else:
 
-    def request(self, method: str, path: str, body=None, headers=None) -> None:
-        self._recorded = {"method": method, "path": path, "headers": dict(headers or {})}
+            class _Headers:
+                def __init__(self, items):
+                    self._items = items
 
-    def getresponse(self) -> "_MockHTTPSResp":
-        return _MockHTTPSResp()
+                def items(self):
+                    return self._items
 
-    def close(self) -> None:
+            self.headers = _Headers(_h)
+        self._body = body
+
+    def read(self, n: int) -> bytes:
+        chunk, self._body = self._body[:n], self._body[n:]
+        return chunk
+
+    def drain_conn(self) -> None:
         pass
+
+
+class _MockPool:
+    """Injectable mock for urllib3.PoolManager.
+
+    Pass a list of _MockPoolResp (or plain int status codes) as *responses*;
+    each urlopen() call pops one.  Calls are recorded in self.calls.
+    """
+
+    def __init__(self, responses=None) -> None:
+        self._responses: list = list(responses) if responses else [_MockPoolResp()]
+        self.calls: list[dict] = []
+
+    def urlopen(self, method, url, body=None, headers=None, **kwargs):
+        self.calls.append({"method": method, "url": url, "body": body, "headers": dict(headers or {})})
+        resp = self._responses.pop(0) if self._responses else _MockPoolResp()
+        return _MockPoolResp(status=resp) if isinstance(resp, int) else resp
+
+
+# Keep _MockHTTPSResp for the WebSocket test, which still goes through
+# http.client (urllib3 can't handle 101 Switching Protocols).
 
 
 class _MockHTTPSResp:
@@ -125,9 +159,9 @@ class TestProxyTokenValidation:
             resp = conn.getresponse()
             assert resp.status == 401
 
-    def test_accepts_correct_token(self, monkeypatch):
-        monkeypatch.setattr(http.client, "HTTPSConnection", _MockHTTPSConn)
-        with proxy.api_server(_make_api_key_mutator("real-key"), _TOKEN) as server:
+    def test_accepts_correct_token(self):
+        pool = _MockPool()
+        with proxy.api_server(_make_api_key_mutator("real-key"), _TOKEN, _pool=pool) as server:
             port = server.port
             _wait_for_port(port)
             conn = http.client.HTTPConnection("localhost", port)
@@ -143,37 +177,23 @@ class TestProxyTokenValidation:
 
 
 class TestProxyInjectsApiKey:
-    def test_real_key_injected_on_outbound(self, monkeypatch):
+    def test_real_key_injected_on_outbound(self):
         """Proxy must replace the proxy token with the real API key on the outbound leg."""
-        recorded: list[dict] = []
-
-        class _CapturingConn(_MockHTTPSConn):
-            def request(self, method, path, body=None, headers=None):
-                recorded.append({"method": method, "headers": dict(headers or {})})
-
-        monkeypatch.setattr(http.client, "HTTPSConnection", _CapturingConn)
-
-        with proxy.api_server(_make_api_key_mutator("real-api-key-xyz"), _TOKEN) as server:
+        pool = _MockPool()
+        with proxy.api_server(_make_api_key_mutator("real-api-key-xyz"), _TOKEN, _pool=pool) as server:
             port = server.port
             _wait_for_port(port)
             conn = http.client.HTTPConnection("localhost", port)
             conn.request("GET", "/v1/models", headers={"x-api-key": _TOKEN})
             conn.getresponse().read()
 
-        assert len(recorded) == 1
-        assert recorded[0]["headers"].get("x-api-key") == "real-api-key-xyz"
+        assert len(pool.calls) == 1
+        assert pool.calls[0]["headers"].get("x-api-key") == "real-api-key-xyz"
 
-    def test_inbound_auth_headers_stripped(self, monkeypatch):
+    def test_inbound_auth_headers_stripped(self):
         """Neither the proxy token nor any authorization header must reach upstream."""
-        recorded: list[dict] = []
-
-        class _CapturingConn(_MockHTTPSConn):
-            def request(self, method, path, body=None, headers=None):
-                recorded.append({"headers": dict(headers or {})})
-
-        monkeypatch.setattr(http.client, "HTTPSConnection", _CapturingConn)
-
-        with proxy.api_server(_make_api_key_mutator("real-key"), _TOKEN) as server:
+        pool = _MockPool()
+        with proxy.api_server(_make_api_key_mutator("real-key"), _TOKEN, _pool=pool) as server:
             port = server.port
             _wait_for_port(port)
             conn = http.client.HTTPConnection("localhost", port)
@@ -184,14 +204,9 @@ class TestProxyInjectsApiKey:
             )
             conn.getresponse().read()
 
-        h = recorded[0]["headers"]
+        h = pool.calls[0]["headers"]
         assert h.get("x-api-key") == "real-key"
         assert "authorization" not in {k.lower() for k in h}
-
-
-# ---------------------------------------------------------------------------
-# test_proxy_concurrent_requests
-# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
@@ -200,10 +215,12 @@ class TestProxyInjectsApiKey:
 
 
 class TestProxyOpenAIFormat:
-    def test_bearer_token_accepted(self, monkeypatch):
+    def test_bearer_token_accepted(self):
         """Proxy must accept Authorization: Bearer <token> in addition to x-api-key."""
-        monkeypatch.setattr(http.client, "HTTPSConnection", _MockHTTPSConn)
-        with proxy.api_server(_make_bearer_mutator("real-key"), _TOKEN, target_host="api.openai.com") as server:
+        pool = _MockPool()
+        with proxy.api_server(
+            _make_bearer_mutator("real-key"), _TOKEN, target_host="api.openai.com", _pool=pool
+        ) as server:
             port = server.port
             _wait_for_port(port)
             conn = http.client.HTTPConnection("localhost", port)
@@ -222,67 +239,42 @@ class TestProxyOpenAIFormat:
             resp = conn.getresponse()
             assert resp.status == 401
 
-    def test_inject_authorization_header(self, monkeypatch):
+    def test_inject_authorization_header(self):
         """Bearer mutator outbound must use Authorization: Bearer <real_key>."""
-        recorded: list[dict] = []
-
-        class _CapturingConn:
-            def __init__(self, host: str) -> None:
-                self.host = host
-
-            def request(self, method, path, body=None, headers=None):
-                recorded.append({"headers": dict(headers or {})})
-
-            def getresponse(self):
-                return _MockHTTPSResp()
-
-            def close(self):
-                pass
-
-        monkeypatch.setattr(http.client, "HTTPSConnection", _CapturingConn)
-        with proxy.api_server(_make_bearer_mutator("my-openai-key"), _TOKEN, target_host="api.openai.com") as server:
+        pool = _MockPool()
+        with proxy.api_server(
+            _make_bearer_mutator("my-openai-key"), _TOKEN, target_host="api.openai.com", _pool=pool
+        ) as server:
             port = server.port
             _wait_for_port(port)
             conn = http.client.HTTPConnection("localhost", port)
             conn.request("GET", "/v1/models", headers={"Authorization": f"Bearer {_TOKEN}"})
             conn.getresponse().read()
 
-        assert len(recorded) == 1
-        h = recorded[0]["headers"]
+        assert len(pool.calls) == 1
+        h = pool.calls[0]["headers"]
         assert h.get("Authorization") == "Bearer my-openai-key"
         assert "x-api-key" not in {k.lower() for k in h}
 
-    def test_openai_target_host_used(self, monkeypatch):
+    def test_openai_target_host_used(self):
         """Proxy must connect to api.openai.com when configured."""
-        connected_to: list[str] = []
-
-        class _RecordingConn:
-            def __init__(self, host: str) -> None:
-                connected_to.append(host)
-
-            def request(self, method, path, body=None, headers=None):
-                pass
-
-            def getresponse(self):
-                return _MockHTTPSResp()
-
-            def close(self):
-                pass
-
-        monkeypatch.setattr(http.client, "HTTPSConnection", _RecordingConn)
-        with proxy.api_server(_make_bearer_mutator("my-openai-key"), _TOKEN, target_host="api.openai.com") as server:
+        pool = _MockPool()
+        with proxy.api_server(
+            _make_bearer_mutator("my-openai-key"), _TOKEN, target_host="api.openai.com", _pool=pool
+        ) as server:
             port = server.port
             _wait_for_port(port)
             conn = http.client.HTTPConnection("localhost", port)
             conn.request("GET", "/v1/models", headers={"Authorization": f"Bearer {_TOKEN}"})
             conn.getresponse().read()
 
-        assert connected_to == ["api.openai.com"]
+        assert len(pool.calls) == 1
+        assert urlparse(pool.calls[0]["url"]).hostname == "api.openai.com"
 
-    def test_xapikey_still_accepted_for_anthropic_proxy(self, monkeypatch):
+    def test_xapikey_still_accepted_for_anthropic_proxy(self):
         """Default Anthropic proxy still accepts x-api-key tokens."""
-        monkeypatch.setattr(http.client, "HTTPSConnection", _MockHTTPSConn)
-        with proxy.api_server(_make_api_key_mutator("real-key"), _TOKEN) as server:
+        pool = _MockPool()
+        with proxy.api_server(_make_api_key_mutator("real-key"), _TOKEN, _pool=pool) as server:
             port = server.port
             _wait_for_port(port)
             conn = http.client.HTTPConnection("localhost", port)
@@ -293,20 +285,15 @@ class TestProxyOpenAIFormat:
 
 
 class TestPathPrefix:
-    def test_path_prefix_prepended_to_forwarded_path(self, monkeypatch):
+    def test_path_prefix_prepended_to_forwarded_path(self):
         """Proxy must prepend path_prefix to the path sent to the upstream."""
-        recorded: list[dict] = []
-
-        class _CapturingConn(_MockHTTPSConn):
-            def request(self, method, path, body=None, headers=None):
-                recorded.append({"path": path})
-
-        monkeypatch.setattr(http.client, "HTTPSConnection", _CapturingConn)
+        pool = _MockPool()
         with proxy.api_server(
             _make_bearer_mutator("api-key"),
             _TOKEN,
             target_host="chatgpt.com",
             path_prefix="/backend-api/codex",
+            _pool=pool,
         ) as server:
             port = server.port
             _wait_for_port(port)
@@ -314,35 +301,20 @@ class TestPathPrefix:
             conn.request("POST", "/responses", headers={"Authorization": f"Bearer {_TOKEN}"})
             conn.getresponse().read()
 
-        assert len(recorded) == 1
-        assert recorded[0]["path"] == "/backend-api/codex/responses"
+        assert len(pool.calls) == 1
+        assert pool.calls[0]["url"].endswith("/backend-api/codex/responses")
 
 
 class TestHeaderSanitization:
-    def test_crlf_stripped_from_response_headers(self, monkeypatch):
+    def test_crlf_stripped_from_response_headers(self):
         """Headers containing \\r\\n must be sanitized to prevent HTTP response splitting."""
-
-        class _MaliciousResp:
-            status = 200
-            _data = b"ok"
-
-            def getheaders(self):
-                return [
-                    ("content-type", "text/plain"),
-                    ("x-evil", "value\r\nInjected-Header: pwned"),
-                    ("x-bad\r\nAnother: oops", "clean-value"),
-                ]
-
-            def read(self, n):
-                chunk, self._data = self._data[:n], self._data[n:]
-                return chunk
-
-        class _MaliciousConn(_MockHTTPSConn):
-            def getresponse(self):
-                return _MaliciousResp()
-
-        monkeypatch.setattr(http.client, "HTTPSConnection", _MaliciousConn)
-        with proxy.api_server(_make_api_key_mutator("real-key"), _TOKEN) as server:
+        malicious_headers = [
+            ("content-type", "text/plain"),
+            ("x-evil", "value\r\nInjected-Header: pwned"),
+            ("x-bad\r\nAnother: oops", "clean-value"),
+        ]
+        pool = _MockPool(responses=[_MockPoolResp(headers=malicious_headers, body=b"ok")])
+        with proxy.api_server(_make_api_key_mutator("real-key"), _TOKEN, _pool=pool) as server:
             port = server.port
             _wait_for_port(port)
             conn = http.client.HTTPConnection("localhost", port)
@@ -357,18 +329,18 @@ class TestHeaderSanitization:
 
 
 class TestProxyConcurrentRequests:
-    def test_two_concurrent_requests_both_succeed(self, monkeypatch):
+    def test_two_concurrent_requests_both_succeed(self):
         """ThreadingMixIn must handle simultaneous requests without blocking."""
         barrier = threading.Barrier(2)
 
-        class _SlowConn(_MockHTTPSConn):
-            def request(self, method, path, body=None, headers=None):
+        class _BarrierPool(_MockPool):
+            def urlopen(self, method, url, body=None, headers=None, **kwargs):
                 # Both threads arrive here, ensuring genuine concurrency.
                 barrier.wait(timeout=5)
+                return super().urlopen(method, url, body=body, headers=headers, **kwargs)
 
-        monkeypatch.setattr(http.client, "HTTPSConnection", _SlowConn)
-
-        with proxy.api_server(_make_api_key_mutator("api-key"), _TOKEN) as server:
+        pool = _BarrierPool(responses=[_MockPoolResp(), _MockPoolResp()])
+        with proxy.api_server(_make_api_key_mutator("api-key"), _TOKEN, _pool=pool) as server:
             port = server.port
             _wait_for_port(port)
 
@@ -393,32 +365,26 @@ class TestProxyConcurrentRequests:
 
 
 class TestHeaderMutatorIntegration:
-    def test_oauth_beta_header_prepended(self, monkeypatch):
+    def test_oauth_beta_header_prepended(self):
         """OAuth mutator must prepend oauth-2025-04-20 to existing anthropic-beta."""
-        recorded: list[dict] = []
+        pool = _MockPool()
 
-        class _CapturingConn(_MockHTTPSConn):
-            def request(self, method, path, body=None, headers=None):
-                recorded.append({"headers": dict(headers or {})})
-
-        monkeypatch.setattr(http.client, "HTTPSConnection", _CapturingConn)
-
-        def _oauth_mutate(headers):
+        def _oauth_mutate(headers, **kwargs):
             out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")}
             out["Authorization"] = "Bearer oauth-token"
             existing = out.get("anthropic-beta", "")
             out["anthropic-beta"] = ("oauth-2025-04-20," + existing) if existing else "oauth-2025-04-20"
             return out
 
-        with proxy.api_server(_oauth_mutate, _TOKEN) as server:
+        with proxy.api_server(_oauth_mutate, _TOKEN, _pool=pool) as server:
             port = server.port
             _wait_for_port(port)
             conn = http.client.HTTPConnection("localhost", port)
             conn.request("POST", "/v1/messages", headers={"x-api-key": _TOKEN, "anthropic-beta": "existing-beta"})
             conn.getresponse().read()
 
-        assert len(recorded) == 1
-        h = recorded[0]["headers"]
+        assert len(pool.calls) == 1
+        h = pool.calls[0]["headers"]
         assert h.get("anthropic-beta") == "oauth-2025-04-20,existing-beta"
         assert h.get("Authorization") == "Bearer oauth-token"
         assert "x-api-key" not in {k.lower() for k in h}
@@ -430,40 +396,8 @@ class TestHeaderMutatorIntegration:
 
 
 class TestProxyReauthOn401:
-    def test_upstream_401_triggers_refresh_and_retry(self, monkeypatch):
+    def test_upstream_401_triggers_refresh_and_retry(self):
         """When upstream returns 401, proxy must call mutator with refresh=True and retry."""
-        call_log: list[dict] = []
-        responses = [401, 200]
-
-        class _Resp:
-            def __init__(self, status):
-                self.status = status
-                self._data = b"{}"
-
-            def getheaders(self):
-                return [("content-type", "application/json")]
-
-            def read(self, n=None):
-                if n is None:
-                    chunk, self._data = self._data, b""
-                else:
-                    chunk, self._data = self._data[:n], self._data[n:]
-                return chunk
-
-        class _Conn:
-            def __init__(self, host):
-                self.host = host
-
-            def request(self, method, path, body=None, headers=None):
-                call_log.append({"headers": dict(headers or {})})
-
-            def getresponse(self):
-                status = responses.pop(0)
-                return _Resp(status)
-
-            def close(self):
-                pass
-
         refresh_calls: list[bool] = []
 
         def _mutator(headers, *, refresh: bool = False):
@@ -472,8 +406,8 @@ class TestProxyReauthOn401:
             out["x-api-key"] = "refreshed-key" if refresh else "original-key"
             return out
 
-        monkeypatch.setattr(http.client, "HTTPSConnection", _Conn)
-        with proxy.api_server(_mutator, _TOKEN) as server:
+        pool = _MockPool(responses=[_MockPoolResp(status=401), _MockPoolResp(status=200)])
+        with proxy.api_server(_mutator, _TOKEN, _pool=pool) as server:
             port = server.port
             _wait_for_port(port)
             conn = http.client.HTTPConnection("localhost", port)
@@ -483,50 +417,19 @@ class TestProxyReauthOn401:
             final_status = resp.status
 
         # Two upstream requests: first got 401, second is the retry.
-        assert len(call_log) == 2
+        assert len(pool.calls) == 2
         # First call used original key, second used refreshed key.
-        assert call_log[0]["headers"].get("x-api-key") == "original-key"
-        assert call_log[1]["headers"].get("x-api-key") == "refreshed-key"
+        assert pool.calls[0]["headers"].get("x-api-key") == "original-key"
+        assert pool.calls[1]["headers"].get("x-api-key") == "refreshed-key"
         # Mutator was called with refresh=False then refresh=True.
         assert refresh_calls == [False, True]
         # Client sees the 200 from the retry.
         assert final_status == 200
 
-    def test_retry_also_401_forwarded_without_further_retry(self, monkeypatch):
+    def test_retry_also_401_forwarded_without_further_retry(self):
         """If the retry also returns 401, it is forwarded to the client with no further attempt."""
-        call_log: list[dict] = []
-        responses = [401, 401]
-
-        class _Resp:
-            def __init__(self, status):
-                self.status = status
-                self._data = b"Unauthorized"
-
-            def getheaders(self):
-                return [("content-type", "text/plain")]
-
-            def read(self, n=None):
-                if n is None:
-                    chunk, self._data = self._data, b""
-                else:
-                    chunk, self._data = self._data[:n], self._data[n:]
-                return chunk
-
-        class _Conn:
-            def __init__(self, host):
-                self.host = host
-
-            def request(self, method, path, body=None, headers=None):
-                call_log.append({})
-
-            def getresponse(self):
-                return _Resp(responses.pop(0))
-
-            def close(self):
-                pass
-
-        monkeypatch.setattr(http.client, "HTTPSConnection", _Conn)
-        with proxy.api_server(_make_api_key_mutator("key"), _TOKEN) as server:
+        pool = _MockPool(responses=[_MockPoolResp(status=401), _MockPoolResp(status=401)])
+        with proxy.api_server(_make_api_key_mutator("key"), _TOKEN, _pool=pool) as server:
             port = server.port
             _wait_for_port(port)
             conn = http.client.HTTPConnection("localhost", port)
@@ -536,42 +439,13 @@ class TestProxyReauthOn401:
             final_status = resp.status
 
         # Exactly two upstream attempts (original + one retry).
-        assert len(call_log) == 2
+        assert len(pool.calls) == 2
         assert final_status == 401
 
-    def test_non_401_error_forwarded_without_retry(self, monkeypatch):
+    def test_non_401_error_forwarded_without_retry(self):
         """A 500 from upstream must be forwarded immediately without any retry."""
-        call_log: list[dict] = []
-
-        class _Resp:
-            status = 500
-            _data = b"Internal Server Error"
-
-            def getheaders(self):
-                return [("content-type", "text/plain")]
-
-            def read(self, n=None):
-                if n is None:
-                    chunk, self._data = self._data, b""
-                else:
-                    chunk, self._data = self._data[:n], self._data[n:]
-                return chunk
-
-        class _Conn:
-            def __init__(self, host):
-                self.host = host
-
-            def request(self, method, path, body=None, headers=None):
-                call_log.append({})
-
-            def getresponse(self):
-                return _Resp()
-
-            def close(self):
-                pass
-
-        monkeypatch.setattr(http.client, "HTTPSConnection", _Conn)
-        with proxy.api_server(_make_api_key_mutator("key"), _TOKEN) as server:
+        pool = _MockPool(responses=[_MockPoolResp(status=500)])
+        with proxy.api_server(_make_api_key_mutator("key"), _TOKEN, _pool=pool) as server:
             port = server.port
             _wait_for_port(port)
             conn = http.client.HTTPConnection("localhost", port)
@@ -580,7 +454,7 @@ class TestProxyReauthOn401:
             resp.read()
             final_status = resp.status
 
-        assert len(call_log) == 1
+        assert len(pool.calls) == 1
         assert final_status == 500
 
 
@@ -612,7 +486,7 @@ class TestProxyWebSocketRelay:
                 return b""
 
         class _WSConn:
-            def __init__(self, host):
+            def __init__(self, host, timeout=None):
                 self.host = host
                 # upstream_sock is the other end of a second socketpair
                 self._upstream, self._downstream = _socket.socketpair()
