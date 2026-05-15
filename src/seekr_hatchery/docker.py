@@ -133,6 +133,7 @@ class DockerConfig(BaseModel):
     include: list[str | IncludeItem] = []
     dind: bool = False
     follow_symlinks: bool = False
+    clipboard_images: bool = True
     cap_add: list[str] = []
     kubernetes: KubectlConfig | None = None
 
@@ -792,6 +793,8 @@ def docker_mounts(
     mounts.extend(_default_home_mounts())
     mounts.extend(backend.home_mounts(session_dir))
     mounts.extend(_construct_docker_mounts(config))
+    if config.clipboard_images:
+        mounts.append(_clipboard_image_mount(session_dir))
     if config.follow_symlinks:
         mounts.extend(_construct_symlink_mounts(worktree, mounts))
     return mounts
@@ -815,6 +818,8 @@ def docker_mounts_no_worktree(
         + backend.home_mounts(session_dir)
         + _construct_docker_mounts(config)
     )
+    if config.clipboard_images:
+        mounts.append(_clipboard_image_mount(session_dir))
     if config.follow_symlinks:
         mounts.extend(_construct_symlink_mounts(cwd, mounts))
     return mounts
@@ -894,6 +899,27 @@ def _default_home_mounts() -> list[str]:
     if uv_cache.exists():
         mounts.append(f"{uv_cache}:{agent.CONTAINER_HOME}/.cache/uv:rw")
     return mounts
+
+
+def clipboard_image_dir(session_dir: Path) -> Path:
+    """Per-task host directory where pasted clipboard images are saved.
+
+    Bind-mounted at the same absolute path inside the container so a file
+    written here by the host-side PTY proxy resolves identically when the
+    agent reads it.
+    """
+    return session_dir / "clipboard"
+
+
+def _clipboard_image_mount(session_dir: Path) -> str:
+    """Return the -v flag for the per-task clipboard images directory.
+
+    Mounts at the identical host path inside the container so the file path
+    typed into the agent's stdin (a host path) resolves byte-for-byte.
+    """
+    d = clipboard_image_dir(session_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    return f"{d}:{d}:rw"
 
 
 # ── Container execution ───────────────────────────────────────────────────────

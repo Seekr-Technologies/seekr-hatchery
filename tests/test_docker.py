@@ -1187,3 +1187,53 @@ class TestNoWorktreeFollowSymlinks:
 
         target = external.resolve()
         assert f"{target}:{target}:rw" in mounts
+
+
+# ---------------------------------------------------------------------------
+# clipboard_images
+# ---------------------------------------------------------------------------
+
+
+class TestDockerConfigClipboardImages:
+    def test_defaults_to_true(self):
+        assert docker.DockerConfig().clipboard_images is True
+
+    def test_parses_false(self):
+        assert docker.DockerConfig(clipboard_images=False).clipboard_images is False
+
+
+class TestClipboardImageMount:
+    def _make_backend(self):
+        b = MagicMock()
+        b.home_mounts = MagicMock(return_value=[])
+        return b
+
+    def test_no_worktree_enabled_adds_identical_mount(self, tmp_path, monkeypatch):
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        session_dir = tmp_path / "session"
+        session_dir.mkdir()
+        monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
+
+        cfg = docker.DockerConfig(clipboard_images=True)
+        mounts = docker.docker_mounts_no_worktree(cwd, self._make_backend(), session_dir, cfg)
+
+        clip = session_dir / "clipboard"
+        assert f"{clip}:{clip}:rw" in mounts
+        # And the directory was actually created on the host.
+        assert clip.is_dir()
+
+    def test_no_worktree_disabled_omits_mount(self, tmp_path, monkeypatch):
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        session_dir = tmp_path / "session"
+        session_dir.mkdir()
+        monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
+
+        cfg = docker.DockerConfig(clipboard_images=False)
+        mounts = docker.docker_mounts_no_worktree(cwd, self._make_backend(), session_dir, cfg)
+
+        clip = session_dir / "clipboard"
+        assert not any(f"{clip}:" in m for m in mounts)
+        # And we did not create the directory.
+        assert not clip.exists()
