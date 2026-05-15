@@ -942,3 +942,248 @@ class TestParseDockerIncludeEntry:
         from seekr_hatchery.includes import IncludeItem
 
         assert docker.parse_docker_include_entry(IncludeItem(path="../repo")) == ("../repo", "worktree")
+
+
+# ---------------------------------------------------------------------------
+# DockerConfig.follow_symlinks field
+# ---------------------------------------------------------------------------
+
+
+class TestDockerConfigFollowSymlinks:
+    def test_defaults_to_false(self):
+        assert docker.DockerConfig().follow_symlinks is False
+
+    def test_parses_true(self):
+        assert docker.DockerConfig(follow_symlinks=True).follow_symlinks is True
+
+
+# ---------------------------------------------------------------------------
+# _construct_symlink_mounts()
+# ---------------------------------------------------------------------------
+
+
+class TestConstructSymlinkMounts:
+    def _scan_root(self, tmp_path):
+        """Build an isolated worktree-like directory under tmp_path."""
+        root = tmp_path / "worktree"
+        root.mkdir()
+        return root
+
+    def test_external_file_symlink_emits_mount(self, tmp_path):
+        scan = self._scan_root(tmp_path)
+        external = tmp_path / "external" / "file.txt"
+        external.parent.mkdir()
+        external.write_text("hello")
+        (scan / "link").symlink_to(external)
+
+        mounts = docker._construct_symlink_mounts(scan, [])
+
+        target = external.resolve()
+        assert mounts == [f"{target}:{target}:rw"]
+
+    def test_external_dir_symlink_emits_mount(self, tmp_path):
+        scan = self._scan_root(tmp_path)
+        external = tmp_path / "external" / "dir"
+        external.mkdir(parents=True)
+        (external / "child").write_text("x")
+        (scan / "linkdir").symlink_to(external)
+
+        mounts = docker._construct_symlink_mounts(scan, [])
+
+        target = external.resolve()
+        assert f"{target}:{target}:rw" in mounts
+
+    def test_relative_internal_symlink_skipped(self, tmp_path):
+        """Relative links staying inside scan_root resolve correctly in the
+        container and need no extra mount."""
+        scan = self._scan_root(tmp_path)
+        (scan / "inner.txt").write_text("x")
+        (scan / "link").symlink_to("inner.txt")
+
+        mounts = docker._construct_symlink_mounts(scan, [])
+
+        assert mounts == []
+
+    def test_dedupes_same_target(self, tmp_path):
+        scan = self._scan_root(tmp_path)
+        external = tmp_path / "external" / "file.txt"
+        external.parent.mkdir()
+        external.write_text("hello")
+        (scan / "a").symlink_to(external)
+        (scan / "b").symlink_to(external)
+
+        mounts = docker._construct_symlink_mounts(scan, [])
+
+        assert len(mounts) == 1
+
+    def test_already_covered_by_existing_mount(self, tmp_path):
+        scan = self._scan_root(tmp_path)
+        external_root = tmp_path / "external"
+        external_root.mkdir()
+        external_file = external_root / "file.txt"
+        external_file.write_text("x")
+        (scan / "link").symlink_to(external_file)
+
+        # external_root is already a mount; its child should be skipped
+        existing = [f"{external_root}:/mounted/external:ro"]
+        mounts = docker._construct_symlink_mounts(scan, existing)
+
+        assert mounts == []
+
+    def test_broken_symlink_skipped(self, tmp_path):
+        scan = self._scan_root(tmp_path)
+        (scan / "broken").symlink_to(tmp_path / "does-not-exist")
+
+        mounts = docker._construct_symlink_mounts(scan, [])
+
+        assert mounts == []
+
+    def test_system_path_target_skipped(self, tmp_path):
+        scan = self._scan_root(tmp_path)
+        # Use /usr/bin/env which exists on all Linux/macOS test runners
+        (scan / "syslink").symlink_to("/usr/bin/env")
+
+        mounts = docker._construct_symlink_mounts(scan, [])
+
+        assert mounts == []
+
+    def test_heavyweight_dir_pruned(self, tmp_path):
+        scan = self._scan_root(tmp_path)
+        external = tmp_path / "external" / "file.txt"
+        external.parent.mkdir()
+        external.write_text("x")
+        node_modules = scan / "node_modules"
+        node_modules.mkdir()
+        (node_modules / "link").symlink_to(external)
+
+        mounts = docker._construct_symlink_mounts(scan, [])
+
+        # The symlink inside node_modules is never visited.
+        assert mounts == []
+
+    def test_nested_relative_internal_symlink_skipped(self, tmp_path):
+        """Relative links climbing within scan_root (but not escaping) are fine."""
+        scan = self._scan_root(tmp_path)
+        (scan / "a").mkdir()
+        (scan / "b").mkdir()
+        (scan / "b" / "file.txt").write_text("x")
+        (scan / "a" / "link").symlink_to("../b/file.txt")
+
+        mounts = docker._construct_symlink_mounts(scan, [])
+
+        assert mounts == []
+
+    def test_nested_external_target(self, tmp_path):
+        """Symlinks discovered in nested (non-skipped) subdirs still emit mounts."""
+        scan = self._scan_root(tmp_path)
+        nested = scan / "a" / "b"
+        nested.mkdir(parents=True)
+        external = tmp_path / "external" / "data"
+        external.mkdir(parents=True)
+        (nested / "link").symlink_to(external)
+
+        mounts = docker._construct_symlink_mounts(scan, [])
+
+        target = external.resolve()
+        assert mounts == [f"{target}:{target}:rw"]
+
+    def test_absolute_internal_link_raises(self, tmp_path, capsys):
+        """Absolute link pointing inside scan_root fails loudly — the host path
+        doesn't exist inside the container after the worktree remap."""
+        scan = self._scan_root(tmp_path)
+        (scan / "inner.txt").write_text("x")
+        (scan / "link").symlink_to(scan / "inner.txt")  # absolute target
+
+        with pytest.raises(SystemExit):
+            docker._construct_symlink_mounts(scan, [])
+
+        err = capsys.readouterr().err
+        assert "follow_symlinks" in err
+        assert "Absolute links pointing inside" in err
+        assert str(scan / "link") in err
+
+    def test_relative_external_link_raises(self, tmp_path, capsys):
+        """Relative link escaping scan_root fails loudly — the relative climb
+        anchors at the remapped container path and lands elsewhere."""
+        scan = self._scan_root(tmp_path)
+        external = tmp_path / "external"
+        external.mkdir()
+        (scan / "link").symlink_to("../external")
+
+        with pytest.raises(SystemExit):
+            docker._construct_symlink_mounts(scan, [])
+
+        err = capsys.readouterr().err
+        assert "Relative links escaping" in err
+        assert str(scan / "link") in err
+        assert "../external" in err
+
+    def test_error_reports_both_kinds_at_once(self, tmp_path, capsys):
+        """Multiple problematic links are reported together, not one at a time."""
+        scan = self._scan_root(tmp_path)
+        (scan / "inner.txt").write_text("x")
+        (tmp_path / "external").mkdir()
+        (scan / "abs_bad").symlink_to(scan / "inner.txt")
+        (scan / "rel_bad").symlink_to("../external")
+
+        with pytest.raises(SystemExit):
+            docker._construct_symlink_mounts(scan, [])
+
+        err = capsys.readouterr().err
+        assert "Absolute links pointing inside" in err
+        assert "Relative links escaping" in err
+        assert str(scan / "abs_bad") in err
+        assert str(scan / "rel_bad") in err
+
+    def test_error_mentions_disabling_the_flag(self, tmp_path, capsys):
+        """Error message points the user at the escape hatch."""
+        scan = self._scan_root(tmp_path)
+        (scan / "inner.txt").write_text("x")
+        (scan / "link").symlink_to(scan / "inner.txt")
+
+        with pytest.raises(SystemExit):
+            docker._construct_symlink_mounts(scan, [])
+
+        err = capsys.readouterr().err
+        assert "follow_symlinks: false" in err
+
+
+# ---------------------------------------------------------------------------
+# docker_mounts_no_worktree honors follow_symlinks
+# ---------------------------------------------------------------------------
+
+
+class TestNoWorktreeFollowSymlinks:
+    def _make_backend(self):
+        b = MagicMock()
+        b.home_mounts = MagicMock(return_value=[])
+        return b
+
+    def test_disabled_skips_symlink_scan(self, tmp_path, monkeypatch):
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        external = tmp_path / "external"
+        external.mkdir()
+        (cwd / "link").symlink_to(external)
+        # Avoid coupling to the user's real home mounts (e.g. uv cache).
+        monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
+
+        cfg = docker.DockerConfig(follow_symlinks=False)
+        mounts = docker.docker_mounts_no_worktree(cwd, self._make_backend(), tmp_path, cfg)
+
+        target = external.resolve()
+        assert not any(f"{target}:{target}:rw" == m for m in mounts)
+
+    def test_enabled_adds_symlink_mounts(self, tmp_path, monkeypatch):
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        external = tmp_path / "external"
+        external.mkdir()
+        (cwd / "link").symlink_to(external)
+        monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
+
+        cfg = docker.DockerConfig(follow_symlinks=True)
+        mounts = docker.docker_mounts_no_worktree(cwd, self._make_backend(), tmp_path, cfg)
+
+        target = external.resolve()
+        assert f"{target}:{target}:rw" in mounts

@@ -1,6 +1,7 @@
 """Docker sandbox helpers."""
 
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -131,6 +132,7 @@ class DockerConfig(BaseModel):
     mounts: list[str] = []
     include: list[str | IncludeItem] = []
     dind: bool = False
+    follow_symlinks: bool = False
     cap_add: list[str] = []
     kubernetes: KubectlConfig | None = None
 
@@ -555,6 +557,147 @@ def _construct_docker_mounts(config: DockerConfig) -> list[str]:
     return result
 
 
+# Host directories whose contents are provided by the container image or kernel.
+# Mounting host equivalents over them would shadow critical binaries/libraries
+# or replace special filesystems (/proc, /sys, /dev). /tmp, /var, /home, /opt
+# are intentionally NOT blocked — users legitimately keep data there.
+_SYMLINK_SYSTEM_BLOCKLIST: tuple[Path, ...] = (
+    Path("/usr"),
+    Path("/bin"),
+    Path("/sbin"),
+    Path("/lib"),
+    Path("/lib64"),
+    Path("/etc"),
+    Path("/proc"),
+    Path("/sys"),
+    Path("/dev"),
+    Path("/run"),
+)
+
+# Directories we don't bother descending into — large, and unlikely to host
+# meaningful user-authored symlinks.
+_SYMLINK_SKIP_DIRS: frozenset[str] = frozenset(
+    {
+        ".git",
+        ".hatchery",
+        "node_modules",
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".tox",
+        ".mypy_cache",
+        ".pytest_cache",
+    }
+)
+
+
+def _construct_symlink_mounts(scan_root: Path, existing_mounts: list[str]) -> list[str]:
+    """Walk *scan_root* for symlinks; return -v flags for external targets.
+
+    For each symlink whose fully-resolved target lives outside the already-mounted
+    area (and outside the system blocklist), emit a single ``target:target:rw``
+    bind-mount so the symlink's stored host path resolves identically inside the
+    container. Deduplicates by unique resolved target.
+
+    Two link shapes do not survive the host→container path remap and are rejected
+    at launch with a clear error rather than silently dangling:
+      - absolute link whose target is inside *scan_root* (the host path doesn't
+        exist in the container; *scan_root* is mounted at a different location)
+      - relative link whose resolved target is outside *scan_root* (the relative
+        climb anchors at the remapped container path and lands elsewhere)
+
+    Limitation: chains that traverse multiple external symlink files only have
+    their final target mounted, not intermediate hops — those chains may still
+    dangle inside the container.
+    """
+    scan_root_resolved = scan_root.resolve()
+
+    existing: set[Path] = set()
+    for m in existing_mounts:
+        host = Path(m.split(":", 2)[0]).expanduser()
+        try:
+            existing.add(host.resolve())
+        except OSError:
+            continue
+
+    def _on_err(exc: OSError) -> None:
+        logger.debug("follow_symlinks: walk error: %s", exc)
+
+    seen: set[Path] = set()
+    mounts: list[str] = []
+    bad_abs_internal: list[tuple[Path, str]] = []
+    bad_rel_external: list[tuple[Path, str]] = []
+
+    for dirpath, dirnames, filenames in os.walk(scan_root, followlinks=False, onerror=_on_err):
+        dirnames[:] = [d for d in dirnames if d not in _SYMLINK_SKIP_DIRS]
+        for entry in list(dirnames) + filenames:
+            p = Path(dirpath) / entry
+            if not p.is_symlink():
+                continue
+            try:
+                link_str = os.readlink(p)
+            except OSError:
+                continue
+            try:
+                target = p.resolve(strict=True)
+            except (OSError, RuntimeError):
+                logger.debug("follow_symlinks: skipping unresolvable %s", p)
+                continue
+            is_absolute = os.path.isabs(link_str)
+            target_in_scan = target == scan_root_resolved or scan_root_resolved in target.parents
+
+            if is_absolute and target_in_scan:
+                bad_abs_internal.append((p, link_str))
+                continue
+            if not is_absolute and not target_in_scan:
+                bad_rel_external.append((p, link_str))
+                continue
+            if not is_absolute and target_in_scan:
+                # Relative link staying inside scan_root resolves correctly inside
+                # the container — no mount needed.
+                continue
+            # Absolute link, target outside scan_root: the happy path.
+            if target in seen:
+                continue
+            if any(target == hp or hp in target.parents for hp in existing):
+                continue
+            if any(target == sp or sp in target.parents for sp in _SYMLINK_SYSTEM_BLOCKLIST):
+                logger.debug("follow_symlinks: skipping system-path target %s", target)
+                continue
+            if any(target in hp.parents for hp in existing):
+                logger.debug("follow_symlinks: skipping parent-of-existing target %s", target)
+                continue
+            seen.add(target)
+            mounts.append(f"{target}:{target}:rw")
+
+    if bad_abs_internal or bad_rel_external:
+        lines = ["follow_symlinks: found symlinks that won't resolve inside the container:"]
+        if bad_abs_internal:
+            lines.append("")
+            lines.append(
+                f"  Absolute links pointing inside {scan_root} "
+                "(the container mounts this directory at a different absolute "
+                "path; rewrite each as a relative link):"
+            )
+            for p, link in bad_abs_internal:
+                lines.append(f"    {p} -> {link}")
+        if bad_rel_external:
+            lines.append("")
+            lines.append(
+                f"  Relative links escaping {scan_root} "
+                "(the relative climb resolves to a different path inside the "
+                "container; rewrite each as an absolute link):"
+            )
+            for p, link in bad_rel_external:
+                lines.append(f"    {p} -> {link}")
+        lines.append("")
+        lines.append("Fix the offending links, or set follow_symlinks: false in .hatchery/docker.yaml.")
+        ui.error("\n".join(lines))
+        sys.exit(1)
+
+    return mounts
+
+
 def _git_worktree_mounts(repo: Path, name: str, container_root: str) -> list[str]:
     """Return the layered -v flags for one repo + worktree pair (pre-worktree portion).
 
@@ -649,6 +792,8 @@ def docker_mounts(
     mounts.extend(_default_home_mounts())
     mounts.extend(backend.home_mounts(session_dir))
     mounts.extend(_construct_docker_mounts(config))
+    if config.follow_symlinks:
+        mounts.extend(_construct_symlink_mounts(worktree, mounts))
     return mounts
 
 
@@ -664,12 +809,15 @@ def docker_mounts_no_worktree(
       /workspace        ← cwd, read-write
       {CONTAINER_HOME}/... ← agent-specific home mounts (see backend.home_mounts())
     """
-    return (
+    mounts = (
         [f"{cwd}:/workspace:rw"]
         + _default_home_mounts()
         + backend.home_mounts(session_dir)
         + _construct_docker_mounts(config)
     )
+    if config.follow_symlinks:
+        mounts.extend(_construct_symlink_mounts(cwd, mounts))
+    return mounts
 
 
 _unique_basename = tasks._unique_basename
