@@ -1425,7 +1425,7 @@ def _read_clipboard_image() -> bytes:
         try:
             script = (
                 f'set theFile to POSIX file "{tmp}"\n'
-                'set theData to the clipboard as \u00abclass PNGf\u00bb\n'
+                "set theData to the clipboard as \u00abclass PNGf\u00bb\n"
                 "set fileRef to open for access theFile with write permission\n"
                 "write theData to fileRef\n"
                 "close access fileRef"
@@ -1464,9 +1464,7 @@ def _resolve_img_task(repo: Path, name: str | None) -> dict:
     """Resolve task meta for the img command; auto-select if exactly one task is in-progress."""
     if name:
         return tasks.load_task(repo, name)
-    running = [
-        t for t in tasks.repo_tasks_for_current_repo(repo) if t.get("status") in ("in-progress", "running")
-    ]
+    running = [t for t in tasks.repo_tasks_for_current_repo(repo) if t.get("status") in ("in-progress", "running")]
     if len(running) == 1:
         return running[0]
     if not running:
@@ -1479,7 +1477,9 @@ def _resolve_img_task(repo: Path, name: str | None) -> dict:
 
 @cli.command("img")
 @click.argument("name", required=False, default=None, type=TASK_NAME)
-@click.option("--file", "file_path", type=click.Path(exists=True), default=None, help="Image file to use instead of clipboard")
+@click.option(
+    "--file", "file_path", type=click.Path(exists=True), default=None, help="Image file to use instead of clipboard"
+)
 def cmd_img(name: str | None, file_path: str | None) -> None:
     """Save a clipboard image to the task worktree so the agent can see it.
 
