@@ -12,10 +12,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-import pytest
-
 import seekr_hatchery.pty_proxy as pty_proxy
-
 
 # ---------------------------------------------------------------------------
 # Helpers

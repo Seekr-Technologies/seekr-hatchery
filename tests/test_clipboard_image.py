@@ -1,7 +1,6 @@
 """Tests for the OSC 5522 paste interceptor."""
 
 import base64
-import time
 from pathlib import Path
 
 import pytest

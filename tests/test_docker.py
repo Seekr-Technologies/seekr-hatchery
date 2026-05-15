@@ -1237,3 +1237,19 @@ class TestClipboardImageMount:
         assert not any(f"{clip}:" in m for m in mounts)
         # And we did not create the directory.
         assert not clip.exists()
+
+
+class TestMakePasteInterceptor:
+    def test_enabled_returns_interceptor_wired_to_session_dir(self, tmp_path):
+        backend = MagicMock()
+        backend.format_image_reference = MagicMock(side_effect=lambda p: str(p))
+        cfg = docker.DockerConfig(clipboard_images=True)
+        pi = docker._make_paste_interceptor(backend, tmp_path, cfg)
+        assert pi is not None
+        # And the interceptor writes to the per-task clipboard dir.
+        assert pi._target_dir == docker.clipboard_image_dir(tmp_path)
+
+    def test_disabled_returns_none(self, tmp_path):
+        backend = MagicMock()
+        cfg = docker.DockerConfig(clipboard_images=False)
+        assert docker._make_paste_interceptor(backend, tmp_path, cfg) is None

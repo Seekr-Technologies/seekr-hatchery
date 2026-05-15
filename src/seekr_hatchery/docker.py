@@ -21,8 +21,10 @@ from pydantic import BaseModel, ConfigDict, field_validator
 from pydantic import ValidationError as _PydanticValidationError
 
 import seekr_hatchery.agents as agent
+import seekr_hatchery.clipboard_image as clipboard_image
 import seekr_hatchery.kubectl_proxy as _kubectl_proxy
 import seekr_hatchery.proxy as proxy
+import seekr_hatchery.pty_proxy as pty_proxy
 import seekr_hatchery.tasks as tasks
 import seekr_hatchery.ui as ui
 from seekr_hatchery.includes import IncludeEntry, IncludeItem
@@ -1047,6 +1049,7 @@ def _run_container(
     container_name: str | None = None,
     proxy_port: int | None = None,
     add_host_gateway: bool = False,
+    paste_interceptor: clipboard_image.PasteInterceptor | None = None,
 ) -> subprocess.CompletedProcess[str] | None:
     """Assemble and execute the container run command for the given agent session.
 
@@ -1141,10 +1144,10 @@ def _run_container(
     cmd += agent_cmd
 
     logger.debug(f"Launching {runtime.binary} container image={image!r} name={name!r} workdir={workdir!r}")
-    result = subprocess.run(cmd)
-    if result.returncode != 0:
-        ui.warn(f"{runtime.binary} container exited with code {result.returncode}")
-        if runtime == Runtime.PODMAN and result.returncode == 137:
+    returncode = _exec_agent(cmd, paste_interceptor)
+    if returncode != 0:
+        ui.warn(f"{runtime.binary} container exited with code {returncode}")
+        if runtime == Runtime.PODMAN and returncode == 137:
             ui.info(
                 "Hint: the container was killed (OOM). Try increasing the Podman machine memory:\n"
                 "  podman machine stop\n"
@@ -1152,6 +1155,18 @@ def _run_container(
                 "  podman machine start"
             )
     return None
+
+
+def _exec_agent(cmd: list[str], paste_interceptor: clipboard_image.PasteInterceptor | None) -> int:
+    """Run the agent's ``docker run`` command, optionally under the PTY proxy.
+
+    The PTY-proxy path activates only when a paste interceptor was provided
+    AND stdin is a real TTY.  Non-TTY callers (CI, captured stdin) get the
+    plain ``subprocess.run`` path so output behaviour stays unchanged.
+    """
+    if paste_interceptor is not None and sys.stdin.isatty():
+        return pty_proxy.run_with_pty(cmd, paste_interceptor)
+    return subprocess.run(cmd).returncode
 
 
 def launch_docker(
@@ -1239,7 +1254,22 @@ def launch_docker(
             container_name=task_container_name(repo, name),
             proxy_port=api_proxy.port if api_proxy else None,
             add_host_gateway=bool(kubectl_mounts),
+            paste_interceptor=_make_paste_interceptor(backend, session_dir, config),
         )
+
+
+def _make_paste_interceptor(
+    backend: agent.AgentBackend,
+    session_dir: Path,
+    config: DockerConfig,
+) -> clipboard_image.PasteInterceptor | None:
+    """Build the paste interceptor for an agent launch, or ``None`` when disabled."""
+    if not config.clipboard_images:
+        return None
+    return clipboard_image.PasteInterceptor(
+        clipboard_image_dir(session_dir),
+        backend.format_image_reference,
+    )
 
 
 def launch_docker_no_worktree(
@@ -1304,6 +1334,7 @@ def launch_docker_no_worktree(
             container_name=task_container_name(cwd, name),
             proxy_port=api_proxy.port if api_proxy else None,
             add_host_gateway=bool(kubectl_mounts),
+            paste_interceptor=_make_paste_interceptor(backend, session_dir, config),
         )
 
 
