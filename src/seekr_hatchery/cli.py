@@ -1455,8 +1455,12 @@ def _read_clipboard_image() -> bytes:
             except FileNotFoundError:
                 continue
         raise RuntimeError(
-            "Could not read image from clipboard.\n"
-            "Install wl-clipboard (wl-paste) for Wayland or xclip for X11, then copy an image."
+            "Could not read image from clipboard (no Wayland/X11 display?).\n"
+            "Alternatives:\n"
+            "  hatchery img --file /path/to/image.png   # use a saved file\n"
+            "  cat image.png | hatchery img             # pipe from stdin\n"
+            "  maim | hatchery img                      # pipe a screenshot (Linux)\n"
+            "  screencapture -i - | hatchery img        # pipe a screenshot (macOS)"
         )
 
 
@@ -1480,44 +1484,42 @@ def _resolve_img_task(repo: Path, name: str | None) -> dict:
 @click.option(
     "--file", "file_path", type=click.Path(exists=True), default=None, help="Image file to use instead of clipboard"
 )
-def cmd_img(name: str | None, file_path: str | None) -> None:
-    """Save a clipboard image to the task worktree so the agent can see it.
+@click.option("--clipboard", "use_clipboard", is_flag=True, default=False, help="Read image from system clipboard")
+def cmd_img(name: str | None, file_path: str | None, use_clipboard: bool) -> None:
+    """Save an image to the task worktree so the agent can see it.
 
-    Reads an image from the system clipboard (or --file) and writes it into
-    the task's worktree as a timestamped PNG.  Prints the path to paste into
-    the agent chat — the path works both on the host and inside the container.
+    Image source priority: --file > --clipboard > stdin pipe > clipboard (default).
+    Prints the container path to paste into the agent chat.
     """
     repo, _ = git.git_root_or_cwd()
     meta = _resolve_img_task(repo, name)
     worktree = Path(meta["worktree"])
 
+    pastes_dir = worktree / tasks.PASTES_SUBDIR
+    pastes_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    dest = pastes_dir / f"paste-{timestamp}.png"
+
     if file_path:
-        data = Path(file_path).read_bytes()
+        dest.write_bytes(Path(file_path).read_bytes())
+    elif not (use_clipboard or sys.stdin.isatty()):
+        dest.write_bytes(sys.stdin.buffer.read())
     else:
         try:
-            data = _read_clipboard_image()
+            dest.write_bytes(_read_clipboard_image())
         except RuntimeError as e:
             ui.error(str(e))
             sys.exit(1)
 
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    dest = worktree / f"paste-{timestamp}.png"
-    dest.write_bytes(data)
-
-    # Compute the path the agent sees inside the container.
-    # The repo is mounted at CONTAINER_REPO_ROOT, so the relative path from
-    # the repo root maps directly to the container path.
-    try:
-        rel = dest.relative_to(repo)
-        container_path = f"{tasks.CONTAINER_REPO_ROOT}/{rel}"
-    except ValueError:
-        # Worktree is outside the repo (shouldn't happen in normal usage).
-        container_path = str(dest)
-
     ui.success(f"Image saved: {dest}")
     click.echo()
     click.echo("Paste this path into the agent chat:")
-    click.echo(f"  {container_path}")
+    click.echo(f"  {dest}  (host / no-docker)")
+    try:
+        rel = dest.relative_to(repo)
+        click.echo(f"  {tasks.CONTAINER_REPO_ROOT}/{rel}  (inside container)")
+    except ValueError:
+        pass
 
 
 # ---------------------------------------------------------------------------
