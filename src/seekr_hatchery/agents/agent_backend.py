@@ -189,3 +189,16 @@ class AgentBackend(ABC):
     @abstractmethod
     def dockerfile_install(self) -> str:
         """Dockerfile snippet (RUN block) that installs this agent in the sandbox."""
+
+    # ── Image references ──────────────────────────────────────────────────────
+    #
+    # When hatchery's PTY-proxy captures an image from the user's clipboard, it
+    # saves the file and types the agent's preferred reference for that file
+    # into the agent's stdin.  The default below — a bare absolute path — is
+    # what Codex expects.  Backends whose composer wants markup (e.g. a future
+    # Claude Code backend that prefers ``[Image: /path]``) should override.
+
+    @staticmethod
+    def format_image_reference(path: Path) -> str:
+        """How this agent expects an image path in its prompt stream."""
+        return str(path)
