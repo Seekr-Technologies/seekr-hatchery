@@ -3411,7 +3411,7 @@ class TestCmdImg:
         # With no Docker the suggested path is the real host path, not /repo/...
         # It appears as an indented line after "Paste this path into the agent chat:"
         lines = result.output.splitlines()
-        chat_idx = next(i for i, l in enumerate(lines) if "Paste this path" in l)
+        chat_idx = next(i for i, line in enumerate(lines) if "Paste this path" in line)
         suggested = lines[chat_idx + 1].strip()
         assert suggested.startswith(str(repo))
         assert not suggested.startswith(tasks.CONTAINER_REPO_ROOT)
