@@ -3348,7 +3348,10 @@ class TestCmdImg:
         tasks.save_task(meta)
 
     def _invoke(self, runner, repo, args, **kwargs):
-        with patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)):
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
+            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
+        ):
             return runner.invoke(cli, args, **kwargs)
 
     def test_file_flag_saves_image_to_pastes_dir(self, tmp_path, fake_tasks_db):
@@ -3369,7 +3372,29 @@ class TestCmdImg:
         assert len(saved) == 1
         assert saved[0].read_bytes() == _FAKE_PNG
 
-    def test_file_flag_prints_both_paths(self, tmp_path, fake_tasks_db):
+    def test_prints_container_path_when_docker_available(self, tmp_path, fake_tasks_db):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        worktree = repo / ".hatchery" / "worktrees" / "my-task"
+        worktree.mkdir(parents=True)
+        self._make_task(fake_tasks_db, repo, worktree)
+
+        src = tmp_path / "shot.png"
+        src.write_bytes(_FAKE_PNG)
+
+        runner = CliRunner()
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
+            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=MagicMock()),
+        ):
+            result = runner.invoke(cli, ["img", "my-task", "--file", str(src)])
+
+        assert result.exit_code == 0
+        # Container path starts with CONTAINER_REPO_ROOT, e.g. /repo/.hatchery/pastes/...
+        expected_prefix = tasks.CONTAINER_REPO_ROOT + "/"
+        assert any(line.strip().startswith(expected_prefix) for line in result.output.splitlines())
+
+    def test_prints_host_path_when_no_docker(self, tmp_path, fake_tasks_db):
         repo = tmp_path / "repo"
         repo.mkdir()
         worktree = repo / ".hatchery" / "worktrees" / "my-task"
@@ -3383,9 +3408,13 @@ class TestCmdImg:
         result = self._invoke(runner, repo, ["img", "my-task", "--file", str(src)])
 
         assert result.exit_code == 0
-        assert "(host / no-docker)" in result.output
-        assert "(inside container)" in result.output
-        assert tasks.CONTAINER_REPO_ROOT in result.output
+        # With no Docker the suggested path is the real host path, not /repo/...
+        # It appears as an indented line after "Paste this path into the agent chat:"
+        lines = result.output.splitlines()
+        chat_idx = next(i for i, l in enumerate(lines) if "Paste this path" in l)
+        suggested = lines[chat_idx + 1].strip()
+        assert suggested.startswith(str(repo))
+        assert not suggested.startswith(tasks.CONTAINER_REPO_ROOT)
 
     def test_clipboard_flag_calls_read_clipboard(self, tmp_path, fake_tasks_db):
         repo = tmp_path / "repo"

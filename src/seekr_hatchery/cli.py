@@ -1511,15 +1511,22 @@ def cmd_img(name: str | None, file_path: str | None, use_clipboard: bool) -> Non
             ui.error(str(e))
             sys.exit(1)
 
+    # Detect whether the task runs in Docker so we show the right path.
+    # resolve_runtime returns None when Docker is unavailable or unconfigured.
+    backend = agent.from_kind(meta.get("agent", "CODEX"))
+    runtime = docker.resolve_runtime(repo, worktree, no_docker=False, backend=backend)
+
     ui.success(f"Image saved: {dest}")
     click.echo()
     click.echo("Paste this path into the agent chat:")
-    click.echo(f"  {dest}  (host / no-docker)")
-    try:
-        rel = dest.relative_to(repo)
-        click.echo(f"  {tasks.CONTAINER_REPO_ROOT}/{rel}  (inside container)")
-    except ValueError:
-        pass
+    if runtime:
+        try:
+            rel = dest.relative_to(repo)
+            click.echo(f"  {tasks.CONTAINER_REPO_ROOT}/{rel}")
+        except ValueError:
+            click.echo(f"  {dest}")
+    else:
+        click.echo(f"  {dest}")
 
 
 # ---------------------------------------------------------------------------
