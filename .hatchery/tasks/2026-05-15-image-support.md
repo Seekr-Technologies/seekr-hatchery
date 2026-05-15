@@ -36,7 +36,7 @@ Locked decisions:
 
 - [x] 1. Add `AgentBackend.format_image_reference` default + Codex inherits
 - [x] 2. Add `DockerConfig.clipboard_images` + mount helper; wire into `docker_mounts*`
-- [ ] 3. Implement `clipboard_image.py` — OSC 5522 parser + `PasteInterceptor`
+- [x] 3. Implement `clipboard_image.py` — OSC 5522 parser + `PasteInterceptor`
 - [ ] 4. Implement `pty_proxy.py` — stdlib PTY pump with input/output hooks
 - [ ] 5. Wire `pty_proxy` into `_run_container` (gated on TTY + config)
 - [ ] 6. Tests for all of the above
