@@ -39,8 +39,8 @@ Locked decisions:
 - [x] 3. Implement `clipboard_image.py` — OSC 5522 parser + `PasteInterceptor`
 - [x] 4. Implement `pty_proxy.py` — stdlib PTY pump with input/output hooks
 - [x] 5. Wire `pty_proxy` into `_run_container` (gated on TTY + config)
-- [ ] 6. Tests for all of the above
-- [ ] 7. Docs: `docker.yaml.template` + README "Docker sandbox" section
+- [x] 6. Tests for all of the above
+- [x] 7. Docs: `docker.yaml.template` + README "Docker sandbox" section
 
 ## Summary
 

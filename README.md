@@ -137,6 +137,17 @@ Mount format: `"host_path:container_path[:mode]"` — identical to Docker's own 
 
 The file is tracked in git so every developer on the project gets the same mount configuration. Changes take effect on the next `new` or `resume`.
 
+### Clipboard image paste
+
+The Docker sandbox blocks the agent from reading the host clipboard directly, so hatchery interposes a small PTY proxy on the agent's TTY and uses the [Kitty OSC 5522](https://sw.kovidgoyal.net/kitty/protocol-extensions/) binary clipboard protocol to capture the image on the user's side. On `Ctrl+V` (or `Cmd+V`) in a supported terminal:
+
+1. The proxy sees the bracketed-paste boundary and, if the payload looks binary (empty or contains NUL bytes), emits an OSC 5522 query.
+2. The terminal streams the clipboard image back as base64-chunked OSC frames.
+3. The decoded image is saved under `~/.hatchery/tasks/<repo>/<task>/clipboard/paste-<timestamp>.<ext>` on the host. That directory is bind-mounted at the same absolute path inside the container.
+4. The saved file path is typed into the agent's composer, where Codex (and any future backend) processes it as a normal image attachment.
+
+Supported terminals: **Kitty** (full OSC 5522), **Ghostty** (implementation in progress). Other terminals (iTerm2, gnome-terminal, xterm, …) fall through with a one-time warning — text pastes still work. The feature is enabled by default; set `clipboard_images: false` in `.hatchery/docker.yaml` to skip the PTY wrap entirely.
+
 ### API key security
 
 The real API key never enters the container. Hatchery starts a lightweight **host-side HTTP reverse proxy** on an ephemeral port immediately before launching the container.

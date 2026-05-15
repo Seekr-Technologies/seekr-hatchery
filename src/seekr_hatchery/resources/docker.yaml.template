@@ -42,6 +42,20 @@ mounts:
 # Also uncomment the DinD section in .hatchery/Dockerfile.
 dind: false
 
+# When true, hatchery wraps the agent's TTY with a small PTY proxy and
+# captures clipboard images pasted from the terminal (Ctrl+V / Cmd+V) via
+# the Kitty OSC 5522 binary clipboard protocol. Each captured image is
+# written to a per-task host directory and its path is typed into the
+# agent's composer so the image is referenced like any other file.
+#
+# Supported terminals: Kitty, Ghostty (in progress). Other terminals
+# (xterm, gnome-terminal, iTerm2, …) silently fall through — text pastes
+# still work; only image pastes are unavailable until the terminal adds
+# OSC 5522 support.
+#
+# Set to false to skip the PTY wrap entirely.
+clipboard_images: true
+
 # When true, hatchery scans the worktree (or cwd in --no-worktree mode) on
 # launch, finds symlinks whose targets sit outside the mounted area, and
 # bind-mounts each target at the same absolute host path (read-write) so the
