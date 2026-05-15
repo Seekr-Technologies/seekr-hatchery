@@ -54,6 +54,7 @@ SCHEMA_VERSION = 1
 DB_SCHEMA_VERSION = 1
 
 WORKTREES_SUBDIR = Path(".hatchery") / "worktrees"
+PASTES_SUBDIR = Path(".hatchery") / "pastes"
 DOCKER_CONFIG = Path(".hatchery") / "docker.yaml"
 
 # Inside the container the repo is always mounted here.
@@ -486,26 +487,28 @@ patterns, and gotchas before starting new work.
 
 
 def ensure_gitignore(repo: Path) -> None:
-    """Make sure .hatchery/worktrees/ is gitignored.
+    """Make sure .hatchery/worktrees/ and .hatchery/pastes/ are gitignored.
 
     Without this, git status in the main repo will show every file inside every
     worktree as untracked, which is very noisy.
     """
     gitignore = repo / ".gitignore"
-    entry = str(WORKTREES_SUBDIR) + "/"
+    entries = [str(WORKTREES_SUBDIR) + "/", str(PASTES_SUBDIR) + "/"]
 
+    existing_lines: list[str] = []
     if gitignore.exists():
-        lines = gitignore.read_text().splitlines()
-        if any(line.strip() == entry for line in lines):
-            logger.debug("gitignore entry '%s' already present", entry)
-            return  # already present
-        content = gitignore.read_text()
-        sep = "" if content.endswith("\n") else "\n"
-        gitignore.write_text(content + sep + entry + "\n")
-    else:
-        gitignore.write_text(entry + "\n")
+        existing_lines = gitignore.read_text().splitlines()
 
-    ui.info(f"  Added {entry} to .gitignore")
+    missing = [e for e in entries if not any(line.strip() == e for line in existing_lines)]
+    if not missing:
+        logger.debug("gitignore entries already present")
+        return
+
+    content = gitignore.read_text() if gitignore.exists() else ""
+    sep = "" if not content or content.endswith("\n") else "\n"
+    gitignore.write_text(content + sep + "\n".join(missing) + "\n")
+    for entry in missing:
+        ui.info(f"  Added {entry} to .gitignore")
 
 
 def open_for_editing(path: Path) -> None:

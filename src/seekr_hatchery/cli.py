@@ -1436,6 +1436,121 @@ def cmd_shell(name: str) -> None:
     subprocess.run([shell], cwd=worktree)
 
 
+def _read_clipboard_image() -> bytes:
+    """Read PNG image bytes from the host clipboard. Raises RuntimeError on failure."""
+    import tempfile
+
+    if sys.platform == "darwin":
+        # macOS: osascript reads clipboard PNG data directly to a temp file.
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            tmp = f.name
+        try:
+            script = (
+                f'set theFile to POSIX file "{tmp}"\n'
+                "set theData to the clipboard as \u00abclass PNGf\u00bb\n"
+                "set fileRef to open for access theFile with write permission\n"
+                "write theData to fileRef\n"
+                "close access fileRef"
+            )
+            result = subprocess.run(["osascript", "-e", script], capture_output=True)
+            if result.returncode != 0:
+                raise RuntimeError(
+                    "Could not read image from clipboard. Copy an image first.\n"
+                    f"(osascript: {result.stderr.decode().strip()})"
+                )
+            data = open(tmp, "rb").read()
+            if not data:
+                raise RuntimeError("Clipboard does not contain an image. Copy an image first.")
+            return data
+        finally:
+            os.unlink(tmp)
+    else:
+        # Linux: try wl-paste (Wayland) then xclip (X11).
+        for cmd in (
+            ["wl-paste", "--type", "image/png"],
+            ["xclip", "-selection", "clipboard", "-t", "image/png", "-o"],
+        ):
+            try:
+                result = subprocess.run(cmd, capture_output=True)
+                if result.returncode == 0 and result.stdout:
+                    return result.stdout
+            except FileNotFoundError:
+                continue
+        raise RuntimeError(
+            "Could not read image from clipboard (no Wayland/X11 display?).\n"
+            "Alternatives:\n"
+            "  hatchery img --file /path/to/image.png   # use a saved file\n"
+            "  cat image.png | hatchery img             # pipe from stdin\n"
+            "  maim | hatchery img                      # pipe a screenshot (Linux)\n"
+            "  screencapture -i - | hatchery img        # pipe a screenshot (macOS)"
+        )
+
+
+def _resolve_img_task(repo: Path, name: str | None) -> dict:
+    """Resolve task meta for the img command; auto-select if exactly one task is in-progress."""
+    if name:
+        return tasks.load_task(repo, name)
+    running = [t for t in tasks.repo_tasks_for_current_repo(repo) if t.get("status") in ("in-progress", "running")]
+    if len(running) == 1:
+        return running[0]
+    if not running:
+        ui.error("No in-progress tasks found. Specify a task name.")
+    else:
+        names = ", ".join(t["name"] for t in running)
+        ui.error(f"Multiple tasks in progress ({names}). Specify one: hatchery img <name>")
+    sys.exit(1)
+
+
+@cli.command("img")
+@click.argument("name", required=False, default=None, type=TASK_NAME)
+@click.option(
+    "--file", "file_path", type=click.Path(exists=True), default=None, help="Image file to use instead of clipboard"
+)
+@click.option("--clipboard", "use_clipboard", is_flag=True, default=False, help="Read image from system clipboard")
+def cmd_img(name: str | None, file_path: str | None, use_clipboard: bool) -> None:
+    """Save an image to the task worktree so the agent can see it.
+
+    Image source priority: --file > --clipboard > stdin pipe > clipboard (default).
+    Prints the container path to paste into the agent chat.
+    """
+    repo, _ = git.git_root_or_cwd()
+    meta = _resolve_img_task(repo, name)
+    worktree = Path(meta["worktree"])
+
+    pastes_dir = worktree / tasks.PASTES_SUBDIR
+    pastes_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    dest = pastes_dir / f"paste-{timestamp}.png"
+
+    if file_path:
+        dest.write_bytes(Path(file_path).read_bytes())
+    elif not (use_clipboard or sys.stdin.isatty()):
+        dest.write_bytes(sys.stdin.buffer.read())
+    else:
+        try:
+            dest.write_bytes(_read_clipboard_image())
+        except RuntimeError as e:
+            ui.error(str(e))
+            sys.exit(1)
+
+    # Detect whether the task runs in Docker so we show the right path.
+    # resolve_runtime returns None when Docker is unavailable or unconfigured.
+    backend = agent.from_kind(meta.get("agent", "CODEX"))
+    runtime = docker.resolve_runtime(repo, worktree, no_docker=False, backend=backend)
+
+    ui.success(f"Image saved: {dest}")
+    click.echo()
+    click.echo("Paste this path into the agent chat:")
+    if runtime:
+        try:
+            rel = dest.relative_to(repo)
+            click.echo(f"  {tasks.CONTAINER_REPO_ROOT}/{rel}")
+        except ValueError:
+            click.echo(f"  {dest}")
+    else:
+        click.echo(f"  {dest}")
+
+
 # ---------------------------------------------------------------------------
 # Config command group
 # ---------------------------------------------------------------------------

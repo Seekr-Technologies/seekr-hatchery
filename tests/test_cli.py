@@ -60,6 +60,7 @@ class TestHelp:
             "delete",
             "done",
             "exec",
+            "img",
             "ls | list",
             "new",
             "resume",
@@ -3379,3 +3380,165 @@ class TestLaunchFinalizeInclude:
         assert mock_launch.called
         kwargs = mock_launch.call_args[1]
         assert entry_b in kwargs.get("include_repos", [])
+
+
+# ---------------------------------------------------------------------------
+# cmd_img()
+# ---------------------------------------------------------------------------
+
+_IMG_REPO = Path("/img/repo")
+_FAKE_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16  # minimal PNG-like header
+
+
+class TestCmdImg:
+    """Tests for `hatchery img` — file load, clipboard, and stdin paths."""
+
+    def _make_task(self, fake_tasks_db: Path, repo: Path, worktree: Path) -> None:
+        meta = {
+            "name": "my-task",
+            "branch": "hatchery/my-task",
+            "worktree": str(worktree),
+            "repo": str(repo),
+            "status": "in-progress",
+            "created": "2026-01-15T10:00:00",
+            "session_id": "sid-img",
+            "schema_version": 1,
+        }
+        tasks.save_task(meta)
+
+    def _invoke(self, runner, repo, args, **kwargs):
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
+            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
+        ):
+            return runner.invoke(cli, args, **kwargs)
+
+    def test_file_flag_saves_image_to_pastes_dir(self, tmp_path, fake_tasks_db):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        worktree = repo / ".hatchery" / "worktrees" / "my-task"
+        worktree.mkdir(parents=True)
+        self._make_task(fake_tasks_db, repo, worktree)
+
+        src = tmp_path / "shot.png"
+        src.write_bytes(_FAKE_PNG)
+
+        runner = CliRunner()
+        result = self._invoke(runner, repo, ["img", "my-task", "--file", str(src)])
+
+        assert result.exit_code == 0
+        saved = list((worktree / tasks.PASTES_SUBDIR).glob("paste-*.png"))
+        assert len(saved) == 1
+        assert saved[0].read_bytes() == _FAKE_PNG
+
+    def test_prints_container_path_when_docker_available(self, tmp_path, fake_tasks_db):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        worktree = repo / ".hatchery" / "worktrees" / "my-task"
+        worktree.mkdir(parents=True)
+        self._make_task(fake_tasks_db, repo, worktree)
+
+        src = tmp_path / "shot.png"
+        src.write_bytes(_FAKE_PNG)
+
+        runner = CliRunner()
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
+            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=MagicMock()),
+        ):
+            result = runner.invoke(cli, ["img", "my-task", "--file", str(src)])
+
+        assert result.exit_code == 0
+        # Container path starts with CONTAINER_REPO_ROOT, e.g. /repo/.hatchery/pastes/...
+        expected_prefix = tasks.CONTAINER_REPO_ROOT + "/"
+        assert any(line.strip().startswith(expected_prefix) for line in result.output.splitlines())
+
+    def test_prints_host_path_when_no_docker(self, tmp_path, fake_tasks_db):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        worktree = repo / ".hatchery" / "worktrees" / "my-task"
+        worktree.mkdir(parents=True)
+        self._make_task(fake_tasks_db, repo, worktree)
+
+        src = tmp_path / "shot.png"
+        src.write_bytes(_FAKE_PNG)
+
+        runner = CliRunner()
+        result = self._invoke(runner, repo, ["img", "my-task", "--file", str(src)])
+
+        assert result.exit_code == 0
+        # With no Docker the suggested path is the real host path, not /repo/...
+        # It appears as an indented line after "Paste this path into the agent chat:"
+        lines = result.output.splitlines()
+        chat_idx = next(i for i, line in enumerate(lines) if "Paste this path" in line)
+        suggested = lines[chat_idx + 1].strip()
+        assert suggested.startswith(str(repo))
+        assert not suggested.startswith(tasks.CONTAINER_REPO_ROOT)
+
+    def test_clipboard_flag_calls_read_clipboard(self, tmp_path, fake_tasks_db):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        worktree = repo / ".hatchery" / "worktrees" / "my-task"
+        worktree.mkdir(parents=True)
+        self._make_task(fake_tasks_db, repo, worktree)
+
+        runner = CliRunner()
+        with patch("seekr_hatchery.cli._read_clipboard_image", return_value=_FAKE_PNG) as mock_cb:
+            result = self._invoke(runner, repo, ["img", "my-task", "--clipboard"])
+
+        assert result.exit_code == 0
+        mock_cb.assert_called_once()
+        saved = list((worktree / tasks.PASTES_SUBDIR).glob("paste-*.png"))
+        assert len(saved) == 1
+        assert saved[0].read_bytes() == _FAKE_PNG
+
+    def test_clipboard_error_exits_nonzero(self, tmp_path, fake_tasks_db):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        worktree = repo / ".hatchery" / "worktrees" / "my-task"
+        worktree.mkdir(parents=True)
+        self._make_task(fake_tasks_db, repo, worktree)
+
+        runner = CliRunner()
+        with patch(
+            "seekr_hatchery.cli._read_clipboard_image",
+            side_effect=RuntimeError("no display"),
+        ):
+            result = self._invoke(runner, repo, ["img", "my-task", "--clipboard"])
+
+        assert result.exit_code == 1
+        assert "no display" in result.output
+
+    def test_auto_selects_single_in_progress_task(self, tmp_path, fake_tasks_db):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        worktree = repo / ".hatchery" / "worktrees" / "my-task"
+        worktree.mkdir(parents=True)
+        self._make_task(fake_tasks_db, repo, worktree)
+
+        src = tmp_path / "shot.png"
+        src.write_bytes(_FAKE_PNG)
+
+        runner = CliRunner()
+        # No task name supplied — should auto-detect the only in-progress task
+        result = self._invoke(runner, repo, ["img", "--file", str(src)])
+
+        assert result.exit_code == 0
+        saved = list((worktree / tasks.PASTES_SUBDIR).glob("paste-*.png"))
+        assert len(saved) == 1
+
+    def test_stdin_pipe_saves_image(self, tmp_path, fake_tasks_db):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        worktree = repo / ".hatchery" / "worktrees" / "my-task"
+        worktree.mkdir(parents=True)
+        self._make_task(fake_tasks_db, repo, worktree)
+
+        runner = CliRunner()
+        # CliRunner with input= simulates piped stdin (non-TTY)
+        result = self._invoke(runner, repo, ["img", "my-task"], input=_FAKE_PNG)
+
+        assert result.exit_code == 0
+        saved = list((worktree / tasks.PASTES_SUBDIR).glob("paste-*.png"))
+        assert len(saved) == 1
+        assert saved[0].read_bytes() == _FAKE_PNG
