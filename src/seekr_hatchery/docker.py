@@ -21,8 +21,10 @@ from pydantic import BaseModel, ConfigDict, field_validator
 from pydantic import ValidationError as _PydanticValidationError
 
 import seekr_hatchery.agents as agent
+import seekr_hatchery.clipboard_image as clipboard_image
 import seekr_hatchery.kubectl_proxy as _kubectl_proxy
 import seekr_hatchery.proxy as proxy
+import seekr_hatchery.pty_proxy as pty_proxy
 import seekr_hatchery.tasks as tasks
 import seekr_hatchery.ui as ui
 from seekr_hatchery.includes import IncludeEntry, IncludeItem
@@ -133,6 +135,7 @@ class DockerConfig(BaseModel):
     include: list[str | IncludeItem] = []
     dind: bool = False
     follow_symlinks: bool = False
+    clipboard_images: bool = True
     cap_add: list[str] = []
     kubernetes: KubectlConfig | None = None
 
@@ -792,6 +795,8 @@ def docker_mounts(
     mounts.extend(_default_home_mounts())
     mounts.extend(backend.home_mounts(session_dir))
     mounts.extend(_construct_docker_mounts(config))
+    if config.clipboard_images:
+        mounts.append(_clipboard_image_mount(session_dir))
     if config.follow_symlinks:
         mounts.extend(_construct_symlink_mounts(worktree, mounts))
     return mounts
@@ -815,6 +820,8 @@ def docker_mounts_no_worktree(
         + backend.home_mounts(session_dir)
         + _construct_docker_mounts(config)
     )
+    if config.clipboard_images:
+        mounts.append(_clipboard_image_mount(session_dir))
     if config.follow_symlinks:
         mounts.extend(_construct_symlink_mounts(cwd, mounts))
     return mounts
@@ -894,6 +901,40 @@ def _default_home_mounts() -> list[str]:
     if uv_cache.exists():
         mounts.append(f"{uv_cache}:{agent.CONTAINER_HOME}/.cache/uv:rw")
     return mounts
+
+
+def clipboard_image_dir(session_dir: Path) -> Path:
+    """Per-task host directory where pasted clipboard images are saved.
+
+    Bind-mounted at the same absolute path inside the container so a file
+    written here by the host-side PTY proxy resolves identically when the
+    agent reads it.
+    """
+    return session_dir / "clipboard"
+
+
+def _clipboard_image_mount(session_dir: Path) -> str:
+    """Return the -v flag for the per-task clipboard images directory.
+
+    Mounts at the identical host path inside the container so the file path
+    typed into the agent's stdin (a host path) resolves byte-for-byte.
+    """
+    d = clipboard_image_dir(session_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    return f"{d}:{d}:rw"
+
+
+def remove_clipboard_dir(session_dir: Path) -> None:
+    """Delete the per-task clipboard images directory (idempotent, swallows errors).
+
+    Pasted screenshots are typically 100 KB – 5 MB; removing them when a task
+    is marked complete or deleted keeps `~/.hatchery/tasks/` from growing
+    unbounded. Resume flows (archive) intentionally do NOT call this — the
+    files may be referenced by saved conversation history.
+    """
+    d = clipboard_image_dir(session_dir)
+    if d.exists():
+        shutil.rmtree(d, ignore_errors=True)
 
 
 # ── Container execution ───────────────────────────────────────────────────────
@@ -1021,6 +1062,7 @@ def _run_container(
     container_name: str | None = None,
     proxy_port: int | None = None,
     add_host_gateway: bool = False,
+    paste_interceptor: clipboard_image.PasteInterceptor | None = None,
 ) -> subprocess.CompletedProcess[str] | None:
     """Assemble and execute the container run command for the given agent session.
 
@@ -1115,10 +1157,10 @@ def _run_container(
     cmd += agent_cmd
 
     logger.debug(f"Launching {runtime.binary} container image={image!r} name={name!r} workdir={workdir!r}")
-    result = subprocess.run(cmd)
-    if result.returncode != 0:
-        ui.warn(f"{runtime.binary} container exited with code {result.returncode}")
-        if runtime == Runtime.PODMAN and result.returncode == 137:
+    returncode = _exec_agent(cmd, paste_interceptor)
+    if returncode != 0:
+        ui.warn(f"{runtime.binary} container exited with code {returncode}")
+        if runtime == Runtime.PODMAN and returncode == 137:
             ui.info(
                 "Hint: the container was killed (OOM). Try increasing the Podman machine memory:\n"
                 "  podman machine stop\n"
@@ -1126,6 +1168,18 @@ def _run_container(
                 "  podman machine start"
             )
     return None
+
+
+def _exec_agent(cmd: list[str], paste_interceptor: clipboard_image.PasteInterceptor | None) -> int:
+    """Run the agent's ``docker run`` command, optionally under the PTY proxy.
+
+    The PTY-proxy path activates only when a paste interceptor was provided
+    AND stdin is a real TTY.  Non-TTY callers (CI, captured stdin) get the
+    plain ``subprocess.run`` path so output behaviour stays unchanged.
+    """
+    if paste_interceptor is not None and sys.stdin.isatty():
+        return pty_proxy.run_with_pty(cmd, paste_interceptor)
+    return subprocess.run(cmd).returncode
 
 
 def launch_docker(
@@ -1213,7 +1267,22 @@ def launch_docker(
             container_name=task_container_name(repo, name),
             proxy_port=api_proxy.port if api_proxy else None,
             add_host_gateway=bool(kubectl_mounts),
+            paste_interceptor=_make_paste_interceptor(backend, session_dir, config),
         )
+
+
+def _make_paste_interceptor(
+    backend: agent.AgentBackend,
+    session_dir: Path,
+    config: DockerConfig,
+) -> clipboard_image.PasteInterceptor | None:
+    """Build the paste interceptor for an agent launch, or ``None`` when disabled."""
+    if not config.clipboard_images:
+        return None
+    return clipboard_image.PasteInterceptor(
+        clipboard_image_dir(session_dir),
+        backend.format_image_reference,
+    )
 
 
 def launch_docker_no_worktree(
@@ -1278,6 +1347,7 @@ def launch_docker_no_worktree(
             container_name=task_container_name(cwd, name),
             proxy_port=api_proxy.port if api_proxy else None,
             add_host_gateway=bool(kubectl_mounts),
+            paste_interceptor=_make_paste_interceptor(backend, session_dir, config),
         )
 
 
