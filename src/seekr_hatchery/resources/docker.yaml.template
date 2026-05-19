@@ -42,6 +42,10 @@ mounts:
 # Also uncomment the DinD section in .hatchery/Dockerfile.
 dind: false
 
+# When true, hatchery wraps the agent's TTY with a small PTY proxy and
+# captures and forwards clipboard images pasted from the terminal (Ctrl+V / Cmd+V).
+# clipboard_images: true
+
 # When true, hatchery scans the worktree (or cwd in --no-worktree mode) on
 # launch, finds symlinks whose targets sit outside the mounted area, and
 # bind-mounts each target at the same absolute host path (read-write) so the

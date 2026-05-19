@@ -1,6 +1,7 @@
 """Unit tests for CodexBackend."""
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -339,3 +340,14 @@ class TestDockerfileInstall:
         snippet = agent.CODEX.dockerfile_install
         assert "npm" in snippet
         assert "@openai/codex" in snippet
+
+
+# ---------------------------------------------------------------------------
+# format_image_reference
+# ---------------------------------------------------------------------------
+
+
+class TestFormatImageReference:
+    def test_returns_raw_absolute_path(self):
+        # Codex's TUI composer accepts a bare absolute path — no markup needed.
+        assert agent.CODEX.format_image_reference(Path("/tmp/clip.png")) == "/tmp/clip.png"

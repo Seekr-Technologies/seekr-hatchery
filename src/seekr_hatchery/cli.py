@@ -263,6 +263,7 @@ def _do_mark_done(name: str, repo: Path, worktree: Path) -> None:
     meta["status"] = "complete"
     meta["completed"] = datetime.now().isoformat()
     tasks.save_task(meta)
+    _cleanup_task(repo, name)
 
     if not no_worktree:
         ui.info(f"Branch retained: {meta['branch']}")
@@ -281,6 +282,16 @@ _WRAP_UP_PROMPT = (
     "If work remains unfinished, tell the user what is still outstanding and ask "
     "whether they want to continue working or close the task out anyway."
 )
+
+
+def _cleanup_task(repo: Path, name: str) -> None:
+    """Remove per-task ephemeral state on terminal lifecycle transitions.
+
+    Called from `_do_mark_done`, `_chat_post_exit`, and `_do_delete`.
+    Currently just the clipboard image cache; future per-task ephemeral
+    state (e.g. scratch dirs, agent caches) should be wired in here.
+    """
+    docker.remove_clipboard_dir(tasks.task_session_dir(repo, name))
 
 
 def _do_delete(name: str, repo: Path, worktree: Path, meta: dict, *, confirmed: bool = False) -> None:
@@ -319,6 +330,7 @@ def _do_delete(name: str, repo: Path, worktree: Path, meta: dict, *, confirmed: 
                 ui.info("Aborted.")
                 return
 
+    _cleanup_task(repo, name)
     tasks.task_db_path(repo, name).unlink(missing_ok=True)
     ui.success(f"Task '{name}' deleted.")
 
@@ -686,6 +698,7 @@ def _chat_post_exit(name: str, repo: Path) -> None:
         meta["status"] = "complete"
         meta["completed"] = datetime.now().isoformat()
         tasks.save_task(meta)
+        _cleanup_task(repo, name)
         ui.success(f"Chat '{name}' marked complete.")
     else:
         ui.info(f"Chat '{name}' left in-progress. Resume with: hatchery resume {name}")

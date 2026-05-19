@@ -1187,3 +1187,88 @@ class TestNoWorktreeFollowSymlinks:
 
         target = external.resolve()
         assert f"{target}:{target}:rw" in mounts
+
+
+# ---------------------------------------------------------------------------
+# clipboard_images
+# ---------------------------------------------------------------------------
+
+
+class TestDockerConfigClipboardImages:
+    def test_defaults_to_true(self):
+        assert docker.DockerConfig().clipboard_images is True
+
+    def test_parses_false(self):
+        assert docker.DockerConfig(clipboard_images=False).clipboard_images is False
+
+
+class TestClipboardImageMount:
+    def _make_backend(self):
+        b = MagicMock()
+        b.home_mounts = MagicMock(return_value=[])
+        return b
+
+    def test_no_worktree_enabled_adds_identical_mount(self, tmp_path, monkeypatch):
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        session_dir = tmp_path / "session"
+        session_dir.mkdir()
+        monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
+
+        cfg = docker.DockerConfig(clipboard_images=True)
+        mounts = docker.docker_mounts_no_worktree(cwd, self._make_backend(), session_dir, cfg)
+
+        clip = session_dir / "clipboard"
+        assert f"{clip}:{clip}:rw" in mounts
+        # And the directory was actually created on the host.
+        assert clip.is_dir()
+
+    def test_no_worktree_disabled_omits_mount(self, tmp_path, monkeypatch):
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        session_dir = tmp_path / "session"
+        session_dir.mkdir()
+        monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
+
+        cfg = docker.DockerConfig(clipboard_images=False)
+        mounts = docker.docker_mounts_no_worktree(cwd, self._make_backend(), session_dir, cfg)
+
+        clip = session_dir / "clipboard"
+        assert not any(f"{clip}:" in m for m in mounts)
+        # And we did not create the directory.
+        assert not clip.exists()
+
+
+class TestMakePasteInterceptor:
+    def test_enabled_returns_interceptor_wired_to_session_dir(self, tmp_path):
+        backend = MagicMock()
+        backend.format_image_reference = MagicMock(side_effect=lambda p: str(p))
+        cfg = docker.DockerConfig(clipboard_images=True)
+        pi = docker._make_paste_interceptor(backend, tmp_path, cfg)
+        assert pi is not None
+        # And the interceptor writes to the per-task clipboard dir.
+        assert pi._target_dir == docker.clipboard_image_dir(tmp_path)
+
+    def test_disabled_returns_none(self, tmp_path):
+        backend = MagicMock()
+        cfg = docker.DockerConfig(clipboard_images=False)
+        assert docker._make_paste_interceptor(backend, tmp_path, cfg) is None
+
+
+class TestRemoveClipboardDir:
+    def test_removes_existing_directory(self, tmp_path):
+        clip = docker.clipboard_image_dir(tmp_path)
+        clip.mkdir(parents=True)
+        (clip / "paste-1.png").write_bytes(b"x")
+        (clip / "paste-2.png").write_bytes(b"y")
+
+        docker.remove_clipboard_dir(tmp_path)
+
+        assert not clip.exists()
+        # session_dir itself is preserved — only the clipboard subdir was cleaned.
+        assert tmp_path.exists()
+
+    def test_idempotent_when_dir_absent(self, tmp_path):
+        # No clipboard subdir was ever created.
+        docker.remove_clipboard_dir(tmp_path)  # must not raise
+        assert not docker.clipboard_image_dir(tmp_path).exists()

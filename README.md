@@ -137,6 +137,10 @@ Mount format: `"host_path:container_path[:mode]"` — identical to Docker's own 
 
 The file is tracked in git so every developer on the project gets the same mount configuration. Changes take effect on the next `new` or `resume`.
 
+### Clipboard image paste
+
+Press **Ctrl-V** in the agent's TUI to attach an image from your host clipboard to the next prompt. Works on macOS, and on Linux with `wl-paste` or `xclip` installed — terminal-agnostic. Enabled by default; set `clipboard_images: false` in `.hatchery/docker.yaml` to disable.
+
 ### API key security
 
 The real API key never enters the container. Hatchery starts a lightweight **host-side HTTP reverse proxy** on an ephemeral port immediately before launching the container.

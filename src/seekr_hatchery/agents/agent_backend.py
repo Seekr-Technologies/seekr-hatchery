@@ -189,3 +189,17 @@ class AgentBackend(ABC):
     @abstractmethod
     def dockerfile_install(self) -> str:
         """Dockerfile snippet (RUN block) that installs this agent in the sandbox."""
+
+    @staticmethod
+    def format_image_reference(path: Path) -> str:
+        """How this agent expects an image path in its prompt stream.
+
+        When hatchery's PTY proxy captures an image from the user's
+        clipboard it saves the file and types the agent's preferred
+        reference into the agent's stdin.  The default — a bare
+        absolute path — is what Codex's TUI composer expects: it
+        recognises any bare path as a file attachment and renders it
+        as an ``[Image #N]`` chip.  Backends whose composer expects a
+        different syntax should override.
+        """
+        return str(path)
