@@ -126,7 +126,7 @@ def _pump(
             try:
                 chunk = os.read(master_fd, _READ_CHUNK)
             except OSError as exc:
-                # EIO on master_fd means the child closed its slave.
+                # EIO on master_fd means the child closed its worker end.
                 if exc.errno == errno.EIO:
                     chunk = b""
                 else:
@@ -157,6 +157,20 @@ def _set_winsize(master_fd: int, size: bytes | None) -> None:
         pass
 
 
+def _attach_ctty() -> None:
+    """preexec_fn: make the worker PTY the child's controlling terminal.
+
+    Runs in the forked child after subprocess has dup'd worker_fd onto
+    stdio (so fd 0 is the worker end) and before exec.  ``setsid()``
+    drops any inherited controlling TTY; ``TIOCSCTTY`` claims the worker
+    end as the new one.  Without this, ``TIOCSWINSZ`` on the master has
+    no process group to signal and the child never receives SIGWINCH —
+    the gap between ``pty.openpty() + Popen`` and ``forkpty(3)``.
+    """
+    os.setsid()
+    fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
+
 def run_with_pty(cmd: list[str], interceptor: PasteInputSink) -> int:
     """Run *cmd* under a fresh PTY with stdin/stdout interposed.
 
@@ -164,8 +178,14 @@ def run_with_pty(cmd: list[str], interceptor: PasteInputSink) -> int:
     that ``sys.stdin`` is a TTY — running this when it isn't would put
     the terminal into raw mode pointlessly.
     """
-    # 1. Allocate PTY pair.
-    master_fd, slave_fd = pty.openpty()
+    # 1. Allocate PTY pair.  Put the worker end in raw mode immediately —
+    #    the kernel hands back a fresh PTY in cooked mode (OPOST/ONLCR/ECHO/
+    #    ICANON), but this end is a byte transport between two processes
+    #    that each manage their own line discipline.  Cooked-mode processing
+    #    here injects phantom \r before every child-emitted \n and echoes
+    #    parent writes back into the output stream.
+    master_fd, worker_fd = pty.openpty()
+    tty.setraw(worker_fd)
     initial_size = _initial_winsize(sys.stdin.fileno())
     _set_winsize(master_fd, initial_size)
 
@@ -197,21 +217,21 @@ def run_with_pty(cmd: list[str], interceptor: PasteInputSink) -> int:
     try:
         child = subprocess.Popen(
             cmd,
-            stdin=slave_fd,
-            stdout=slave_fd,
-            stderr=slave_fd,
-            start_new_session=True,
+            stdin=worker_fd,
+            stdout=worker_fd,
+            stderr=worker_fd,
+            preexec_fn=_attach_ctty,
             close_fds=True,
         )
     except Exception:
         os.close(master_fd)
-        os.close(slave_fd)
+        os.close(worker_fd)
         signal.signal(signal.SIGWINCH, prev_winch)
         _restore_termios()
         raise
 
-    # Drop the slave end in the parent — the child owns it now.
-    os.close(slave_fd)
+    # Drop the worker end in the parent — the child owns it now.
+    os.close(worker_fd)
 
     try:
         _pump(
