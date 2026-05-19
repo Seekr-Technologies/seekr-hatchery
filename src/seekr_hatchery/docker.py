@@ -279,8 +279,6 @@ def dockerfile_path(base: Path, backend: agent.AgentBackend) -> Path:
     return base / ".hatchery" / f"Dockerfile.{backend.kind.lower()}"
 
 
-
-
 def docker_available() -> bool:
     """Return True if the Docker daemon is reachable."""
     logger.debug("Checking Docker availability")
@@ -760,9 +758,7 @@ def build_mounts(
             mounts.extend(_construct_symlink_mounts(meta.worktree_path, mounts))
 
     if include_entries:
-        mounts.extend(
-            _docker_mounts_includes(include_entries, meta.name, session_dir, no_worktree=meta.no_worktree)
-        )
+        mounts.extend(_docker_mounts_includes(include_entries, meta.name, session_dir, no_worktree=meta.no_worktree))
     return mounts
 
 
@@ -784,7 +780,10 @@ def docker_mounts(
     """
     meta = SessionMeta(name=name, repo=str(repo), worktree=str(worktree), no_worktree=False)
     return build_mounts(
-        meta, backend, session_dir, config,
+        meta,
+        backend,
+        session_dir,
+        config,
         git_sentinel_files=git_sentinel_files,
         worktree_git_ptr=worktree_git_ptr,
     )
@@ -803,8 +802,6 @@ def docker_mounts_no_worktree(
     """
     meta = SessionMeta(name="-", repo=str(cwd), worktree=str(cwd), no_worktree=True)
     return build_mounts(meta, backend, session_dir, config)
-
-
 
 
 def _docker_mounts_includes(
@@ -1242,7 +1239,10 @@ def run_session(
     build_docker_image(meta.repo_path, build_root, meta.name, backend, runtime=runtime, no_cache=no_cache)
     image = meta.image_name
     mounts = build_mounts(
-        meta, backend, session_dir, config,
+        meta,
+        backend,
+        session_dir,
+        config,
         git_sentinel_files=git_sentinels,
         worktree_git_ptr=git_ptr,
         include_entries=include_entries,
@@ -1256,9 +1256,17 @@ def run_session(
     ):
         mounts.extend(kubectl_mounts)
         _run_container(
-            image, mounts, container_workdir, container_repo, meta.name,
-            mutator, proxy_token, agent_cmd,
-            backend=backend, dind=config.dind, runtime=runtime,
+            image,
+            mounts,
+            container_workdir,
+            container_repo,
+            meta.name,
+            mutator,
+            proxy_token,
+            agent_cmd,
+            backend=backend,
+            dind=config.dind,
+            runtime=runtime,
             cap_add=config.cap_add,
             container_name=meta.container_name,
             proxy_port=api_proxy.port if api_proxy else None,
@@ -1281,8 +1289,13 @@ def launch_docker(
     """Shim: delegate to run_session for worktree mode."""
     meta = SessionMeta(name=name, repo=str(repo), worktree=str(worktree), no_worktree=False)
     run_session(
-        meta, backend, agent_cmd, config,
-        runtime=runtime, no_cache=no_cache, include_entries=include_repos,
+        meta,
+        backend,
+        agent_cmd,
+        config,
+        runtime=runtime,
+        no_cache=no_cache,
+        include_entries=include_repos,
     )
 
 
@@ -1299,8 +1312,13 @@ def launch_docker_no_worktree(
     """Shim: delegate to run_session for no-worktree mode."""
     meta = SessionMeta(name=name, repo=str(cwd), worktree=str(cwd), no_worktree=True)
     run_session(
-        meta, backend, agent_cmd, config,
-        runtime=runtime, no_cache=no_cache, include_entries=include_repos,
+        meta,
+        backend,
+        agent_cmd,
+        config,
+        runtime=runtime,
+        no_cache=no_cache,
+        include_entries=include_repos,
     )
 
 

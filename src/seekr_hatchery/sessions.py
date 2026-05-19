@@ -103,6 +103,7 @@ Your workflow:
    This file will be merged into main as the permanent record of this task.
 """
 
+
 def unique_basename(name: str, used: set[str]) -> str:
     """Return *name* if not in *used*, else *name*-1, *name*-2, … — first unused variant.
 

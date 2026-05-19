@@ -377,9 +377,7 @@ class TestSessionMetaRoundTrip:
         assert "completed" not in on_disk
 
     def test_save_writes_completed_when_set(self, fake_tasks_db):
-        meta = sessions.SessionMeta(
-            name="e", repo="/r", worktree="/r/w", completed="2026-01-01T00:00:00"
-        )
+        meta = sessions.SessionMeta(name="e", repo="/r", worktree="/r/w", completed="2026-01-01T00:00:00")
         sessions.save(meta)
         on_disk = json.loads(sessions.task_db_path(Path("/r"), "e").read_text())
         assert on_disk["completed"] == "2026-01-01T00:00:00"
