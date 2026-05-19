@@ -25,10 +25,11 @@ import seekr_hatchery.clipboard_image as clipboard_image
 import seekr_hatchery.kubectl_proxy as _kubectl_proxy
 import seekr_hatchery.proxy as proxy
 import seekr_hatchery.pty_proxy as pty_proxy
-import seekr_hatchery.tasks as tasks
+import seekr_hatchery.sessions as sessions
 import seekr_hatchery.ui as ui
 from seekr_hatchery.includes import IncludeEntry, IncludeItem
 from seekr_hatchery.kubectl_proxy import KubectlConfig
+from seekr_hatchery.models import SessionMeta
 
 logger = logging.getLogger("hatchery")
 
@@ -203,41 +204,7 @@ def parse_docker_include_entry(entry: str | IncludeItem) -> tuple[str, str]:
     return entry.path, entry.mode
 
 
-# ── Authentication ────────────────────────────────────────────────────────────
-
-
-def get_or_create_proxy_token(repo: Path, name: str) -> str:
-    """Return the stable proxy token for this task, creating it on first call.
-
-    The token is persisted in the session directory so it stays constant
-    across container restarts.  A stable token means the agent's cached
-    credential in the per-task config directory continues to match the
-    API key env var on subsequent launches — no repeated dialogs.
-    """
-    session_dir = tasks.task_session_dir(repo, name)
-    session_dir.mkdir(parents=True, exist_ok=True)
-    token_file = session_dir / "proxy_token"
-    if token_file.exists():
-        token = token_file.read_text().strip()
-        logger.debug("Reusing proxy token for task %r", name)
-        return token
-    token = str(uuid.uuid4())
-    token_file.write_text(token)
-    logger.debug("Created proxy token for task %r", name)
-    return token
-
-
 # ── kubectl helpers ───────────────────────────────────────────────────────────
-
-
-def _get_or_create_kubectl_token(session_dir: Path) -> str:
-    """Return the stable kubectl RBAC proxy token, creating it on first call."""
-    token_file = session_dir / "kubectl_proxy_token"
-    if token_file.exists():
-        return token_file.read_text().strip()
-    token = str(uuid.uuid4())
-    token_file.write_text(token)
-    return token
 
 
 @contextmanager
@@ -279,7 +246,7 @@ def _kubectl_context(
         yield []
         return
 
-    kubectl_proxy_token = _get_or_create_kubectl_token(session_dir)
+    kubectl_proxy_token = sessions.get_or_create_kubectl_token(session_dir)
 
     # Start kubectl proxy subprocess (uses host kubeconfig).
     kubectl_proc, kube_port = _kubectl_proxy.start_kubectl_proxy_proc(context=config.kubernetes.context)
@@ -312,25 +279,13 @@ def dockerfile_path(base: Path, backend: agent.AgentBackend) -> Path:
     return base / ".hatchery" / f"Dockerfile.{backend.kind.lower()}"
 
 
-def docker_image_name(repo: Path, name: str) -> str:
-    """Return the Docker image tag for a given repo and task name."""
-    return f"hatchery/{tasks.to_name(repo.name)}:{name}"
-
-
-def task_container_name(repo: Path, name: str) -> str:
-    """Return the deterministic container name for a task.
-
-    Uses repo_id (basename + path hash) rather than bare basename to avoid
-    collisions between repos with the same directory name at different paths.
-    """
-    return f"hatchery-{tasks.repo_id(repo)}-{name}"
 
 
 def docker_available() -> bool:
     """Return True if the Docker daemon is reachable."""
     logger.debug("Checking Docker availability")
     try:
-        result = tasks.run(["docker", "info"], check=False)
+        result = sessions.run(["docker", "info"], check=False)
     except FileNotFoundError:
         return False
     return result.returncode == 0
@@ -340,7 +295,7 @@ def podman_available() -> bool:
     """Return True if the Podman CLI is reachable."""
     logger.debug("Checking Podman availability")
     try:
-        result = tasks.run(["podman", "info"], check=False)
+        result = sessions.run(["podman", "info"], check=False)
     except FileNotFoundError:
         return False
     return result.returncode == 0
@@ -411,7 +366,7 @@ def ensure_dockerfile(
     ui.info(f"  Created {df.relative_to(repo)}")
     answer = input("  Would you like to edit the Dockerfile? [Y/n] ").strip().lower()
     if answer != "n":
-        tasks.open_for_editing(df)
+        sessions.open_for_editing(df)
     return True
 
 
@@ -421,7 +376,7 @@ def _migrate_docker_config(data: dict) -> dict:
     Add a new `if v == N` block here whenever the schema changes.
     Each block should make the minimal edit to reach version N+1,
     then increment data["schema_version"]. The final state will
-    always be tasks.DOCKER_CONFIG_SCHEMA_VERSION.
+    always be sessions.DOCKER_CONFIG_SCHEMA_VERSION.
     """
     v = str(data.get("schema_version", "0"))
 
@@ -451,24 +406,24 @@ def ensure_docker_config(repo: Path, *, source: Path | None = None) -> bool:
     Returns False in that case so callers do not auto-commit a file the user
     intentionally left uncommitted.
     """
-    config_file = repo / tasks.DOCKER_CONFIG
+    config_file = repo / sessions.DOCKER_CONFIG
     if config_file.exists():
         return False
     if source is not None:
-        source_config = source / tasks.DOCKER_CONFIG
+        source_config = source / sessions.DOCKER_CONFIG
         if source_config.exists():
             shutil.copy2(source_config, config_file)
             ui.warn(
-                f"  Copied {tasks.DOCKER_CONFIG} from repo root "
+                f"  Copied {sessions.DOCKER_CONFIG} from repo root "
                 "(uncommitted — will not be committed to this worktree branch)"
             )
             return False
     config_file.parent.mkdir(parents=True, exist_ok=True)
     config_file.write_text(_DOCKER_CONFIG_TEMPLATE.read_text())
-    ui.info(f"  Created {tasks.DOCKER_CONFIG}")
+    ui.info(f"  Created {sessions.DOCKER_CONFIG}")
     answer = input("  Would you like to edit the docker config? [Y/n] ").strip().lower()
     if answer != "n":
-        tasks.open_for_editing(config_file)
+        sessions.open_for_editing(config_file)
     return True
 
 
@@ -528,7 +483,7 @@ def load_docker_config(root: Path) -> DockerConfig:
     error message if the file cannot be parsed or fails validation — an
     invalid config is always a user mistake that must be fixed before launching.
     """
-    config_file = root / tasks.DOCKER_CONFIG
+    config_file = root / sessions.DOCKER_CONFIG
     if not config_file.exists():
         return DockerConfig()
     try:
@@ -536,7 +491,7 @@ def load_docker_config(root: Path) -> DockerConfig:
         raw = _migrate_docker_config(raw)
         return DockerConfig.model_validate(raw)
     except Exception as exc:
-        ui.error(f"invalid {tasks.DOCKER_CONFIG}: {exc}")
+        ui.error(f"invalid {sessions.DOCKER_CONFIG}: {exc}")
         sys.exit(1)
 
 
@@ -710,7 +665,7 @@ def _git_worktree_mounts(repo: Path, name: str, container_root: str) -> list[str
     shadow file are NOT included — callers append those afterwards (so sentinel
     files can be inserted between the .git layers and the worktree mount if needed).
 
-    This function is intentionally repo-agnostic: pass ``tasks.CONTAINER_REPO_ROOT``
+    This function is intentionally repo-agnostic: pass ``sessions.CONTAINER_REPO_ROOT``
     for the primary repo or ``/includes/<basename>`` for an included secondary repo.
     """
     git_dir = repo / ".git"
@@ -735,6 +690,82 @@ def _git_worktree_mounts(repo: Path, name: str, container_root: str) -> list[str
     return mounts
 
 
+def build_mounts(
+    meta: SessionMeta,
+    backend: agent.AgentBackend,
+    session_dir: Path,
+    config: DockerConfig,
+    *,
+    git_sentinel_files: list[tuple[Path, str]] | None = None,
+    worktree_git_ptr: Path | None = None,
+    include_entries: list[IncludeEntry] | None = None,
+) -> list[str]:
+    """Return the -v flags for a session's container.
+
+    Branches on ``meta.no_worktree``:
+      * False (default): layered git-worktree mounts — repo ro, targeted .git
+        sub-dirs rw, sentinel files rw, worktree rw, container-relative .git
+        pointer.
+      * True: ``meta.worktree`` mounted at ``/workspace``, no git metadata.
+
+    Append ``include_entries`` mounts at the end when provided (each include
+    is mapped to ``/includes/<basename>/``).
+
+    Known security holes for the worktree case (accepted; fixing them would
+    break real-time git visibility):
+      LOW-MEDIUM: refs/heads/hatchery/ rw allows creating arbitrary
+        hatchery/<anything> branch refs.
+      MEDIUM: .git/ root rw allows modifying config/packed-refs/FETCH_HEAD
+        etc. Required so git can take rebase/cherry-pick/merge locks.
+      HIGH: .git/objects/ rw against the real object store — the container
+        can corrupt git history. Fixing requires staging+copy-back, which
+        kills real-time host visibility of commits.
+    """
+    if meta.no_worktree:
+        cwd = meta.worktree_path
+        mounts = (
+            [f"{meta.worktree}:/workspace:rw"]
+            + _default_home_mounts()
+            + backend.home_mounts(session_dir)
+            + _construct_docker_mounts(config)
+        )
+        if config.clipboard_images:
+            mounts.append(_clipboard_image_mount(session_dir))
+        if config.follow_symlinks:
+            mounts.extend(_construct_symlink_mounts(cwd, mounts))
+    else:
+        worktree_rel = meta.worktree_path.relative_to(meta.repo_path)
+        container_worktree = f"{sessions.CONTAINER_REPO_ROOT}/{worktree_rel}"
+
+        mounts = _git_worktree_mounts(meta.repo_path, meta.name, sessions.CONTAINER_REPO_ROOT)
+
+        # git writes these into .git/ root during normal commits; use per-task
+        # sentinel files so .git/ root stays ro.
+        for host_file, git_filename in git_sentinel_files or []:
+            mounts.append(f"{host_file}:{sessions.CONTAINER_REPO_ROOT}/.git/{git_filename}:rw")
+
+        mounts.append(f"{meta.worktree}:{container_worktree}:rw")
+
+        # Shadow the worktree's .git pointer file with a container-path-aware
+        # copy. Must come after the worktree:rw mount so Linux VFS lets the
+        # file mount win.
+        if worktree_git_ptr is not None:
+            mounts.append(f"{worktree_git_ptr}:{container_worktree}/.git:rw")
+        mounts.extend(_default_home_mounts())
+        mounts.extend(backend.home_mounts(session_dir))
+        mounts.extend(_construct_docker_mounts(config))
+        if config.clipboard_images:
+            mounts.append(_clipboard_image_mount(session_dir))
+        if config.follow_symlinks:
+            mounts.extend(_construct_symlink_mounts(meta.worktree_path, mounts))
+
+    if include_entries:
+        mounts.extend(
+            _docker_mounts_includes(include_entries, meta.name, session_dir, no_worktree=meta.no_worktree)
+        )
+    return mounts
+
+
 def docker_mounts(
     repo: Path,
     worktree: Path,
@@ -745,61 +776,18 @@ def docker_mounts(
     git_sentinel_files: list[tuple[Path, str]] | None = None,
     worktree_git_ptr: Path | None = None,
 ) -> list[str]:
-    """Return the -v flags for the container.
-    Mount layout:
-      /repo                                       ← full repo + .git, read-only
-      /repo/.git                                  ← read-write (allows lock files at .git/ root)
-      /repo/.git/objects                          ← read-write (new commit objects)
-      /repo/.git/refs/heads/hatchery/             ← read-write (own branch + lock sidecar files)
-      /repo/.git/logs                             ← read-write (reflogs, if dir exists)
-      /repo/.git/worktrees/<n>                    ← read-write (this task's index + HEAD only)
-      /repo/.git/COMMIT_EDITMSG                   ← read-write (per-task sentinel file)
-      /repo/.git/ORIG_HEAD                        ← read-write (per-task sentinel file)
-      /repo/.hatchery/worktrees/<n>               ← read-write (the ONLY place edits land)
-      /repo/.hatchery/worktrees/<n>/.git          ← container-path-aware .git pointer (file)
-      {CONTAINER_HOME}/...  ← agent-specific home mounts (see backend.home_mounts())
+    """Shim: delegate to ``build_mounts`` for the worktree case.
 
-    Known security holes (accepted; fixing them would break real-time git visibility):
-      LOW-MEDIUM: The entire refs/heads/hatchery/ dir is mounted rw, so the container
-        can create arbitrary hatchery/<anything> branch refs, not just update its own.
-        These would persist to the host repo. Mitigation: only the agent runs in the
-        container, so this requires deliberately malicious behaviour from the agent.
-      MEDIUM: .git/ root is mounted rw, so the container can modify files at the
-        .git/ root level: config, packed-refs, FETCH_HEAD, MERGE_HEAD, description,
-        info/, etc. This enables modifying refs for any branch, not just hatchery/.
-        Required so that git can create packed-refs.lock during rebase/cherry-pick/merge.
-      HIGH: .git/objects/ is mounted rw against the real object store. The container
-        can delete or overwrite existing object files, corrupting the entire git
-        history and breaking the repo for all branches. Fixing this requires a
-        staging temp dir + post-exit copy-back, which means commits made inside the
-        container are not visible via `git log` on the host until the session ends.
+    Kept for callers (and tests) that still construct mounts from positional
+    repo / worktree / name. Will be removed once all callers migrate to
+    build_mounts(meta, ...).
     """
-    worktree_rel = worktree.relative_to(repo)
-    container_worktree = f"{tasks.CONTAINER_REPO_ROOT}/{worktree_rel}"
-
-    mounts = _git_worktree_mounts(repo, name, tasks.CONTAINER_REPO_ROOT)
-
-    # git writes these into .git/ root during normal commits; use per-task sentinel
-    # files so .git/ root stays ro.
-    for host_file, git_filename in git_sentinel_files or []:
-        mounts.append(f"{host_file}:{tasks.CONTAINER_REPO_ROOT}/.git/{git_filename}:rw")
-
-    mounts.append(f"{worktree}:{container_worktree}:rw")
-
-    # Shadow the worktree's .git pointer file with a container-path-aware copy.
-    # The host file contains an absolute host path that doesn't resolve inside the
-    # container; this mount replaces it with the correct container-relative path.
-    # Must come after the worktree:rw mount so Linux VFS lets the file mount win.
-    if worktree_git_ptr is not None:
-        mounts.append(f"{worktree_git_ptr}:{container_worktree}/.git:rw")
-    mounts.extend(_default_home_mounts())
-    mounts.extend(backend.home_mounts(session_dir))
-    mounts.extend(_construct_docker_mounts(config))
-    if config.clipboard_images:
-        mounts.append(_clipboard_image_mount(session_dir))
-    if config.follow_symlinks:
-        mounts.extend(_construct_symlink_mounts(worktree, mounts))
-    return mounts
+    meta = SessionMeta(name=name, repo=str(repo), worktree=str(worktree), no_worktree=False)
+    return build_mounts(
+        meta, backend, session_dir, config,
+        git_sentinel_files=git_sentinel_files,
+        worktree_git_ptr=worktree_git_ptr,
+    )
 
 
 def docker_mounts_no_worktree(
@@ -808,26 +796,15 @@ def docker_mounts_no_worktree(
     session_dir: Path,
     config: DockerConfig,
 ) -> list[str]:
-    """Return the -v flags for a no-worktree Docker container.
+    """Shim: delegate to ``build_mounts`` for the no-worktree case.
 
-    Mount layout:
-      /workspace        ← cwd, read-write
-      {CONTAINER_HOME}/... ← agent-specific home mounts (see backend.home_mounts())
+    The placeholder name doesn't appear in the returned mounts because
+    no_worktree=True skips the worktree-specific paths.
     """
-    mounts = (
-        [f"{cwd}:/workspace:rw"]
-        + _default_home_mounts()
-        + backend.home_mounts(session_dir)
-        + _construct_docker_mounts(config)
-    )
-    if config.clipboard_images:
-        mounts.append(_clipboard_image_mount(session_dir))
-    if config.follow_symlinks:
-        mounts.extend(_construct_symlink_mounts(cwd, mounts))
-    return mounts
+    meta = SessionMeta(name="-", repo=str(cwd), worktree=str(cwd), no_worktree=True)
+    return build_mounts(meta, backend, session_dir, config)
 
 
-_unique_basename = tasks._unique_basename
 
 
 def _docker_mounts_includes(
@@ -857,14 +834,14 @@ def _docker_mounts_includes(
 
     for entry in include_entries:
         path = entry.path
-        basename = _unique_basename(path.name, used_basenames)
+        basename = sessions.unique_basename(path.name, used_basenames)
         used_basenames.add(basename)
-        container_path = f"{tasks.CONTAINER_INCLUDES_ROOT}/{basename}"
+        container_path = f"{sessions.CONTAINER_INCLUDES_ROOT}/{basename}"
 
         if entry.mode == "worktree" and not no_worktree:
             is_git = (path / ".git").exists()
             if is_git:
-                worktree = path / tasks.WORKTREES_SUBDIR / name
+                worktree = path / sessions.WORKTREES_SUBDIR / name
                 if worktree.exists():
                     # Layered mounts: root ro + targeted .git rw (same as primary repo)
                     mounts.extend(_git_worktree_mounts(path, name, container_path))
@@ -1001,7 +978,7 @@ def build_docker_image(
     Using the worktree's copy means Dockerfile changes made as part of a task
     are isolated to that task's image and merge into main with the task.
     """
-    image = docker_image_name(repo, name)
+    image = sessions.image_name(repo, name)
     worktree_dockerfile = dockerfile_path(worktree, backend)
     # Use a temporary empty directory as the build context — NOT the repo root.
     # The generated Dockerfile has no COPY/ADD from context (only multi-stage
@@ -1182,95 +1159,6 @@ def _exec_agent(cmd: list[str], paste_interceptor: clipboard_image.PasteIntercep
     return subprocess.run(cmd).returncode
 
 
-def launch_docker(
-    repo: Path,
-    worktree: Path,
-    name: str,
-    backend: agent.AgentBackend,
-    agent_cmd: list[str],
-    config: DockerConfig,
-    runtime: Runtime = Runtime.DOCKER,
-    no_cache: bool = False,
-    include_repos: list[IncludeEntry] | None = None,
-) -> None:
-    """Replace the current process with a Docker-sandboxed agent session.
-
-    Builds the image first — hits the layer cache instantly if nothing changed.
-    Auth is provided via the appropriate API key env var or per-task config.
-    *agent_cmd* must be the full command already built for Docker mode
-    (``backend.build_*_command(docker=True, workdir=container_workdir)``).
-
-    *include_repos* — additional paths to mount at /includes/<basename>/.
-    Git repos with mode="worktree" and a hatchery/<name> worktree also have
-    their .git pointer corrected for the container environment.
-    """
-    try:
-        mutator = backend.make_header_mutator()
-    except RuntimeError as e:
-        ui.error(str(e))
-        sys.exit(1)
-
-    proxy_token = get_or_create_proxy_token(repo, name)
-
-    # Pre-seed writable sentinel files for git's .git/-root writes (COMMIT_EDITMSG etc.).
-    session_dir = tasks.task_session_dir(repo, name)
-    session_dir.mkdir(parents=True, exist_ok=True)
-    git_sentinels: list[tuple[Path, str]] = []
-    for fname in ("COMMIT_EDITMSG", "ORIG_HEAD"):
-        if not (repo / ".git" / fname).exists():
-            continue
-        p = session_dir / fname
-        if not p.exists():
-            p.touch()
-        git_sentinels.append((p, fname))
-
-    # Rewrite the worktree .git pointer to use the container-relative path.
-    git_ptr = session_dir / "git_ptr"
-    git_ptr.write_text(f"gitdir: {tasks.CONTAINER_REPO_ROOT}/.git/worktrees/{name}\n")
-
-    worktree_rel = worktree.relative_to(repo)
-    container_worktree = f"{tasks.CONTAINER_REPO_ROOT}/{worktree_rel}"
-
-    if config.dind and not _dind_dockerfile_ok(worktree, backend):
-        ui.warn("dind: true is set but the Dockerfile doesn't appear to install Podman.")
-        ui.info(f"  Uncomment the '── Podman-in-Podman (DinD)' block in {dockerfile_path(worktree, backend).name}.")
-
-    # Let the backend mutate its per-task config before the container starts
-    # (e.g. pre-seed trust or approval in agent-specific config files).
-    backend.on_before_container_start(session_dir, proxy_token, container_worktree)
-
-    build_docker_image(repo, worktree, name, backend, runtime=runtime, no_cache=no_cache)
-    image = docker_image_name(repo, name)
-    mounts = docker_mounts(repo, worktree, name, backend, session_dir, config, git_sentinels, worktree_git_ptr=git_ptr)
-    if include_repos:
-        mounts.extend(_docker_mounts_includes(include_repos, name, session_dir, no_worktree=False))
-
-    logger.debug(f"Launching {runtime.binary} container for task '{name}'")
-    with (
-        _maybe_api_server(mutator, proxy_token, backend) as api_proxy,
-        _kubectl_context(config, session_dir) as kubectl_mounts,
-    ):
-        mounts.extend(kubectl_mounts)
-        _run_container(
-            image,
-            mounts,
-            container_worktree,
-            tasks.CONTAINER_REPO_ROOT,
-            name,
-            mutator,
-            proxy_token,
-            agent_cmd,
-            backend=backend,
-            dind=config.dind,
-            runtime=runtime,
-            cap_add=config.cap_add,
-            container_name=task_container_name(repo, name),
-            proxy_port=api_proxy.port if api_proxy else None,
-            add_host_gateway=bool(kubectl_mounts),
-            paste_interceptor=_make_paste_interceptor(backend, session_dir, config),
-        )
-
-
 def _make_paste_interceptor(
     backend: agent.AgentBackend,
     session_dir: Path,
@@ -1285,6 +1173,119 @@ def _make_paste_interceptor(
     )
 
 
+def run_session(
+    meta: SessionMeta,
+    backend: agent.AgentBackend,
+    agent_cmd: list[str],
+    config: DockerConfig,
+    *,
+    runtime: Runtime = Runtime.DOCKER,
+    no_cache: bool = False,
+    include_entries: list[IncludeEntry] | None = None,
+) -> None:
+    """Replace the current process with a containerised agent session.
+
+    Branches on ``meta.no_worktree``: worktree mode pre-seeds git sentinel
+    files + a container-relative .git pointer, then mounts the worktree
+    under /repo/.hatchery/worktrees/<name>; no-worktree mode mounts the
+    cwd as /workspace and skips all git metadata.
+
+    *agent_cmd* must be the full command already built for Docker mode
+    (``backend.build_*_command(docker=True, workdir=...)``). Image is
+    built before launch; the layer cache makes this near-instant when
+    nothing changed.
+
+    *include_entries* — additional paths to mount at /includes/<basename>/.
+    """
+    try:
+        mutator = backend.make_header_mutator()
+    except RuntimeError as e:
+        ui.error(str(e))
+        sys.exit(1)
+
+    proxy_token = sessions.get_or_create_proxy_token(meta.repo_path, meta.name)
+    session_dir = meta.session_dir
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    git_sentinels: list[tuple[Path, str]] | None = None
+    git_ptr: Path | None = None
+    if meta.no_worktree:
+        container_workdir = "/workspace"
+        container_repo = "/workspace"
+        build_root = meta.worktree_path  # cwd serves as build context root
+    else:
+        # Pre-seed writable sentinel files for git's .git/-root writes.
+        git_sentinels = []
+        for fname in ("COMMIT_EDITMSG", "ORIG_HEAD"):
+            if not (meta.repo_path / ".git" / fname).exists():
+                continue
+            p = session_dir / fname
+            if not p.exists():
+                p.touch()
+            git_sentinels.append((p, fname))
+
+        # Rewrite the worktree .git pointer to use the container-relative path.
+        git_ptr = session_dir / "git_ptr"
+        git_ptr.write_text(f"gitdir: {sessions.CONTAINER_REPO_ROOT}/.git/worktrees/{meta.name}\n")
+
+        worktree_rel = meta.worktree_path.relative_to(meta.repo_path)
+        container_workdir = f"{sessions.CONTAINER_REPO_ROOT}/{worktree_rel}"
+        container_repo = sessions.CONTAINER_REPO_ROOT
+        build_root = meta.worktree_path
+
+    if config.dind and not _dind_dockerfile_ok(build_root, backend):
+        ui.warn("dind: true is set but the Dockerfile doesn't appear to install Podman.")
+        ui.info(f"  Uncomment the '── Podman-in-Podman (DinD)' block in {dockerfile_path(build_root, backend).name}.")
+
+    backend.on_before_container_start(session_dir, proxy_token, container_workdir)
+
+    build_docker_image(meta.repo_path, build_root, meta.name, backend, runtime=runtime, no_cache=no_cache)
+    image = meta.image_name
+    mounts = build_mounts(
+        meta, backend, session_dir, config,
+        git_sentinel_files=git_sentinels,
+        worktree_git_ptr=git_ptr,
+        include_entries=include_entries,
+    )
+
+    mode_label = "no-worktree mode" if meta.no_worktree else "worktree mode"
+    logger.debug(f"Launching {runtime.binary} container for session '{meta.name}' ({mode_label})")
+    with (
+        _maybe_api_server(mutator, proxy_token, backend) as api_proxy,
+        _kubectl_context(config, session_dir) as kubectl_mounts,
+    ):
+        mounts.extend(kubectl_mounts)
+        _run_container(
+            image, mounts, container_workdir, container_repo, meta.name,
+            mutator, proxy_token, agent_cmd,
+            backend=backend, dind=config.dind, runtime=runtime,
+            cap_add=config.cap_add,
+            container_name=meta.container_name,
+            proxy_port=api_proxy.port if api_proxy else None,
+            add_host_gateway=bool(kubectl_mounts),
+            paste_interceptor=_make_paste_interceptor(backend, session_dir, config),
+        )
+
+
+def launch_docker(
+    repo: Path,
+    worktree: Path,
+    name: str,
+    backend: agent.AgentBackend,
+    agent_cmd: list[str],
+    config: DockerConfig,
+    runtime: Runtime = Runtime.DOCKER,
+    no_cache: bool = False,
+    include_repos: list[IncludeEntry] | None = None,
+) -> None:
+    """Shim: delegate to run_session for worktree mode."""
+    meta = SessionMeta(name=name, repo=str(repo), worktree=str(worktree), no_worktree=False)
+    run_session(
+        meta, backend, agent_cmd, config,
+        runtime=runtime, no_cache=no_cache, include_entries=include_repos,
+    )
+
+
 def launch_docker_no_worktree(
     cwd: Path,
     name: str,
@@ -1295,60 +1296,12 @@ def launch_docker_no_worktree(
     no_cache: bool = False,
     include_repos: list[IncludeEntry] | None = None,
 ) -> None:
-    """Launch a Docker-sandboxed agent session with cwd mounted as /workspace.
-
-    Used when --no-worktree is active. No git metadata mounts needed.
-    Builds the image from cwd/.hatchery/Dockerfile (same as standard mode).
-    *agent_cmd* must be the full command already built for Docker mode
-    (``backend.build_*_command(docker=True, workdir="/workspace")``).
-
-    *include_repos* — additional paths to mount at /includes/<basename>/.
-    """
-    try:
-        mutator = backend.make_header_mutator()
-    except RuntimeError as e:
-        ui.error(str(e))
-        sys.exit(1)
-
-    proxy_token = get_or_create_proxy_token(cwd, name)
-    session_dir = tasks.task_session_dir(cwd, name)
-    session_dir.mkdir(parents=True, exist_ok=True)
-    if config.dind and not _dind_dockerfile_ok(cwd, backend):
-        ui.warn("dind: true is set but the Dockerfile doesn't appear to install Podman.")
-        ui.info(f"  Uncomment the '── Podman-in-Podman (DinD)' block in {dockerfile_path(cwd, backend).name}.")
-
-    backend.on_before_container_start(session_dir, proxy_token, "/workspace")
-
-    build_docker_image(cwd, cwd, name, backend, runtime=runtime, no_cache=no_cache)
-    image = docker_image_name(cwd, name)
-    mounts = docker_mounts_no_worktree(cwd, backend, session_dir, config=config)
-    if include_repos:
-        mounts.extend(_docker_mounts_includes(include_repos, name, session_dir, no_worktree=True))
-
-    logger.debug(f"Launching {runtime.binary} container for task '{name}' (no-worktree mode)")
-    with (
-        _maybe_api_server(mutator, proxy_token, backend) as api_proxy,
-        _kubectl_context(config, session_dir) as kubectl_mounts,
-    ):
-        mounts.extend(kubectl_mounts)
-        _run_container(
-            image,
-            mounts,
-            "/workspace",
-            "/workspace",
-            name,
-            mutator,
-            proxy_token,
-            agent_cmd,
-            backend=backend,
-            dind=config.dind,
-            runtime=runtime,
-            cap_add=config.cap_add,
-            container_name=task_container_name(cwd, name),
-            proxy_port=api_proxy.port if api_proxy else None,
-            add_host_gateway=bool(kubectl_mounts),
-            paste_interceptor=_make_paste_interceptor(backend, session_dir, config),
-        )
+    """Shim: delegate to run_session for no-worktree mode."""
+    meta = SessionMeta(name=name, repo=str(cwd), worktree=str(cwd), no_worktree=True)
+    run_session(
+        meta, backend, agent_cmd, config,
+        runtime=runtime, no_cache=no_cache, include_entries=include_repos,
+    )
 
 
 def launch_sandbox_shell(
@@ -1365,14 +1318,14 @@ def launch_sandbox_shell(
     The repo is mounted read-only at /repo.
     """
     build_docker_image(repo, repo, "sandbox", backend, runtime=runtime, no_cache=no_cache)
-    image = docker_image_name(repo, "sandbox")
-    mounts = [f"{repo}:{tasks.CONTAINER_REPO_ROOT}:rw"] + _default_home_mounts() + _construct_docker_mounts(config)
+    image = sessions.image_name(repo, "sandbox")
+    mounts = [f"{repo}:{sessions.CONTAINER_REPO_ROOT}:rw"] + _default_home_mounts() + _construct_docker_mounts(config)
 
     # Use a short-lived session dir under ~/.hatchery/ for the kubeconfig mount.
     # tempfile.TemporaryDirectory() is not reliable on macOS because Python
     # resolves to /var/folders/… which is outside Podman Machine's default
     # virtio-fs share roots (only /Users/ and /private/tmp are shared).
-    sandbox_session_dir = tasks.HATCHERY_DIR / "sandbox-sessions" / str(uuid.uuid4())
+    sandbox_session_dir = sessions.HATCHERY_DIR / "sandbox-sessions" / str(uuid.uuid4())
     sandbox_session_dir.mkdir(parents=True, exist_ok=True)
     try:
         with (
@@ -1383,8 +1336,8 @@ def launch_sandbox_shell(
             _run_container(
                 image=image,
                 mounts=mounts,
-                workdir=tasks.CONTAINER_REPO_ROOT,
-                hatchery_repo=tasks.CONTAINER_REPO_ROOT,
+                workdir=sessions.CONTAINER_REPO_ROOT,
+                hatchery_repo=sessions.CONTAINER_REPO_ROOT,
                 name="sandbox",
                 mutator=None,
                 proxy_token=None,
@@ -1402,11 +1355,11 @@ def launch_sandbox_shell(
 def exec_task_shell(name: str, runtime: Runtime, repo: Path, shell: str = "/bin/bash") -> None:
     """Exec an interactive shell into the running container for task *name*.
 
-    The container name is derived deterministically via ``task_container_name``
+    The container name is derived deterministically via ``sessions.container_name``
     — the same name assigned at launch — so no ``docker ps`` lookup is needed.
     Docker/Podman will return a clear error if the container is not running.
     """
-    subprocess.run([runtime.binary, "exec", "-it", task_container_name(repo, name), shell])
+    subprocess.run([runtime.binary, "exec", "-it", sessions.container_name(repo, name), shell])
 
 
 def resolve_runtime(

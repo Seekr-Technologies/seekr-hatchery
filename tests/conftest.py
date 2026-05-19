@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 import seekr_hatchery.agents as agent
-import seekr_hatchery.tasks as tasks
+import seekr_hatchery.sessions as sessions
 import seekr_hatchery.user_config as user_config
 
 # ---------------------------------------------------------------------------
@@ -131,15 +131,15 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     Patches:
       - pathlib.Path.home()       — Python's canonical home lookup
       - HOME env var              — covers os.path.expanduser, git, subprocesses
-      - tasks.HATCHERY_DIR / TASKS_DB_DIR  — module-level constants (import-time)
+      - sessions.HATCHERY_DIR / TASKS_DB_DIR  — module-level constants (import-time)
       - user_config.UserConfig.CONFIG_PATH — class-level constant (import-time)
     """
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: fake_home))
     monkeypatch.setenv("HOME", str(fake_home))
-    monkeypatch.setattr(tasks, "HATCHERY_DIR", fake_home / ".hatchery")
-    monkeypatch.setattr(tasks, "TASKS_DB_DIR", fake_home / ".hatchery" / "tasks")
+    monkeypatch.setattr(sessions, "HATCHERY_DIR", fake_home / ".hatchery")
+    monkeypatch.setattr(sessions, "TASKS_DB_DIR", fake_home / ".hatchery" / "tasks")
     monkeypatch.setattr(user_config.UserConfig, "CONFIG_PATH", fake_home / ".hatchery" / "config.json")
     return fake_home
 
@@ -176,7 +176,7 @@ def sample_meta(fake_tasks_db: Path) -> dict:
         "schema_version": 1,
     }
     # Write to the unified dir path matching repo="/some/repo"
-    task_dir = fake_tasks_db / tasks.repo_id(Path("/some/repo")) / "my-task"
+    task_dir = fake_tasks_db / sessions.repo_id(Path("/some/repo")) / "my-task"
     task_dir.mkdir(parents=True, exist_ok=True)
     (task_dir / "meta.json").write_text(json.dumps(meta))
     return meta

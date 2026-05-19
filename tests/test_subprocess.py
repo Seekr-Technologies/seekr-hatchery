@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import seekr_hatchery.git as git
-import seekr_hatchery.tasks as tasks
+import seekr_hatchery.sessions as sessions
 
 # ---------------------------------------------------------------------------
 # run()
@@ -16,33 +16,33 @@ import seekr_hatchery.tasks as tasks
 
 class TestRun:
     def test_returns_completed_process(self):
-        result = tasks.run(["echo", "hello"])
+        result = sessions.run(["echo", "hello"])
         assert isinstance(result, subprocess.CompletedProcess)
 
     def test_captures_stdout(self):
-        result = tasks.run(["echo", "hello"])
+        result = sessions.run(["echo", "hello"])
         assert "hello" in result.stdout
 
     def test_passes_cwd(self, tmp_path):
-        result = tasks.run(["pwd"], cwd=tmp_path)
+        result = sessions.run(["pwd"], cwd=tmp_path)
         assert str(tmp_path) in result.stdout.strip()
 
     def test_raises_on_nonzero_with_check_true(self):
         with pytest.raises(subprocess.CalledProcessError):
-            tasks.run(["false"], check=True)
+            sessions.run(["false"], check=True)
 
     def test_does_not_raise_with_check_false(self):
-        result = tasks.run(["false"], check=False)
+        result = sessions.run(["false"], check=False)
         assert result.returncode != 0
 
     def test_prints_error_to_stderr_on_failure(self, capsys):
         with pytest.raises(subprocess.CalledProcessError):
-            tasks.run(["false"], check=True)
+            sessions.run(["false"], check=True)
         captured = capsys.readouterr()
         assert "Error" in captured.err or len(captured.err) >= 0  # just verify it doesn't crash
 
     def test_check_false_nonzero_returns_result(self):
-        result = tasks.run(["sh", "-c", "exit 42"], check=False)
+        result = sessions.run(["sh", "-c", "exit 42"], check=False)
         assert result.returncode == 42
 
 
@@ -125,7 +125,7 @@ class TestGitRoot:
         mock_result = MagicMock()
         mock_result.returncode = 0
         mock_result.stdout = "/my/repo\n"
-        monkeypatch.setattr(tasks, "run", lambda *a, **kw: mock_result)
+        monkeypatch.setattr(sessions, "run", lambda *a, **kw: mock_result)
         result = git.git_root()
         assert result == Path("/my/repo")
 
@@ -133,7 +133,7 @@ class TestGitRoot:
         mock_result = MagicMock()
         mock_result.returncode = 0
         mock_result.stdout = "  /my/repo  \n"
-        monkeypatch.setattr(tasks, "run", lambda *a, **kw: mock_result)
+        monkeypatch.setattr(sessions, "run", lambda *a, **kw: mock_result)
         result = git.git_root()
         assert result == Path("/my/repo")
 
@@ -141,7 +141,7 @@ class TestGitRoot:
         mock_result = MagicMock()
         mock_result.returncode = 1
         mock_result.stdout = ""
-        monkeypatch.setattr(tasks, "run", lambda *a, **kw: mock_result)
+        monkeypatch.setattr(sessions, "run", lambda *a, **kw: mock_result)
         with pytest.raises(SystemExit) as exc_info:
             git.git_root()
         assert exc_info.value.code == 1
@@ -150,7 +150,7 @@ class TestGitRoot:
         mock_result = MagicMock()
         mock_result.returncode = 1
         mock_result.stdout = ""
-        monkeypatch.setattr(tasks, "run", lambda *a, **kw: mock_result)
+        monkeypatch.setattr(sessions, "run", lambda *a, **kw: mock_result)
         with pytest.raises(SystemExit):
             git.git_root()
         captured = capsys.readouterr()
@@ -160,6 +160,6 @@ class TestGitRoot:
         mock_result = MagicMock()
         mock_result.returncode = 0
         mock_result.stdout = "/some/path\n"
-        monkeypatch.setattr(tasks, "run", lambda *a, **kw: mock_result)
+        monkeypatch.setattr(sessions, "run", lambda *a, **kw: mock_result)
         result = git.git_root()
         assert isinstance(result, Path)

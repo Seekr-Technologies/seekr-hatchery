@@ -100,7 +100,7 @@ class AgentBackend(ABC):
     def home_mounts(session_dir: Path) -> list[str]:
         """Return agent-specific host→container bind-mount strings.
 
-        *session_dir* is ``tasks.task_session_dir(repo, name)`` — the per-task
+        *session_dir* is ``sessions.task_session_dir(repo, name)`` — the per-task
         directory where ``on_new_task`` may have written config files.
 
         Common mounts shared by all agents (.gitconfig, uv cache) are added by
@@ -151,7 +151,7 @@ class AgentBackend(ABC):
     def on_new_task(session_dir: Path) -> None:
         """One-time setup hook called when a new task is created.
 
-        *session_dir* is ``tasks.task_session_dir(repo, name)`` — the per-task
+        *session_dir* is ``sessions.task_session_dir(repo, name)`` — the per-task
         directory under ``~/.hatchery/tasks/``.  The backend may create or copy
         files here (e.g. agent-specific configuration).
 
@@ -179,7 +179,7 @@ class AgentBackend(ABC):
         """Hook called immediately before the Docker container starts.
 
         Runs on every Docker launch (new and resume); never in native mode.
-        *session_dir* is the per-task directory (``tasks.task_session_dir``).
+        *session_dir* is the per-task directory (``sessions.task_session_dir``).
         *proxy_token* is the short-lived token injected as the API key for
         this launch.  *workdir* is the agent's working directory inside the
         container.

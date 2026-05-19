@@ -1,4 +1,4 @@
-"""Constants, path helpers, task I/O, schema migration, filesystem scaffolding."""
+"""Constants, path helpers, session I/O, schema migration, filesystem scaffolding."""
 
 import hashlib
 import json
@@ -7,13 +7,24 @@ import os
 import re
 import subprocess
 import sys
+import uuid
 from datetime import datetime
 from pathlib import Path
 
 import seekr_hatchery.ui as ui
 from seekr_hatchery.includes import IncludeEntry, load_include_entries, serialize_include_entries
+from seekr_hatchery.models import SCHEMA_VERSION, SessionMeta
 
 logger = logging.getLogger("hatchery")
+
+# Re-export for callers that import these from sessions.
+__all__ = [
+    "IncludeEntry",
+    "SessionMeta",
+    "load_include_entries",
+    "serialize_include_entries",
+    "unique_basename",
+]
 
 
 def run(
@@ -50,8 +61,7 @@ def run(
 HATCHERY_DIR = Path.home() / ".hatchery"
 TASKS_DB_DIR = HATCHERY_DIR / "tasks"
 DEFAULT_BASE = "HEAD"  # branch/commit new tasks fork from by default
-SCHEMA_VERSION = 1
-DB_SCHEMA_VERSION = 1
+_DB_SCHEMA_VERSION = 1
 
 WORKTREES_SUBDIR = Path(".hatchery") / "worktrees"
 DOCKER_CONFIG = Path(".hatchery") / "docker.yaml"
@@ -93,11 +103,7 @@ Your workflow:
    This file will be merged into main as the permanent record of this task.
 """
 
-# Re-export for callers that import these from tasks (backward compat).
-__all__ = ["IncludeEntry", "load_include_entries", "serialize_include_entries"]
-
-
-def _unique_basename(name: str, used: set[str]) -> str:
+def unique_basename(name: str, used: set[str]) -> str:
     """Return *name* if not in *used*, else *name*-1, *name*-2, … — first unused variant.
 
     Does NOT mutate *used*; callers are responsible for adding the result.
@@ -194,7 +200,7 @@ def sandbox_context(
             inc = entry.path
             is_git = (inc / ".git").exists()
             if use_docker:
-                basename = _unique_basename(inc.name, used_basenames)
+                basename = unique_basename(inc.name, used_basenames)
                 used_basenames.add(basename)
                 container_inc = f"{CONTAINER_INCLUDES_ROOT}/{basename}"
                 if entry.mode == "worktree" and is_git and not no_worktree:
@@ -257,18 +263,18 @@ def repo_id(repo: Path) -> str:
     return f"{basename}-{short_hash}"
 
 
-def task_dir(repo: Path, name: str) -> Path:
+def _task_dir(repo: Path, name: str) -> Path:
     """Unified directory for all per-task state (metadata + session files)."""
     return TASKS_DB_DIR / repo_id(repo) / name
 
 
 def task_db_path(repo: Path, name: str) -> Path:
-    return task_dir(repo, name) / "meta.json"
+    return _task_dir(repo, name) / "meta.json"
 
 
 def task_session_dir(repo: Path, name: str) -> Path:
     """Session state lives in the same unified task directory."""
-    return task_dir(repo, name)
+    return _task_dir(repo, name)
 
 
 def worktrees_dir(repo: Path) -> Path:
@@ -276,7 +282,7 @@ def worktrees_dir(repo: Path) -> Path:
     return repo / WORKTREES_SUBDIR
 
 
-def db_meta_path() -> Path:
+def _db_meta_path() -> Path:
     """Path to the DB-level schema version file: ~/.hatchery/meta.json"""
     return HATCHERY_DIR / "meta.json"
 
@@ -287,7 +293,7 @@ def migrate_db() -> None:
     Reads ~/.hatchery/meta.json (or assumes v0 if absent), runs each
     migration block in order, then writes the updated version.
     """
-    meta_path = db_meta_path()
+    meta_path = _db_meta_path()
     if meta_path.exists():
         try:
             v = json.loads(meta_path.read_text()).get("schema_version", 0)
@@ -296,7 +302,7 @@ def migrate_db() -> None:
     else:
         v = 0
 
-    if v >= DB_SCHEMA_VERSION:
+    if v >= _DB_SCHEMA_VERSION:
         return  # nothing to do
 
     # v0 → v1: promote scoped <name>.json → unified <name>/meta.json
@@ -329,15 +335,37 @@ def migrate_db() -> None:
     logger.debug("DB schema version written: %d", v)
 
 
-def migrate(meta: dict) -> dict:
+def _migrate(meta: dict) -> dict:
     """Bring a task dict up to the current schema version.
 
-    Add a new `if v == N` block here whenever the schema changes.
+    Add a new ``if v == N`` block here whenever the schema changes.
     Each block should make the minimal edit to reach version N+1,
     then increment meta["schema_version"]. The final state will
     always be SCHEMA_VERSION.
+
+    Contract with ``SessionMeta`` (which uses ``extra="forbid"``):
+    every field that appears in real-world meta.json files must be
+    either declared on the model **or** stripped/translated here
+    before validation. If a future schema version retires a field,
+    this is where the dict must drop it. Missing fields are fine —
+    Pydantic field defaults fill them in at validation time.
+
+    Forward-version guard: if meta.json was written by a *newer*
+    hatchery than this one knows how to read, exit with a clear
+    error before Pydantic sees the dict. The alternative — letting
+    SessionMeta's ``extra="forbid"`` raise a ValidationError — would
+    surface as a confusing Pydantic stack trace; this gives the user
+    an actionable "please upgrade" message instead.
     """
     v = meta.get("schema_version", 0)
+
+    if v > SCHEMA_VERSION:
+        ui.error(
+            f"session metadata was written by a newer hatchery "
+            f"(schema v{v}); this version supports up to v{SCHEMA_VERSION}. "
+            f"Please upgrade hatchery."
+        )
+        sys.exit(1)
 
     # v0 -> v1: initial versioned schema (just stamps the version)
     if v == 0:
@@ -351,7 +379,7 @@ def load_task(repo: Path, name: str) -> dict:
     path = task_db_path(repo, name)
     logger.debug("Loading task metadata from %s", path)
     if path.exists():
-        return migrate(json.loads(path.read_text()))
+        return _migrate(json.loads(path.read_text()))
     ui.error(f"task '{name}' not found.")
     sys.exit(1)
 
@@ -361,7 +389,86 @@ def save_task(meta: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     meta["schema_version"] = SCHEMA_VERSION
     logger.debug("Saving task metadata to %s", path)
-    path.write_text(json.dumps(meta, indent=2))
+    # sort_keys=True so the on-disk JSON is deterministic regardless of how
+    # the meta dict (or SessionMeta) was constructed. Existing meta.json
+    # files will reorder alphabetically on next save; semantically identical.
+    path.write_text(json.dumps(meta, indent=2, sort_keys=True))
+
+
+def load(repo: Path, name: str) -> SessionMeta:
+    """Load and validate session metadata as a SessionMeta instance.
+
+    Runs the migration chain on the raw dict before validation so legacy
+    fields are normalised. Exits the process if the file is missing.
+    """
+    return SessionMeta.model_validate(load_task(repo, name))
+
+
+def save(meta: SessionMeta) -> None:
+    """Persist a SessionMeta to disk.
+
+    Uses ``exclude_none=True`` so fields like ``completed=None`` aren't
+    written until they're actually set — matches the dict-based behaviour
+    where keys were only added when assigned.
+    """
+    save_task(meta.model_dump(mode="json", exclude_none=True))
+
+
+# ---------------------------------------------------------------------------
+# Session-scoped tokens (moved from docker.py — they live on the session, not
+# on the container runtime).
+# ---------------------------------------------------------------------------
+
+
+def get_or_create_proxy_token(repo: Path, name: str) -> str:
+    """Return the stable API proxy token for this session, creating it on first call.
+
+    The token is persisted in the session directory so it stays constant across
+    container restarts. A stable token means the agent's cached credential in
+    the per-task config directory continues to match the API key env var on
+    subsequent launches — no repeated dialogs.
+    """
+    session_dir = task_session_dir(repo, name)
+    session_dir.mkdir(parents=True, exist_ok=True)
+    token_file = session_dir / "proxy_token"
+    if token_file.exists():
+        token = token_file.read_text().strip()
+        logger.debug("Reusing proxy token for session %r", name)
+        return token
+    token = str(uuid.uuid4())
+    token_file.write_text(token)
+    logger.debug("Created proxy token for session %r", name)
+    return token
+
+
+def get_or_create_kubectl_token(session_dir: Path) -> str:
+    """Return the stable kubectl RBAC proxy token, creating it on first call."""
+    token_file = session_dir / "kubectl_proxy_token"
+    if token_file.exists():
+        return token_file.read_text().strip()
+    token = str(uuid.uuid4())
+    token_file.write_text(token)
+    return token
+
+
+# ---------------------------------------------------------------------------
+# Container / image naming (moved from docker.py — derived from session
+# identity, not docker-specific behaviour).
+# ---------------------------------------------------------------------------
+
+
+def image_name(repo: Path, name: str) -> str:
+    """Return the container image tag for a given repo and session name."""
+    return f"hatchery/{to_name(repo.name)}:{name}"
+
+
+def container_name(repo: Path, name: str) -> str:
+    """Return the deterministic container name for a session.
+
+    Uses repo_id (basename + path hash) rather than bare basename to avoid
+    collisions between repos with the same directory name at different paths.
+    """
+    return f"hatchery-{repo_id(repo)}-{name}"
 
 
 def repo_tasks_for_current_repo(repo: Path) -> list[dict]:

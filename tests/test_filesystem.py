@@ -9,7 +9,7 @@ import pytest
 import seekr_hatchery.agents as agent
 import seekr_hatchery.docker as docker
 import seekr_hatchery.git as git
-import seekr_hatchery.tasks as tasks
+import seekr_hatchery.sessions as sessions
 
 # ---------------------------------------------------------------------------
 # write_task_file
@@ -20,52 +20,52 @@ class TestWriteTaskFile:
     def test_creates_file(self, tmp_path):
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        with patch("seekr_hatchery.tasks.datetime") as mock_dt:
+        with patch("seekr_hatchery.sessions.datetime") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 1, 15, 10, 30)
-            path = tasks.write_task_file(worktree, "my-task", "hatchery/my-task")
+            path = sessions.write_task_file(worktree, "my-task", "hatchery/my-task")
         assert path.exists()
 
     def test_correct_path(self, tmp_path):
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        with patch("seekr_hatchery.tasks.datetime") as mock_dt:
+        with patch("seekr_hatchery.sessions.datetime") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 1, 15, 10, 30)
-            path = tasks.write_task_file(worktree, "my-task", "hatchery/my-task")
+            path = sessions.write_task_file(worktree, "my-task", "hatchery/my-task")
         expected = worktree / ".hatchery" / "tasks" / "2026-01-15-my-task.md"
         assert path == expected
 
     def test_contains_task_name(self, tmp_path):
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        path = tasks.write_task_file(worktree, "my-task", "hatchery/my-task")
+        path = sessions.write_task_file(worktree, "my-task", "hatchery/my-task")
         content = path.read_text()
         assert "my-task" in content
 
     def test_contains_branch(self, tmp_path):
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        path = tasks.write_task_file(worktree, "my-task", "hatchery/my-task")
+        path = sessions.write_task_file(worktree, "my-task", "hatchery/my-task")
         content = path.read_text()
         assert "hatchery/my-task" in content
 
     def test_contains_status_in_progress(self, tmp_path):
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        path = tasks.write_task_file(worktree, "my-task", "hatchery/my-task")
+        path = sessions.write_task_file(worktree, "my-task", "hatchery/my-task")
         content = path.read_text()
         assert "in-progress" in content
 
     def test_contains_task_heading(self, tmp_path):
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        path = tasks.write_task_file(worktree, "my-task", "hatchery/my-task")
+        path = sessions.write_task_file(worktree, "my-task", "hatchery/my-task")
         content = path.read_text()
         assert "# Task:" in content
 
     def test_contains_section_headings(self, tmp_path):
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        path = tasks.write_task_file(worktree, "my-task", "hatchery/my-task")
+        path = sessions.write_task_file(worktree, "my-task", "hatchery/my-task")
         content = path.read_text()
         assert "## Objective" in content
         assert "## Context" in content
@@ -75,35 +75,35 @@ class TestWriteTaskFile:
     def test_contains_branch_label(self, tmp_path):
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        path = tasks.write_task_file(worktree, "my-task", "hatchery/my-task")
+        path = sessions.write_task_file(worktree, "my-task", "hatchery/my-task")
         content = path.read_text()
         assert "**Branch**:" in content
 
     def test_contains_status_label(self, tmp_path):
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        path = tasks.write_task_file(worktree, "my-task", "hatchery/my-task")
+        path = sessions.write_task_file(worktree, "my-task", "hatchery/my-task")
         content = path.read_text()
         assert "**Status**:" in content
 
     def test_objective_param_injects_text(self, tmp_path):
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        path = tasks.write_task_file(worktree, "my-task", "hatchery/my-task", objective="Add a login page")
+        path = sessions.write_task_file(worktree, "my-task", "hatchery/my-task", objective="Add a login page")
         content = path.read_text()
         assert "Add a login page" in content
 
     def test_objective_param_omits_context_section(self, tmp_path):
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        path = tasks.write_task_file(worktree, "my-task", "hatchery/my-task", objective="Add a login page")
+        path = sessions.write_task_file(worktree, "my-task", "hatchery/my-task", objective="Add a login page")
         content = path.read_text()
         assert "## Context" not in content
 
     def test_objective_param_omits_todo_placeholder(self, tmp_path):
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        path = tasks.write_task_file(worktree, "my-task", "hatchery/my-task", objective="Add a login page")
+        path = sessions.write_task_file(worktree, "my-task", "hatchery/my-task", objective="Add a login page")
         content = path.read_text()
         assert "TODO" not in content
 
@@ -115,17 +115,17 @@ class TestWriteTaskFile:
 
 class TestEnsureTasksDir:
     def test_creates_hatchery_tasks_dir(self, fake_repo):
-        tasks.ensure_tasks_dir(fake_repo)
+        sessions.ensure_tasks_dir(fake_repo)
         assert (fake_repo / ".hatchery" / "tasks").is_dir()
 
     def test_creates_readme(self, fake_repo):
-        tasks.ensure_tasks_dir(fake_repo)
+        sessions.ensure_tasks_dir(fake_repo)
         readme = fake_repo / ".hatchery" / "README.md"
         assert readme.exists()
 
     def test_idempotent_second_call(self, fake_repo):
-        tasks.ensure_tasks_dir(fake_repo)
-        tasks.ensure_tasks_dir(fake_repo)
+        sessions.ensure_tasks_dir(fake_repo)
+        sessions.ensure_tasks_dir(fake_repo)
         assert (fake_repo / ".hatchery" / "tasks").is_dir()
 
     def test_preserves_existing_readme(self, fake_repo):
@@ -133,11 +133,11 @@ class TestEnsureTasksDir:
         hatchery.mkdir(exist_ok=True)
         readme = hatchery / "README.md"
         readme.write_text("existing content")
-        tasks.ensure_tasks_dir(fake_repo)
+        sessions.ensure_tasks_dir(fake_repo)
         assert readme.read_text() == "existing content"
 
     def test_readme_has_content(self, fake_repo):
-        tasks.ensure_tasks_dir(fake_repo)
+        sessions.ensure_tasks_dir(fake_repo)
         readme = fake_repo / ".hatchery" / "README.md"
         assert len(readme.read_text()) > 0
 
@@ -149,32 +149,32 @@ class TestEnsureTasksDir:
 
 class TestEnsureGitignore:
     def test_creates_gitignore_when_absent(self, fake_repo):
-        tasks.ensure_gitignore(fake_repo)
+        sessions.ensure_gitignore(fake_repo)
         assert (fake_repo / ".gitignore").exists()
 
     def test_created_contains_worktrees_entry(self, fake_repo):
-        tasks.ensure_gitignore(fake_repo)
+        sessions.ensure_gitignore(fake_repo)
         content = (fake_repo / ".gitignore").read_text()
         assert ".hatchery/worktrees/" in content
 
     def test_appends_to_existing_gitignore(self, fake_repo):
         gitignore = fake_repo / ".gitignore"
         gitignore.write_text("*.pyc\n")
-        tasks.ensure_gitignore(fake_repo)
+        sessions.ensure_gitignore(fake_repo)
         content = gitignore.read_text()
         assert "*.pyc" in content
         assert ".hatchery/worktrees/" in content
 
     def test_idempotent_no_duplicate_entry(self, fake_repo):
-        tasks.ensure_gitignore(fake_repo)
-        tasks.ensure_gitignore(fake_repo)
+        sessions.ensure_gitignore(fake_repo)
+        sessions.ensure_gitignore(fake_repo)
         content = (fake_repo / ".gitignore").read_text()
         assert content.count(".hatchery/worktrees/") == 1
 
     def test_handles_missing_trailing_newline(self, fake_repo):
         gitignore = fake_repo / ".gitignore"
         gitignore.write_text("*.pyc")  # no trailing newline
-        tasks.ensure_gitignore(fake_repo)
+        sessions.ensure_gitignore(fake_repo)
         content = gitignore.read_text()
         assert ".hatchery/worktrees/" in content
         # Verify the entries are on separate lines
@@ -185,7 +185,7 @@ class TestEnsureGitignore:
     def test_idempotent_with_existing_entry(self, fake_repo):
         gitignore = fake_repo / ".gitignore"
         gitignore.write_text(".hatchery/worktrees/\n")
-        tasks.ensure_gitignore(fake_repo)
+        sessions.ensure_gitignore(fake_repo)
         content = gitignore.read_text()
         assert content.count(".hatchery/worktrees/") == 1
 
@@ -207,7 +207,7 @@ class TestRemoveWorktree:
             result.stderr = ""
             return result
 
-        monkeypatch.setattr(tasks, "run", fake_run)
+        monkeypatch.setattr(sessions, "run", fake_run)
         git.remove_worktree(repo, worktree)
 
         assert any("worktree" in " ".join(c) and "remove" in " ".join(c) for c in run_calls)
@@ -228,7 +228,7 @@ class TestRemoveWorktree:
             result.stderr = ""
             return result
 
-        monkeypatch.setattr(tasks, "run", fake_run)
+        monkeypatch.setattr(sessions, "run", fake_run)
         git.remove_worktree(repo, worktree, force=True)
 
         remove_calls = [c for c in run_calls if "remove" in " ".join(c)]
@@ -251,7 +251,7 @@ class TestRemoveWorktree:
             call_count[0] += 1
             return result
 
-        monkeypatch.setattr(tasks, "run", fake_run)
+        monkeypatch.setattr(sessions, "run", fake_run)
         git.remove_worktree(repo, worktree)
 
         # Worktree should have been removed by shutil.rmtree
@@ -273,7 +273,7 @@ class TestRemoveWorktree:
             result.stderr = ""
             return result
 
-        monkeypatch.setattr(tasks, "run", fake_run)
+        monkeypatch.setattr(sessions, "run", fake_run)
         git.remove_worktree(repo, worktree)
 
         assert any("prune" in " ".join(c) for c in run_calls)
@@ -417,7 +417,7 @@ class TestEnsureDockerfile:
         df = docker.dockerfile_path(fake_repo, agent.CODEX)
         df.write_text("existing content")
         monkeypatch.setattr("builtins.input", lambda _: "n")
-        with patch("seekr_hatchery.docker.tasks.open_for_editing") as mock_edit:
+        with patch("seekr_hatchery.docker.sessions.open_for_editing") as mock_edit:
             docker.ensure_dockerfile(fake_repo, agent.CODEX)
         assert df.read_text() == "existing content"
         mock_edit.assert_not_called()
@@ -425,28 +425,28 @@ class TestEnsureDockerfile:
     def test_yes_opens_editor(self, fake_repo, monkeypatch):
         self._prep(fake_repo)
         monkeypatch.setattr("builtins.input", lambda _: "y")
-        with patch("seekr_hatchery.docker.tasks.open_for_editing") as mock_edit:
+        with patch("seekr_hatchery.docker.sessions.open_for_editing") as mock_edit:
             docker.ensure_dockerfile(fake_repo)
         mock_edit.assert_called_once()
 
     def test_enter_opens_editor(self, fake_repo, monkeypatch):
         self._prep(fake_repo)
         monkeypatch.setattr("builtins.input", lambda _: "")  # pressing Enter = default yes
-        with patch("seekr_hatchery.docker.tasks.open_for_editing") as mock_edit:
+        with patch("seekr_hatchery.docker.sessions.open_for_editing") as mock_edit:
             docker.ensure_dockerfile(fake_repo)
         mock_edit.assert_called_once()
 
     def test_no_skips_editor(self, fake_repo, monkeypatch):
         self._prep(fake_repo)
         monkeypatch.setattr("builtins.input", lambda _: "n")
-        with patch("seekr_hatchery.docker.tasks.open_for_editing") as mock_edit:
+        with patch("seekr_hatchery.docker.sessions.open_for_editing") as mock_edit:
             docker.ensure_dockerfile(fake_repo)
         mock_edit.assert_not_called()
 
     def test_does_not_commit(self, fake_repo, monkeypatch):
         self._prep(fake_repo)
         monkeypatch.setattr("builtins.input", lambda _: "n")
-        with patch("seekr_hatchery.docker.tasks.run") as mock_run:
+        with patch("seekr_hatchery.docker.sessions.run") as mock_run:
             docker.ensure_dockerfile(fake_repo)
         mock_run.assert_not_called()
 
@@ -528,7 +528,7 @@ class TestEnsureDockerConfig:
         self._prep(fake_repo)
         monkeypatch.setattr("builtins.input", lambda _: "n")
         docker.ensure_docker_config(fake_repo)
-        assert (fake_repo / tasks.DOCKER_CONFIG).exists()
+        assert (fake_repo / sessions.DOCKER_CONFIG).exists()
 
     def test_returns_true_when_created(self, fake_repo, monkeypatch):
         self._prep(fake_repo)
@@ -537,16 +537,16 @@ class TestEnsureDockerConfig:
 
     def test_returns_false_when_already_exists(self, fake_repo, monkeypatch):
         self._prep(fake_repo)
-        (fake_repo / tasks.DOCKER_CONFIG).write_text("existing")
+        (fake_repo / sessions.DOCKER_CONFIG).write_text("existing")
         monkeypatch.setattr("builtins.input", lambda _: "n")
         assert docker.ensure_docker_config(fake_repo) is False
 
     def test_skips_if_already_exists(self, fake_repo, monkeypatch):
         self._prep(fake_repo)
-        config = fake_repo / tasks.DOCKER_CONFIG
+        config = fake_repo / sessions.DOCKER_CONFIG
         config.write_text("existing content")
         monkeypatch.setattr("builtins.input", lambda _: "n")
-        with patch("seekr_hatchery.docker.tasks.open_for_editing") as mock_edit:
+        with patch("seekr_hatchery.docker.sessions.open_for_editing") as mock_edit:
             docker.ensure_docker_config(fake_repo)
         assert config.read_text() == "existing content"
         mock_edit.assert_not_called()
@@ -554,28 +554,28 @@ class TestEnsureDockerConfig:
     def test_yes_opens_editor(self, fake_repo, monkeypatch):
         self._prep(fake_repo)
         monkeypatch.setattr("builtins.input", lambda _: "y")
-        with patch("seekr_hatchery.docker.tasks.open_for_editing") as mock_edit:
+        with patch("seekr_hatchery.docker.sessions.open_for_editing") as mock_edit:
             docker.ensure_docker_config(fake_repo)
         mock_edit.assert_called_once()
 
     def test_enter_opens_editor(self, fake_repo, monkeypatch):
         self._prep(fake_repo)
         monkeypatch.setattr("builtins.input", lambda _: "")  # pressing Enter = default yes
-        with patch("seekr_hatchery.docker.tasks.open_for_editing") as mock_edit:
+        with patch("seekr_hatchery.docker.sessions.open_for_editing") as mock_edit:
             docker.ensure_docker_config(fake_repo)
         mock_edit.assert_called_once()
 
     def test_no_skips_editor(self, fake_repo, monkeypatch):
         self._prep(fake_repo)
         monkeypatch.setattr("builtins.input", lambda _: "n")
-        with patch("seekr_hatchery.docker.tasks.open_for_editing") as mock_edit:
+        with patch("seekr_hatchery.docker.sessions.open_for_editing") as mock_edit:
             docker.ensure_docker_config(fake_repo)
         mock_edit.assert_not_called()
 
     def test_does_not_commit(self, fake_repo, monkeypatch):
         self._prep(fake_repo)
         monkeypatch.setattr("builtins.input", lambda _: "n")
-        with patch("seekr_hatchery.docker.tasks.run") as mock_run:
+        with patch("seekr_hatchery.docker.sessions.run") as mock_run:
             docker.ensure_docker_config(fake_repo)
         mock_run.assert_not_called()
 
@@ -585,7 +585,7 @@ class TestEnsureDockerConfig:
         self._prep(fake_repo)
         monkeypatch.setattr("builtins.input", lambda _: "n")
         docker.ensure_docker_config(fake_repo)
-        content = (fake_repo / tasks.DOCKER_CONFIG).read_text()
+        content = (fake_repo / sessions.DOCKER_CONFIG).read_text()
         parsed = yaml.safe_load(content)
         assert parsed["schema_version"] == "1"
 
@@ -597,9 +597,9 @@ class TestEnsureDockerConfig:
         repo.mkdir()
         (source / ".hatchery").mkdir()
         (repo / ".hatchery").mkdir()
-        (source / tasks.DOCKER_CONFIG).write_text("custom: true\n")
+        (source / sessions.DOCKER_CONFIG).write_text("custom: true\n")
         docker.ensure_docker_config(repo, source=source)
-        assert (repo / tasks.DOCKER_CONFIG).read_text() == "custom: true\n"
+        assert (repo / sessions.DOCKER_CONFIG).read_text() == "custom: true\n"
 
     def test_source_returns_false_when_copied(self, tmp_path):
         """Copying from source returns False so callers skip auto-commit."""
@@ -609,7 +609,7 @@ class TestEnsureDockerConfig:
         repo.mkdir()
         (source / ".hatchery").mkdir()
         (repo / ".hatchery").mkdir()
-        (source / tasks.DOCKER_CONFIG).write_text("custom: true\n")
+        (source / sessions.DOCKER_CONFIG).write_text("custom: true\n")
         result = docker.ensure_docker_config(repo, source=source)
         assert result is False
 
@@ -624,7 +624,7 @@ class TestEnsureDockerConfig:
         monkeypatch.setattr("builtins.input", lambda _: "n")
         result = docker.ensure_docker_config(repo, source=source)
         assert result is True
-        assert (repo / tasks.DOCKER_CONFIG).exists()
+        assert (repo / sessions.DOCKER_CONFIG).exists()
 
     def test_source_ignored_when_dest_already_exists(self, tmp_path):
         """If destination already has docker.yaml, source= is irrelevant."""
@@ -634,11 +634,11 @@ class TestEnsureDockerConfig:
         repo.mkdir()
         (source / ".hatchery").mkdir()
         (repo / ".hatchery").mkdir()
-        (source / tasks.DOCKER_CONFIG).write_text("from: source\n")
-        (repo / tasks.DOCKER_CONFIG).write_text("existing: true\n")
+        (source / sessions.DOCKER_CONFIG).write_text("from: source\n")
+        (repo / sessions.DOCKER_CONFIG).write_text("existing: true\n")
         result = docker.ensure_docker_config(repo, source=source)
         assert result is False
-        assert (repo / tasks.DOCKER_CONFIG).read_text() == "existing: true\n"
+        assert (repo / sessions.DOCKER_CONFIG).read_text() == "existing: true\n"
 
 
 # ---------------------------------------------------------------------------
