@@ -10,15 +10,15 @@ from click.testing import CliRunner
 import seekr_hatchery.docker as docker
 import seekr_hatchery.sessions as sessions
 from seekr_hatchery.cli import (
-    _WRAP_UP_PROMPT,
     TaskNameType,
     _launch_finalize,
     _launch_new,
     _launch_resume,
-    _next_chat_name,
     cli,
 )
+from seekr_hatchery.sessions import _WRAP_UP_PROMPT, next_chat_name
 from seekr_hatchery.includes import IncludeEntry
+import seekr_hatchery.constants as constants
 
 # ---------------------------------------------------------------------------
 # --version
@@ -130,9 +130,9 @@ def _new_patches():
         patch("seekr_hatchery.cli.sessions.task_db_path"),
         patch("seekr_hatchery.cli.sessions.worktrees_dir"),
         patch("seekr_hatchery.cli.git.create_worktree"),
-        patch("seekr_hatchery.cli.sessions.run"),  # git add / git commit in cmd_new
+        patch("seekr_hatchery.sessions.run"),  # git add / git commit inside sessions.create
         patch("seekr_hatchery.cli.sessions.write_task_file"),
-        patch("seekr_hatchery.cli.sessions.open_for_editing"),
+        patch("seekr_hatchery.sessions.open_for_editing"),
         patch("seekr_hatchery.cli.sessions.save_task"),
         patch("seekr_hatchery.cli.docker.resolve_runtime"),
         patch("seekr_hatchery.cli._launch_new"),
@@ -203,7 +203,7 @@ class TestCliNew:
             stack.enter_context(patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"))
             runner.invoke(cli, ["new", "my-task"])
 
-        assert mock_create_wt.call_args[0][3] == sessions.DEFAULT_BASE
+        assert mock_create_wt.call_args[0][3] == constants.DEFAULT_BASE
 
     def test_new_with_from_flag(self):
         runner = CliRunner()
@@ -861,7 +861,7 @@ class TestCmdConfigEdit:
         def fake_editor(path):
             path.write_text('{"schema_version": "1", "default_agent": "CODEX", "open_editor": true}')
 
-        with patch("seekr_hatchery.cli.sessions.open_for_editing", side_effect=fake_editor):
+        with patch("seekr_hatchery.cli.open_for_editing", side_effect=fake_editor):
             result = runner.invoke(cli, ["config", "edit"])
 
         assert result.exit_code == 0
@@ -879,7 +879,7 @@ class TestCmdConfigEdit:
         def fake_editor(path):
             path.write_text("not valid json {{")
 
-        with patch("seekr_hatchery.cli.sessions.open_for_editing", side_effect=fake_editor):
+        with patch("seekr_hatchery.cli.open_for_editing", side_effect=fake_editor):
             result = runner.invoke(cli, ["config", "edit"], input="n\n")
 
         assert result.exit_code == 1
@@ -898,7 +898,7 @@ class TestCmdConfigEdit:
         def fake_editor(path):
             path.write_text("not valid json {{")
 
-        with patch("seekr_hatchery.cli.sessions.open_for_editing", side_effect=fake_editor):
+        with patch("seekr_hatchery.cli.open_for_editing", side_effect=fake_editor):
             result = runner.invoke(cli, ["config", "edit"], input="n\n")
 
         assert result.exit_code == 1
@@ -917,7 +917,7 @@ class TestCmdConfigEdit:
             else:
                 path.write_text('{"schema_version": "1", "open_editor": true}')
 
-        with patch("seekr_hatchery.cli.sessions.open_for_editing", side_effect=fake_editor):
+        with patch("seekr_hatchery.cli.open_for_editing", side_effect=fake_editor):
             result = runner.invoke(cli, ["config", "edit"], input="\n")  # default=Y
 
         assert result.exit_code == 0
@@ -934,7 +934,7 @@ class TestCmdConfigEdit:
         def fake_editor(path):
             pass  # leave defaults in place
 
-        with patch("seekr_hatchery.cli.sessions.open_for_editing", side_effect=fake_editor):
+        with patch("seekr_hatchery.cli.open_for_editing", side_effect=fake_editor):
             result = runner.invoke(cli, ["config", "edit"])
 
         assert result.exit_code == 0
@@ -948,7 +948,7 @@ class TestCmdConfigEdit:
         def fake_editor(path):
             pass  # leave valid defaults
 
-        with patch("seekr_hatchery.cli.sessions.open_for_editing", side_effect=fake_editor):
+        with patch("seekr_hatchery.cli.open_for_editing", side_effect=fake_editor):
             result = runner.invoke(cli, ["config", "edit"])
 
         assert result.exit_code == 0
@@ -960,145 +960,113 @@ class TestCmdConfigEdit:
 # ---------------------------------------------------------------------------
 
 
+def _resume_meta(worktree: Path, **overrides) -> sessions.SessionMeta:
+    """Build a SessionMeta for cmd_resume tests against a real tmpdir worktree."""
+    kwargs = {
+        "name": "my-task",
+        "branch": "hatchery/my-task",
+        "worktree": str(worktree),
+        "repo": str(worktree.parent),
+        "session_id": "sid-123",
+        "no_worktree": False,
+    }
+    kwargs.update(overrides)
+    return sessions.SessionMeta(**kwargs)
+
+
 class TestCliResume:
-    def test_resume_dispatched(self, fake_tasks_db):
+    def test_resume_dispatched(self, tmp_path, fake_tasks_db):
         runner = CliRunner()
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        meta = _resume_meta(wt)
 
         with (
-            patch("seekr_hatchery.cli.sessions.load_task") as mock_load,
-            patch("seekr_hatchery.cli.docker.resolve_runtime") as mock_docker,
+            patch("seekr_hatchery.cli.sessions.load", return_value=meta),
+            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch_resume") as mock_launch,
         ):
-            worktree = MagicMock(spec=Path)
-            worktree.exists.return_value = True
-            mock_load.return_value = {
-                "name": "my-task",
-                "branch": "hatchery/my-task",
-                "worktree": "/some/worktree",
-                "repo": "/some/repo",
-                "session_id": "sid-123",
-            }
-            mock_docker.return_value = None
-
-            with patch("seekr_hatchery.cli.Path") as mock_path_cls:
-                mock_path_cls.return_value = worktree
-                runner.invoke(cli, ["resume", "my-task"])
+            runner.invoke(cli, ["resume", "my-task"])
 
         assert mock_launch.called
 
-    def test_resume_with_no_docker(self, fake_tasks_db):
+    def test_resume_with_no_docker(self, tmp_path, fake_tasks_db):
         runner = CliRunner()
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        meta = _resume_meta(wt)
 
         with (
-            patch("seekr_hatchery.cli.sessions.load_task") as mock_load,
-            patch("seekr_hatchery.cli.docker.resolve_runtime") as mock_docker,
+            patch("seekr_hatchery.cli.sessions.load", return_value=meta),
+            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None) as mock_docker,
+            patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch_resume"),
         ):
-            worktree = MagicMock(spec=Path)
-            worktree.exists.return_value = True
-            mock_load.return_value = {
-                "name": "my-task",
-                "branch": "hatchery/my-task",
-                "worktree": "/some/worktree",
-                "repo": "/some/repo",
-                "session_id": "sid-123",
-            }
-            mock_docker.return_value = None
-
-            with patch("seekr_hatchery.cli.Path") as mock_path_cls:
-                mock_path_cls.return_value = worktree
-                runner.invoke(cli, ["resume", "my-task", "--no-docker"])
+            runner.invoke(cli, ["resume", "my-task", "--no-docker"])
 
         call_args = mock_docker.call_args
         assert call_args[0][2] is True or call_args[1].get("no_docker") is True
 
-    def test_resume_restores_missing_dockerfile(self, fake_tasks_db):
+    def test_resume_restores_missing_dockerfile(self, tmp_path, fake_tasks_db):
         """cmd_resume restores Docker files when Dockerfile is missing from worktree."""
         runner = CliRunner()
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        meta = _resume_meta(wt)
 
         missing_df = MagicMock()
         missing_df.exists.return_value = False
 
         with (
-            patch("seekr_hatchery.cli.sessions.load_task") as mock_load,
-            patch("seekr_hatchery.cli.docker.resolve_runtime") as mock_docker,
+            patch("seekr_hatchery.cli.sessions.load", return_value=meta),
+            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
             patch("seekr_hatchery.cli.docker.dockerfile_path", return_value=missing_df),
             patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted") as mock_ensure,
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch_resume"),
         ):
-            worktree = MagicMock(spec=Path)
-            worktree.exists.return_value = True
-            mock_load.return_value = {
-                "name": "my-task",
-                "branch": "hatchery/my-task",
-                "worktree": "/some/worktree",
-                "repo": "/some/repo",
-                "session_id": "sid-123",
-            }
-            mock_docker.return_value = None
-
-            with patch("seekr_hatchery.cli.Path") as mock_path_cls:
-                mock_path_cls.return_value = worktree
-                result = runner.invoke(cli, ["resume", "my-task"])
+            result = runner.invoke(cli, ["resume", "my-task"])
 
         assert mock_ensure.called
         assert result.exit_code == 0
 
-    def test_resume_skips_restore_when_dockerfile_present(self, fake_tasks_db):
+    def test_resume_skips_restore_when_dockerfile_present(self, tmp_path, fake_tasks_db):
         """cmd_resume does not call ensure_docker_files_uncommitted when Dockerfile exists."""
         runner = CliRunner()
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        meta = _resume_meta(wt)
+        (wt / ".hatchery").mkdir()
+        (wt / ".hatchery" / "Dockerfile.codex").write_text("FROM scratch\n")
 
         with (
-            patch("seekr_hatchery.cli.sessions.load_task") as mock_load,
-            patch("seekr_hatchery.cli.docker.resolve_runtime") as mock_docker,
+            patch("seekr_hatchery.cli.sessions.load", return_value=meta),
+            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
             patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted") as mock_ensure,
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch_resume"),
         ):
-            worktree = MagicMock(spec=Path)
-            worktree.exists.return_value = True
-            mock_load.return_value = {
-                "name": "my-task",
-                "branch": "hatchery/my-task",
-                "worktree": "/some/worktree",
-                "repo": "/some/repo",
-                "session_id": "sid-123",
-            }
-            mock_docker.return_value = None
-
-            with patch("seekr_hatchery.cli.Path") as mock_path_cls:
-                mock_path_cls.return_value = worktree
-                runner.invoke(cli, ["resume", "my-task"])
+            runner.invoke(cli, ["resume", "my-task"])
 
         assert not mock_ensure.called
 
-    def test_resume_skips_restore_with_no_docker_flag(self, fake_tasks_db):
+    def test_resume_skips_restore_with_no_docker_flag(self, tmp_path, fake_tasks_db):
         """--no-docker skips the Dockerfile restoration entirely."""
         runner = CliRunner()
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        meta = _resume_meta(wt)
 
         with (
-            patch("seekr_hatchery.cli.sessions.load_task") as mock_load,
-            patch("seekr_hatchery.cli.docker.resolve_runtime") as mock_docker,
+            patch("seekr_hatchery.cli.sessions.load", return_value=meta),
+            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
             patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted") as mock_ensure,
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch_resume"),
         ):
-            worktree = MagicMock(spec=Path)
-            worktree.exists.return_value = True
-            mock_load.return_value = {
-                "name": "my-task",
-                "branch": "hatchery/my-task",
-                "worktree": "/some/worktree",
-                "repo": "/some/repo",
-                "session_id": "sid-123",
-            }
-            mock_docker.return_value = None
-
-            with patch("seekr_hatchery.cli.Path") as mock_path_cls:
-                mock_path_cls.return_value = worktree
                 runner.invoke(cli, ["resume", "my-task", "--no-docker"])
 
         assert not mock_ensure.called
@@ -1154,7 +1122,7 @@ class TestSandbox:
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
             patch("seekr_hatchery.cli.docker.ensure_dockerfile", return_value=True) as mock_df,
             patch("seekr_hatchery.cli.docker.ensure_docker_config", return_value=False),
-            patch("seekr_hatchery.cli.sessions.run"),
+            patch("seekr_hatchery.cli.run"),
             patch("seekr_hatchery.cli.docker.detect_runtime", return_value=docker.Runtime.DOCKER),
             patch("seekr_hatchery.cli.docker.launch_sandbox_shell"),
         ):
@@ -1395,7 +1363,7 @@ class TestCmdShell:
             "branch": "hatchery/my-task",
             "worktree": str(worktree_path),
             "repo": str(_SHELL_REPO),
-            "status": "paused",
+            "status": "in-progress",
             "created": "2026-01-15T10:30:00",
             "session_id": "session-uuid-xyz",
         }
@@ -1504,22 +1472,19 @@ class TestCliNoWorktree:
 
         assert saved_meta.get("no_worktree") is True
 
-    def test_no_worktree_with_dockerfile_uses_launch_docker_no_worktree(self):
+    def test_no_worktree_with_dockerfile_propagates_flag_to_launch(self):
+        """--no-worktree flag must reach _launch_new (the docker dispatch is mocked)."""
         runner = CliRunner()
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             _, _, _, mock_launch, mock_docker = self._setup_no_worktree_mocks(mocks)
             mock_docker.return_value = docker.Runtime.DOCKER  # Dockerfile present → Docker
-            stack.enter_context(patch("seekr_hatchery.cli.docker.launch_docker_no_worktree"))
-            # Override _launch_new to NOT be mocked so Docker path is exercised
-            mock_launch.side_effect = None  # still mocked; just verify docker call
+            mock_launch.side_effect = None  # still mocked; just verify the flag propagates
             result = runner.invoke(cli, ["new", "my-task", "--no-worktree"])
 
-        # _launch_new is still mocked, so we just verify the flag propagates
         assert result.exit_code == 0
         call_kwargs = mock_launch.call_args
-        # The last positional arg or kwarg should be no_worktree=True
         args = call_kwargs[0] if call_kwargs[0] else []
         kwargs = call_kwargs[1] if call_kwargs[1] else {}
         assert True in args or kwargs.get("no_worktree") is True
@@ -1620,31 +1585,24 @@ class TestCliNoWorktree:
         assert not mock_ensure_df.called
         assert not mock_ensure_dc.called
 
-    def test_resume_skips_worktree_check_in_no_worktree_mode(self, fake_tasks_db):
+    def test_resume_skips_worktree_check_in_no_worktree_mode(self, tmp_path, fake_tasks_db):
         """cmd_resume should not error on missing worktree when no_worktree=True."""
         runner = CliRunner()
+        # no_worktree=True means meta.worktree_path doesn't need to exist
+        nonexistent = tmp_path / "does-not-exist"
+        meta = sessions.SessionMeta(
+            name="my-task", branch="", worktree=str(nonexistent), repo=str(tmp_path),
+            session_id="sid-456", no_worktree=True,
+        )
 
         with (
-            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path("/some/dir"), False)),
-            patch("seekr_hatchery.cli.sessions.load_task") as mock_load,
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(tmp_path, False)),
+            patch("seekr_hatchery.cli.sessions.load", return_value=meta),
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch_resume") as mock_launch,
         ):
-            mock_load.return_value = {
-                "name": "my-task",
-                "branch": "",
-                "worktree": "/some/dir",
-                "repo": "/some/dir",
-                "session_id": "sid-456",
-                "no_worktree": True,
-            }
-            # Even though Path("/some/dir") may not exist, no error should occur
-            with patch("seekr_hatchery.cli.Path") as mock_path_cls:
-                mock_wt = MagicMock(spec=Path)
-                mock_wt.exists.return_value = False  # worktree doesn't exist
-                mock_path_cls.return_value = mock_wt
-                runner.invoke(cli, ["resume", "my-task"])
+            runner.invoke(cli, ["resume", "my-task"])
 
         assert mock_launch.called
 
@@ -1727,7 +1685,7 @@ class TestLaunchHooks:
         return [
             patch("seekr_hatchery.cli.sessions.task_session_dir", return_value=Path("/session")),
             patch("seekr_hatchery.cli.sessions.sandbox_context", return_value="ctx"),
-            patch("seekr_hatchery.cli.sessions.SESSION_SYSTEM", "sys"),
+            patch("seekr_hatchery.cli.sessions._SESSION_SYSTEM", "sys"),
             patch("seekr_hatchery.cli.sessions.session_prompt", return_value="prompt"),
             patch("seekr_hatchery.cli.subprocess.run"),
             patch(
@@ -1878,7 +1836,7 @@ class TestRunningState:
         with (
             patch("seekr_hatchery.cli.sessions.task_session_dir", return_value=Path("/session")),
             patch("seekr_hatchery.cli.sessions.sandbox_context", return_value="ctx"),
-            patch("seekr_hatchery.cli.sessions.SESSION_SYSTEM", "sys"),
+            patch("seekr_hatchery.cli.sessions._SESSION_SYSTEM", "sys"),
             patch("seekr_hatchery.cli.sessions.session_prompt", return_value="prompt"),
             patch("seekr_hatchery.cli.subprocess.run"),
             patch("seekr_hatchery.cli.sessions.load_task", side_effect=fake_load_task),
@@ -1928,13 +1886,13 @@ class TestChat:
 class TestNextChatName:
     def test_no_existing_chats(self, fake_tasks_db):
         with patch("seekr_hatchery.cli.sessions.repo_tasks_for_current_repo", return_value=[]):
-            result = _next_chat_name(Path("/my/repo"))
+            result = next_chat_name(Path("/my/repo"))
         assert result == "chat-1"
 
     def test_one_existing_chat(self, fake_tasks_db):
         existing = [{"name": "chat-1", "type": "chat"}]
         with patch("seekr_hatchery.cli.sessions.repo_tasks_for_current_repo", return_value=existing):
-            result = _next_chat_name(Path("/my/repo"))
+            result = next_chat_name(Path("/my/repo"))
         assert result == "chat-2"
 
     def test_reuses_gap(self, fake_tasks_db):
@@ -1944,7 +1902,7 @@ class TestNextChatName:
             {"name": "chat-3", "type": "chat"},
         ]
         with patch("seekr_hatchery.cli.sessions.repo_tasks_for_current_repo", return_value=existing):
-            result = _next_chat_name(Path("/my/repo"))
+            result = next_chat_name(Path("/my/repo"))
         assert result == "chat-1"
 
     def test_reuses_middle_gap(self, fake_tasks_db):
@@ -1953,7 +1911,7 @@ class TestNextChatName:
             {"name": "chat-3", "type": "chat"},
         ]
         with patch("seekr_hatchery.cli.sessions.repo_tasks_for_current_repo", return_value=existing):
-            result = _next_chat_name(Path("/my/repo"))
+            result = next_chat_name(Path("/my/repo"))
         assert result == "chat-2"
 
     def test_no_gap_uses_next(self, fake_tasks_db):
@@ -1963,7 +1921,7 @@ class TestNextChatName:
             {"name": "chat-3", "type": "chat"},
         ]
         with patch("seekr_hatchery.cli.sessions.repo_tasks_for_current_repo", return_value=existing):
-            result = _next_chat_name(Path("/my/repo"))
+            result = next_chat_name(Path("/my/repo"))
         assert result == "chat-4"
 
     def test_ignores_non_chat_tasks(self, fake_tasks_db):
@@ -1972,7 +1930,7 @@ class TestNextChatName:
             {"name": "chat-1", "type": "chat"},
         ]
         with patch("seekr_hatchery.cli.sessions.repo_tasks_for_current_repo", return_value=existing):
-            result = _next_chat_name(Path("/my/repo"))
+            result = next_chat_name(Path("/my/repo"))
         assert result == "chat-2"
 
     def test_ignores_non_numeric_chat_names(self, fake_tasks_db):
@@ -1981,7 +1939,7 @@ class TestNextChatName:
             {"name": "chat-1", "type": "chat"},
         ]
         with patch("seekr_hatchery.cli.sessions.repo_tasks_for_current_repo", return_value=existing):
-            result = _next_chat_name(Path("/my/repo"))
+            result = next_chat_name(Path("/my/repo"))
         assert result == "chat-2"
 
 
@@ -2078,7 +2036,7 @@ class TestLaunchNewChat:
             # Need sandbox_context, session_prompt, SESSION_SYSTEM for task mode
             stack.enter_context(patch("seekr_hatchery.cli.sessions.sandbox_context", return_value="ctx"))
             stack.enter_context(patch("seekr_hatchery.cli.sessions.session_prompt", return_value="prompt"))
-            stack.enter_context(patch("seekr_hatchery.cli.sessions.SESSION_SYSTEM", "sys"))
+            stack.enter_context(patch("seekr_hatchery.cli.sessions._SESSION_SYSTEM", "sys"))
             _launch_new(
                 repo=Path("/repo"),
                 worktree=Path("/worktree"),
@@ -2171,7 +2129,7 @@ class TestCmdChatDispatch:
 
         with (
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path("/repo"), True)),
-            patch("seekr_hatchery.cli._next_chat_name", return_value="chat-1"),
+            patch("seekr_hatchery.sessions.next_chat_name", return_value="chat-1"),
             patch("seekr_hatchery.cli.docker.ensure_dockerfile", return_value=False),
             patch("seekr_hatchery.cli.docker.ensure_docker_config", return_value=False),
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
@@ -2215,7 +2173,7 @@ class TestCmdChatDispatch:
 
         with (
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path("/repo"), True)),
-            patch("seekr_hatchery.cli._next_chat_name", return_value="chat-1"),
+            patch("seekr_hatchery.sessions.next_chat_name", return_value="chat-1"),
             patch("seekr_hatchery.cli.docker.ensure_dockerfile", return_value=False),
             patch("seekr_hatchery.cli.docker.ensure_docker_config", return_value=False),
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
@@ -2278,30 +2236,20 @@ class TestCmdStatusShowsType:
 class TestResumeChat:
     """Test that cmd_resume passes is_chat for chat metadata."""
 
-    def test_resume_passes_is_chat_for_chat(self, fake_tasks_db):
+    def test_resume_passes_is_chat_for_chat(self, tmp_path, fake_tasks_db):
         runner = CliRunner()
+        meta = sessions.SessionMeta(
+            name="chat-1", type="chat", branch="", worktree=str(tmp_path),
+            repo=str(tmp_path), session_id="sid-123", no_worktree=True,
+        )
 
         with (
-            patch("seekr_hatchery.cli.sessions.load_task") as mock_load,
+            patch("seekr_hatchery.cli.sessions.load", return_value=meta),
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch_resume") as mock_launch,
         ):
-            worktree = MagicMock(spec=Path)
-            worktree.exists.return_value = True
-            mock_load.return_value = {
-                "name": "chat-1",
-                "type": "chat",
-                "branch": "",
-                "worktree": "/some/repo",
-                "repo": "/some/repo",
-                "session_id": "sid-123",
-                "no_worktree": True,
-            }
-
-            with patch("seekr_hatchery.cli.Path") as mock_path_cls:
-                mock_path_cls.return_value = worktree
-                runner.invoke(cli, ["resume", "chat-1"])
+            runner.invoke(cli, ["resume", "chat-1"])
 
         assert mock_launch.called
         call_kwargs = mock_launch.call_args
@@ -2310,28 +2258,20 @@ class TestResumeChat:
         # is_chat should be True
         assert kwargs.get("is_chat") is True or (len(args) > 9 and args[9] is True)
 
-    def test_resume_passes_is_chat_false_for_task(self, fake_tasks_db):
+    def test_resume_passes_is_chat_false_for_task(self, tmp_path, fake_tasks_db):
         runner = CliRunner()
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        meta = _resume_meta(wt)
 
         with (
-            patch("seekr_hatchery.cli.sessions.load_task") as mock_load,
+            patch("seekr_hatchery.cli.sessions.load", return_value=meta),
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch_resume") as mock_launch,
         ):
-            worktree = MagicMock(spec=Path)
-            worktree.exists.return_value = True
-            mock_load.return_value = {
-                "name": "my-task",
-                "branch": "hatchery/my-task",
-                "worktree": "/some/worktree",
-                "repo": "/some/repo",
-                "session_id": "sid-123",
-            }
-
-            with patch("seekr_hatchery.cli.Path") as mock_path_cls:
-                mock_path_cls.return_value = worktree
-                runner.invoke(cli, ["resume", "my-task"])
+            runner.invoke(cli, ["resume", "my-task"])
 
         assert mock_launch.called
         call_kwargs = mock_launch.call_args
@@ -2350,6 +2290,7 @@ class TestResumeChat:
 class TestExec:
     def test_exec_dispatches_to_exec_task_shell(self, tmp_path):
         runner = CliRunner()
+        expected_name = sessions.container_name(tmp_path, "my-task")
         with (
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(tmp_path, True)),
             patch("seekr_hatchery.cli.docker.detect_runtime", return_value=docker.Runtime.DOCKER),
@@ -2357,11 +2298,11 @@ class TestExec:
         ):
             result = runner.invoke(cli, ["exec", "my-task"])
         assert result.exit_code == 0, result.output
-        assert mock_exec.called
-        mock_exec.assert_called_once_with("my-task", docker.Runtime.DOCKER, tmp_path, shell="/bin/bash")
+        mock_exec.assert_called_once_with(expected_name, docker.Runtime.DOCKER, shell="/bin/bash")
 
     def test_exec_custom_shell(self, tmp_path):
         runner = CliRunner()
+        expected_name = sessions.container_name(tmp_path, "my-task")
         with (
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(tmp_path, True)),
             patch("seekr_hatchery.cli.docker.detect_runtime", return_value=docker.Runtime.DOCKER),
@@ -2369,7 +2310,7 @@ class TestExec:
         ):
             result = runner.invoke(cli, ["exec", "my-task", "--shell", "/bin/sh"])
         assert result.exit_code == 0, result.output
-        mock_exec.assert_called_once_with("my-task", docker.Runtime.DOCKER, tmp_path, shell="/bin/sh")
+        mock_exec.assert_called_once_with(expected_name, docker.Runtime.DOCKER, shell="/bin/sh")
 
 
 # ---------------------------------------------------------------------------
@@ -2382,7 +2323,7 @@ class TestCompletion:
         monkeypatch.chdir(tmp_path)
 
         t = TaskNameType()
-        with patch("seekr_hatchery.sessions.TASKS_DB_DIR", tmp_path / "nonexistent"):
+        with patch("seekr_hatchery.sessions._TASKS_DB_DIR", tmp_path / "nonexistent"):
             result = t.shell_complete(MagicMock(), MagicMock(), "")
         assert result == []
 
@@ -2826,10 +2767,10 @@ class TestCliNewInclude:
 
 
 class TestCliResumeInclude:
-    def _meta(self, tmp_path, include=None):
+    def _meta(self, tmp_path, include=None, **overrides) -> sessions.SessionMeta:
         wt = tmp_path / "wt"
         wt.mkdir(exist_ok=True)
-        return {
+        kwargs = {
             "name": "my-task",
             "branch": "hatchery/my-task",
             "worktree": str(wt),
@@ -2838,13 +2779,15 @@ class TestCliResumeInclude:
             "no_worktree": False,
             "include": include or [],
         }
+        kwargs.update(overrides)
+        return sessions.SessionMeta(**kwargs)
 
     def _invoke_resume(self, runner, meta, extra_args=()):
         """Run cmd_resume with minimal mocks. Returns (result, launch_kwargs, saved_calls)."""
         saved = []
         with (
-            patch("seekr_hatchery.cli.sessions.load_task", return_value=meta),
-            patch("seekr_hatchery.cli.sessions.save_task", side_effect=lambda m: saved.append(dict(m))),
+            patch("seekr_hatchery.cli.sessions.load", return_value=meta),
+            patch("seekr_hatchery.cli.sessions.save", side_effect=lambda m: saved.append(m.model_dump())),
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
             patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
@@ -2870,10 +2813,9 @@ class TestCliResumeInclude:
         assert any(e.path == repo_b and e.mode == "ro" for e in include_repos)
 
     def test_missing_include_key_defaults_to_empty(self, fake_tasks_db, tmp_path):
-        """Tasks without 'include' metadata resume without error."""
+        """Tasks with no include entries resume without error (model default = [])."""
         runner = CliRunner()
         meta = self._meta(tmp_path)
-        del meta["include"]
 
         result, kwargs, _ = self._invoke_resume(runner, meta)
 
@@ -2919,8 +2861,8 @@ class TestCliResumeInclude:
         meta = self._meta(tmp_path, include=[{"path": str(repo_b), "mode": "worktree"}])
 
         with (
-            patch("seekr_hatchery.cli.sessions.load_task", return_value=meta),
-            patch("seekr_hatchery.cli.sessions.save_task"),
+            patch("seekr_hatchery.cli.sessions.load", return_value=meta),
+            patch("seekr_hatchery.cli.sessions.save"),
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
             patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
@@ -2948,8 +2890,8 @@ class TestCliResumeInclude:
         meta = self._meta(tmp_path, include=[{"path": str(repo_b), "mode": "ro"}])
 
         with (
-            patch("seekr_hatchery.cli.sessions.load_task", return_value=meta),
-            patch("seekr_hatchery.cli.sessions.save_task"),
+            patch("seekr_hatchery.cli.sessions.load", return_value=meta),
+            patch("seekr_hatchery.cli.sessions.save"),
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
             patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
@@ -2973,8 +2915,7 @@ class TestCliResumeInclude:
         runner = CliRunner()
         ref = tmp_path / "ref"
         ref.mkdir()
-        meta = self._meta(tmp_path)
-        meta["no_worktree"] = True
+        meta = self._meta(tmp_path, no_worktree=True)
 
         result, kwargs, _ = self._invoke_resume(runner, meta, extra_args=["--include-ro", str(ref)])
 
@@ -2990,8 +2931,8 @@ class TestCliResumeInclude:
         meta = self._meta(tmp_path, include=[{"path": str(repo_b), "mode": "rw"}])
 
         with (
-            patch("seekr_hatchery.cli.sessions.load_task", return_value=meta),
-            patch("seekr_hatchery.cli.sessions.save_task"),
+            patch("seekr_hatchery.cli.sessions.load", return_value=meta),
+            patch("seekr_hatchery.cli.sessions.save"),
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
             patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
@@ -3015,16 +2956,17 @@ class TestCliResumeInclude:
         runner = CliRunner()
         repo_b = tmp_path / "repo-b"
         repo_b.mkdir()
-        # Worktree directory does not exist (archived state).
-        meta = self._meta(tmp_path, include=[{"path": str(repo_b), "mode": "worktree"}])
-        meta["status"] = "archived"
+        meta = self._meta(
+            tmp_path,
+            include=[{"path": str(repo_b), "mode": "worktree"}],
+            status="archived",
+        )
         # Remove the worktree directory so resume triggers the archive restoration path.
-        wt = Path(meta["worktree"])
-        wt.rmdir()
+        Path(meta.worktree).rmdir()
 
         with (
-            patch("seekr_hatchery.cli.sessions.load_task", return_value=meta),
-            patch("seekr_hatchery.cli.sessions.save_task"),
+            patch("seekr_hatchery.cli.sessions.load", return_value=meta),
+            patch("seekr_hatchery.cli.sessions.save") as mock_save,
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
             patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
@@ -3040,6 +2982,55 @@ class TestCliResumeInclude:
         mock_create_inc.assert_called()
         all_calls = mock_create_inc.call_args_list
         assert any(any(e.path == repo_b.resolve() and e.mode == "worktree" for e in call[0][0]) for call in all_calls)
+        # Status was flipped to in-progress and persisted.
+        mock_save.assert_called_once()
+        saved_meta = mock_save.call_args[0][0]
+        assert saved_meta.status == "in-progress"
+
+    def test_resume_after_complete_recreates_worktree_and_flips_status(self, fake_tasks_db, tmp_path):
+        """Resuming a completed task (worktree removed at mark-done) restores it.
+
+        This is the "tasks sometimes get marked complete by accident" path the
+        sessions.launch docstring calls out. Shares ~90% with the archive test
+        — the user-facing difference is the "completed" vs "archived" banner
+        label printed during restoration.
+        """
+        runner = CliRunner()
+        repo_b = tmp_path / "repo-b"
+        repo_b.mkdir()
+        meta = self._meta(
+            tmp_path,
+            include=[{"path": str(repo_b), "mode": "worktree"}],
+            status="complete",
+        )
+        # Worktree was removed when mark_done ran; simulate that.
+        Path(meta.worktree).rmdir()
+
+        with (
+            patch("seekr_hatchery.cli.sessions.load", return_value=meta),
+            patch("seekr_hatchery.cli.sessions.save") as mock_save,
+            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted"),
+            patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
+            patch("seekr_hatchery.cli.git.create_worktree"),
+            patch("seekr_hatchery.cli.git.create_include_worktrees") as mock_create_inc,
+            patch("seekr_hatchery.cli.git.remove_include_worktrees"),
+            patch("seekr_hatchery.cli._launch_resume") as mock_launch,
+        ):
+            result = runner.invoke(cli, ["resume", "my-task"])
+
+        assert result.exit_code == 0, result.output
+        # Same worktree-recreate behaviour as archived.
+        mock_create_inc.assert_called()
+        all_calls = mock_create_inc.call_args_list
+        assert any(any(e.path == repo_b.resolve() and e.mode == "worktree" for e in call[0][0]) for call in all_calls)
+        # Status flipped back to in-progress and persisted before launch.
+        mock_save.assert_called_once()
+        saved_meta = mock_save.call_args[0][0]
+        assert saved_meta.status == "in-progress"
+        # And launch happened.
+        assert mock_launch.called
+        assert "completed" in result.output  # banner label distinguishes complete from archived
 
     def test_cli_include_flag_overrides_yaml_mode_for_same_path(self, fake_tasks_db, tmp_path):
         """CLI --include-ro overrides docker.yaml worktree mode for the same path."""
@@ -3258,6 +3249,7 @@ class TestDoDeleteInclude:
             "include": [str(repo_b)],
         }
         sessions.save_task(meta)
+        meta_obj = sessions.load(repo, "my-task")
 
         import seekr_hatchery.cli as cli_mod
 
@@ -3267,7 +3259,7 @@ class TestDoDeleteInclude:
             patch("seekr_hatchery.cli.git.remove_include_worktrees") as mock_remove,
             patch("seekr_hatchery.cli.git.delete_include_branches") as mock_delete_br,
         ):
-            cli_mod._do_delete("my-task", repo, wt, meta, confirmed=True)
+            cli_mod._do_delete(meta_obj, confirmed=True)
 
         mock_remove.assert_called_once_with([IncludeEntry(repo_b, "worktree")], "my-task")
         mock_delete_br.assert_called_once_with([IncludeEntry(repo_b, "worktree")], "my-task")
@@ -3286,6 +3278,7 @@ class TestDoDeleteInclude:
             "no_worktree": False,
         }
         sessions.save_task(meta)
+        meta_obj = sessions.load(repo, "my-task")
 
         import seekr_hatchery.cli as cli_mod
 
@@ -3295,7 +3288,7 @@ class TestDoDeleteInclude:
             patch("seekr_hatchery.cli.git.remove_include_worktrees") as mock_remove,
             patch("seekr_hatchery.cli.git.delete_include_branches") as mock_delete_br,
         ):
-            cli_mod._do_delete("my-task", repo, wt, meta, confirmed=True)
+            cli_mod._do_delete(meta_obj, confirmed=True)
 
         mock_remove.assert_not_called()
         mock_delete_br.assert_not_called()
@@ -3319,10 +3312,10 @@ class TestLaunchFinalizeInclude:
         entry_b = IncludeEntry(path=repo_b, mode="worktree")
 
         with (
-            patch("seekr_hatchery.cli._set_task_status"),
+            patch("seekr_hatchery.sessions.set_status"),
             patch("seekr_hatchery.cli._post_exit_check"),
             patch("seekr_hatchery.cli.sessions.sandbox_context", wraps=sessions.sandbox_context) as mock_ctx,
-            patch("seekr_hatchery.cli._docker_context", return_value=(MagicMock(), [], "/workspace")),
+            patch("seekr_hatchery.sessions.docker_context", return_value=(MagicMock(), [], "/workspace")),
             patch("seekr_hatchery.cli.os.chdir"),
             patch("seekr_hatchery.cli.subprocess.run"),
         ):
@@ -3344,7 +3337,7 @@ class TestLaunchFinalizeInclude:
         assert entry_b in kwargs.get("include_paths", [])
 
     def test_include_repos_forwarded_to_launch_docker(self, tmp_path, spy_backend):
-        """_launch_finalize forwards include_repos to launch_docker."""
+        """_launch_finalize forwards include_repos to docker.run_session."""
         repo = tmp_path / "repo"
         repo.mkdir()
         (repo / ".git").mkdir()
@@ -3354,13 +3347,18 @@ class TestLaunchFinalizeInclude:
         repo_b.mkdir()
         entry_b = IncludeEntry(path=repo_b, mode="worktree")
 
+        # docker_context returns a config whose .kubernetes is None so sessions.launch
+        # short-circuits the kubectl-token write that would otherwise hit fs.
+        config = MagicMock()
+        config.kubernetes = None
         with (
-            patch("seekr_hatchery.cli._set_task_status"),
+            patch("seekr_hatchery.sessions.set_status"),
             patch("seekr_hatchery.cli._post_exit_check"),
-            patch("seekr_hatchery.cli.docker.launch_docker") as mock_launch,
+            patch("seekr_hatchery.sessions.get_or_create_proxy_token", return_value="tok"),
+            patch("seekr_hatchery.sessions.docker.run_session") as mock_run_session,
             patch(
-                "seekr_hatchery.cli._docker_context",
-                return_value=(MagicMock(), [], "/repo/.hatchery/worktrees/my-task"),
+                "seekr_hatchery.sessions.docker_context",
+                return_value=(config, [], "/repo/.hatchery/worktrees/my-task"),
             ),
         ):
             _launch_finalize(
@@ -3376,6 +3374,6 @@ class TestLaunchFinalizeInclude:
                 include_repos=[entry_b],
             )
 
-        assert mock_launch.called
-        kwargs = mock_launch.call_args[1]
-        assert entry_b in kwargs.get("include_repos", [])
+        assert mock_run_session.called
+        kwargs = mock_run_session.call_args[1]
+        assert entry_b in kwargs.get("include_entries", [])

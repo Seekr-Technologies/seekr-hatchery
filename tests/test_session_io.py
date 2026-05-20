@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+import seekr_hatchery.constants as constants
 import seekr_hatchery.sessions as sessions
 
 # ---------------------------------------------------------------------------
@@ -32,7 +33,7 @@ class TestSaveTask:
 
     def test_creates_parent_dirs(self, tmp_path, monkeypatch):
         db = tmp_path / "deep" / "nested" / "tasks"
-        monkeypatch.setattr(sessions, "TASKS_DB_DIR", db)
+        monkeypatch.setattr(sessions, "_TASKS_DB_DIR", db)
         meta = {"name": "task1", "repo": str(_REPO), "status": "in-progress"}
         sessions.save_task(meta)
         assert (db / sessions.repo_id(_REPO) / "task1" / "meta.json").exists()
@@ -125,7 +126,7 @@ def _write_scoped(fake_tasks_db: Path, task: dict) -> None:
 
 class TestRepoTasksForCurrentRepo:
     def test_returns_empty_when_dir_absent(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(sessions, "TASKS_DB_DIR", tmp_path / "nonexistent")
+        monkeypatch.setattr(sessions, "_TASKS_DB_DIR", tmp_path / "nonexistent")
         result = sessions.repo_tasks_for_current_repo(Path("/my/repo"))
         assert result == []
 
@@ -208,8 +209,8 @@ class TestMigrateDb:
         """migrate_db() with no tasks dir creates meta.json with schema_version 1, no error."""
         hatchery = tmp_path / "hatchery"
         hatchery.mkdir()
-        monkeypatch.setattr(sessions, "HATCHERY_DIR", hatchery)
-        monkeypatch.setattr(sessions, "TASKS_DB_DIR", hatchery / "tasks")  # does not exist
+        monkeypatch.setattr(constants, "HATCHERY_DIR", hatchery)
+        monkeypatch.setattr(sessions, "_TASKS_DB_DIR", hatchery / "tasks")  # does not exist
 
         sessions.migrate_db()
 
@@ -444,7 +445,7 @@ class TestSessionMetaRoundTrip:
             del fields[missing]
             # Write directly to disk; save_task itself requires name+repo to
             # compute the path, so we can't go through it here.
-            path = sessions.TASKS_DB_DIR / sessions.repo_id(Path("/r")) / "x" / "meta.json"
+            path = sessions._TASKS_DB_DIR / sessions.repo_id(Path("/r")) / "x" / "meta.json"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(fields))
             with pytest.raises(ValidationError):
@@ -485,7 +486,7 @@ class TestSessionMetaRoundTrip:
         }
         # Write directly — save_task would stamp schema_version back to the
         # current value, defeating the test.
-        path = sessions.TASKS_DB_DIR / sessions.repo_id(Path("/r")) / "fv" / "meta.json"
+        path = sessions._TASKS_DB_DIR / sessions.repo_id(Path("/r")) / "fv" / "meta.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(future))
         with pytest.raises(SystemExit) as exc_info:
@@ -528,7 +529,7 @@ class TestSessionMetaProperties:
         assert m.worktree_path == Path("/a/b/wt")
 
     def test_session_dir_delegates(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(sessions, "TASKS_DB_DIR", tmp_path)
+        monkeypatch.setattr(sessions, "_TASKS_DB_DIR", tmp_path)
         m = sessions.SessionMeta(name="x", repo="/r", worktree="/r/w")
         assert m.session_dir == sessions.task_session_dir(Path("/r"), "x")
 

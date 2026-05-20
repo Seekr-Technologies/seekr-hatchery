@@ -8,6 +8,7 @@ import pytest
 import seekr_hatchery.agents as agent
 import seekr_hatchery.sessions as sessions
 import seekr_hatchery.user_config as user_config
+import seekr_hatchery.constants as constants
 
 # ---------------------------------------------------------------------------
 # SpyBackend — records every lifecycle call for assertion in test_cli.py
@@ -131,15 +132,15 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     Patches:
       - pathlib.Path.home()       — Python's canonical home lookup
       - HOME env var              — covers os.path.expanduser, git, subprocesses
-      - sessions.HATCHERY_DIR / TASKS_DB_DIR  — module-level constants (import-time)
+      - constants.HATCHERY_DIR / TASKS_DB_DIR  — module-level constants (import-time)
       - user_config.UserConfig.CONFIG_PATH — class-level constant (import-time)
     """
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: fake_home))
     monkeypatch.setenv("HOME", str(fake_home))
-    monkeypatch.setattr(sessions, "HATCHERY_DIR", fake_home / ".hatchery")
-    monkeypatch.setattr(sessions, "TASKS_DB_DIR", fake_home / ".hatchery" / "tasks")
+    monkeypatch.setattr(constants, "HATCHERY_DIR", fake_home / ".hatchery")
+    monkeypatch.setattr(sessions, "_TASKS_DB_DIR", fake_home / ".hatchery" / "tasks")
     monkeypatch.setattr(user_config.UserConfig, "CONFIG_PATH", fake_home / ".hatchery" / "config.json")
     return fake_home
 

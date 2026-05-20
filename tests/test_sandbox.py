@@ -17,13 +17,14 @@ import seekr_hatchery.agents as agent
 import seekr_hatchery.docker as docker
 import seekr_hatchery.proxy as proxy_mod
 import seekr_hatchery.sessions as sessions
+import seekr_hatchery.constants as constants
 
 pytestmark = pytest.mark.integration
 
 # Captured at import time, before any fixture patches HOME.
 _REAL_HOME = os.environ.get("HOME", "")
 
-CONTAINER_WORKTREE = f"{sessions.CONTAINER_REPO_ROOT}/.hatchery/worktrees/test-wt"
+CONTAINER_WORKTREE = f"{constants.CONTAINER_REPO_ROOT}/.hatchery/worktrees/test-wt"
 
 
 @pytest.fixture(autouse=True)
@@ -241,7 +242,7 @@ def wt_run(
 
     # Rewrite the worktree .git pointer to use the container-relative path.
     git_ptr = session_dir / "git_ptr"
-    git_ptr.write_text(f"gitdir: {sessions.CONTAINER_REPO_ROOT}/.git/worktrees/{task_name}\n")
+    git_ptr.write_text(f"gitdir: {constants.CONTAINER_REPO_ROOT}/.git/worktrees/{task_name}\n")
 
     mounts = docker.docker_mounts(
         wt_repo,
@@ -259,7 +260,7 @@ def wt_run(
             image=wt_image,
             mounts=mounts,
             workdir=CONTAINER_WORKTREE,
-            hatchery_repo=sessions.CONTAINER_REPO_ROOT,
+            hatchery_repo=constants.CONTAINER_REPO_ROOT,
             name=task_name,
             mutator=None,
             proxy_token=None,

@@ -10,6 +10,7 @@ import seekr_hatchery.agents as agent
 import seekr_hatchery.docker as docker
 import seekr_hatchery.git as git
 import seekr_hatchery.sessions as sessions
+import seekr_hatchery.constants as constants
 
 # ---------------------------------------------------------------------------
 # write_task_file
@@ -207,7 +208,7 @@ class TestRemoveWorktree:
             result.stderr = ""
             return result
 
-        monkeypatch.setattr(sessions, "run", fake_run)
+        monkeypatch.setattr(git, "run", fake_run)
         git.remove_worktree(repo, worktree)
 
         assert any("worktree" in " ".join(c) and "remove" in " ".join(c) for c in run_calls)
@@ -228,7 +229,7 @@ class TestRemoveWorktree:
             result.stderr = ""
             return result
 
-        monkeypatch.setattr(sessions, "run", fake_run)
+        monkeypatch.setattr(git, "run", fake_run)
         git.remove_worktree(repo, worktree, force=True)
 
         remove_calls = [c for c in run_calls if "remove" in " ".join(c)]
@@ -251,7 +252,7 @@ class TestRemoveWorktree:
             call_count[0] += 1
             return result
 
-        monkeypatch.setattr(sessions, "run", fake_run)
+        monkeypatch.setattr(git, "run", fake_run)
         git.remove_worktree(repo, worktree)
 
         # Worktree should have been removed by shutil.rmtree
@@ -273,7 +274,7 @@ class TestRemoveWorktree:
             result.stderr = ""
             return result
 
-        monkeypatch.setattr(sessions, "run", fake_run)
+        monkeypatch.setattr(git, "run", fake_run)
         git.remove_worktree(repo, worktree)
 
         assert any("prune" in " ".join(c) for c in run_calls)
@@ -417,7 +418,7 @@ class TestEnsureDockerfile:
         df = docker.dockerfile_path(fake_repo, agent.CODEX)
         df.write_text("existing content")
         monkeypatch.setattr("builtins.input", lambda _: "n")
-        with patch("seekr_hatchery.docker.sessions.open_for_editing") as mock_edit:
+        with patch("seekr_hatchery.docker.open_for_editing") as mock_edit:
             docker.ensure_dockerfile(fake_repo, agent.CODEX)
         assert df.read_text() == "existing content"
         mock_edit.assert_not_called()
@@ -425,28 +426,28 @@ class TestEnsureDockerfile:
     def test_yes_opens_editor(self, fake_repo, monkeypatch):
         self._prep(fake_repo)
         monkeypatch.setattr("builtins.input", lambda _: "y")
-        with patch("seekr_hatchery.docker.sessions.open_for_editing") as mock_edit:
+        with patch("seekr_hatchery.docker.open_for_editing") as mock_edit:
             docker.ensure_dockerfile(fake_repo)
         mock_edit.assert_called_once()
 
     def test_enter_opens_editor(self, fake_repo, monkeypatch):
         self._prep(fake_repo)
         monkeypatch.setattr("builtins.input", lambda _: "")  # pressing Enter = default yes
-        with patch("seekr_hatchery.docker.sessions.open_for_editing") as mock_edit:
+        with patch("seekr_hatchery.docker.open_for_editing") as mock_edit:
             docker.ensure_dockerfile(fake_repo)
         mock_edit.assert_called_once()
 
     def test_no_skips_editor(self, fake_repo, monkeypatch):
         self._prep(fake_repo)
         monkeypatch.setattr("builtins.input", lambda _: "n")
-        with patch("seekr_hatchery.docker.sessions.open_for_editing") as mock_edit:
+        with patch("seekr_hatchery.docker.open_for_editing") as mock_edit:
             docker.ensure_dockerfile(fake_repo)
         mock_edit.assert_not_called()
 
     def test_does_not_commit(self, fake_repo, monkeypatch):
         self._prep(fake_repo)
         monkeypatch.setattr("builtins.input", lambda _: "n")
-        with patch("seekr_hatchery.docker.sessions.run") as mock_run:
+        with patch("seekr_hatchery.docker.run") as mock_run:
             docker.ensure_dockerfile(fake_repo)
         mock_run.assert_not_called()
 
@@ -528,7 +529,7 @@ class TestEnsureDockerConfig:
         self._prep(fake_repo)
         monkeypatch.setattr("builtins.input", lambda _: "n")
         docker.ensure_docker_config(fake_repo)
-        assert (fake_repo / sessions.DOCKER_CONFIG).exists()
+        assert (fake_repo / constants.DOCKER_CONFIG).exists()
 
     def test_returns_true_when_created(self, fake_repo, monkeypatch):
         self._prep(fake_repo)
@@ -537,16 +538,16 @@ class TestEnsureDockerConfig:
 
     def test_returns_false_when_already_exists(self, fake_repo, monkeypatch):
         self._prep(fake_repo)
-        (fake_repo / sessions.DOCKER_CONFIG).write_text("existing")
+        (fake_repo / constants.DOCKER_CONFIG).write_text("existing")
         monkeypatch.setattr("builtins.input", lambda _: "n")
         assert docker.ensure_docker_config(fake_repo) is False
 
     def test_skips_if_already_exists(self, fake_repo, monkeypatch):
         self._prep(fake_repo)
-        config = fake_repo / sessions.DOCKER_CONFIG
+        config = fake_repo / constants.DOCKER_CONFIG
         config.write_text("existing content")
         monkeypatch.setattr("builtins.input", lambda _: "n")
-        with patch("seekr_hatchery.docker.sessions.open_for_editing") as mock_edit:
+        with patch("seekr_hatchery.docker.open_for_editing") as mock_edit:
             docker.ensure_docker_config(fake_repo)
         assert config.read_text() == "existing content"
         mock_edit.assert_not_called()
@@ -554,28 +555,28 @@ class TestEnsureDockerConfig:
     def test_yes_opens_editor(self, fake_repo, monkeypatch):
         self._prep(fake_repo)
         monkeypatch.setattr("builtins.input", lambda _: "y")
-        with patch("seekr_hatchery.docker.sessions.open_for_editing") as mock_edit:
+        with patch("seekr_hatchery.docker.open_for_editing") as mock_edit:
             docker.ensure_docker_config(fake_repo)
         mock_edit.assert_called_once()
 
     def test_enter_opens_editor(self, fake_repo, monkeypatch):
         self._prep(fake_repo)
         monkeypatch.setattr("builtins.input", lambda _: "")  # pressing Enter = default yes
-        with patch("seekr_hatchery.docker.sessions.open_for_editing") as mock_edit:
+        with patch("seekr_hatchery.docker.open_for_editing") as mock_edit:
             docker.ensure_docker_config(fake_repo)
         mock_edit.assert_called_once()
 
     def test_no_skips_editor(self, fake_repo, monkeypatch):
         self._prep(fake_repo)
         monkeypatch.setattr("builtins.input", lambda _: "n")
-        with patch("seekr_hatchery.docker.sessions.open_for_editing") as mock_edit:
+        with patch("seekr_hatchery.docker.open_for_editing") as mock_edit:
             docker.ensure_docker_config(fake_repo)
         mock_edit.assert_not_called()
 
     def test_does_not_commit(self, fake_repo, monkeypatch):
         self._prep(fake_repo)
         monkeypatch.setattr("builtins.input", lambda _: "n")
-        with patch("seekr_hatchery.docker.sessions.run") as mock_run:
+        with patch("seekr_hatchery.docker.run") as mock_run:
             docker.ensure_docker_config(fake_repo)
         mock_run.assert_not_called()
 
@@ -585,7 +586,7 @@ class TestEnsureDockerConfig:
         self._prep(fake_repo)
         monkeypatch.setattr("builtins.input", lambda _: "n")
         docker.ensure_docker_config(fake_repo)
-        content = (fake_repo / sessions.DOCKER_CONFIG).read_text()
+        content = (fake_repo / constants.DOCKER_CONFIG).read_text()
         parsed = yaml.safe_load(content)
         assert parsed["schema_version"] == "1"
 
@@ -597,9 +598,9 @@ class TestEnsureDockerConfig:
         repo.mkdir()
         (source / ".hatchery").mkdir()
         (repo / ".hatchery").mkdir()
-        (source / sessions.DOCKER_CONFIG).write_text("custom: true\n")
+        (source / constants.DOCKER_CONFIG).write_text("custom: true\n")
         docker.ensure_docker_config(repo, source=source)
-        assert (repo / sessions.DOCKER_CONFIG).read_text() == "custom: true\n"
+        assert (repo / constants.DOCKER_CONFIG).read_text() == "custom: true\n"
 
     def test_source_returns_false_when_copied(self, tmp_path):
         """Copying from source returns False so callers skip auto-commit."""
@@ -609,7 +610,7 @@ class TestEnsureDockerConfig:
         repo.mkdir()
         (source / ".hatchery").mkdir()
         (repo / ".hatchery").mkdir()
-        (source / sessions.DOCKER_CONFIG).write_text("custom: true\n")
+        (source / constants.DOCKER_CONFIG).write_text("custom: true\n")
         result = docker.ensure_docker_config(repo, source=source)
         assert result is False
 
@@ -624,7 +625,7 @@ class TestEnsureDockerConfig:
         monkeypatch.setattr("builtins.input", lambda _: "n")
         result = docker.ensure_docker_config(repo, source=source)
         assert result is True
-        assert (repo / sessions.DOCKER_CONFIG).exists()
+        assert (repo / constants.DOCKER_CONFIG).exists()
 
     def test_source_ignored_when_dest_already_exists(self, tmp_path):
         """If destination already has docker.yaml, source= is irrelevant."""
@@ -634,11 +635,11 @@ class TestEnsureDockerConfig:
         repo.mkdir()
         (source / ".hatchery").mkdir()
         (repo / ".hatchery").mkdir()
-        (source / sessions.DOCKER_CONFIG).write_text("from: source\n")
-        (repo / sessions.DOCKER_CONFIG).write_text("existing: true\n")
+        (source / constants.DOCKER_CONFIG).write_text("from: source\n")
+        (repo / constants.DOCKER_CONFIG).write_text("existing: true\n")
         result = docker.ensure_docker_config(repo, source=source)
         assert result is False
-        assert (repo / sessions.DOCKER_CONFIG).read_text() == "existing: true\n"
+        assert (repo / constants.DOCKER_CONFIG).read_text() == "existing: true\n"
 
 
 # ---------------------------------------------------------------------------

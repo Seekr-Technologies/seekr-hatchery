@@ -9,7 +9,6 @@ import shutil
 import subprocess
 import sys
 import urllib.request
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,7 +21,9 @@ import seekr_hatchery.git as git
 import seekr_hatchery.sessions as sessions
 import seekr_hatchery.ui as ui
 import seekr_hatchery.user_config as user_config
-from seekr_hatchery.includes import IncludeEntry, load_include_entries, serialize_include_entries
+from seekr_hatchery.constants import DEFAULT_BASE, DOCKER_CONFIG
+from seekr_hatchery.includes import IncludeEntry, load_include_entries
+from seekr_hatchery.utils import open_for_editing, run
 
 logger = logging.getLogger("hatchery")
 
@@ -123,33 +124,20 @@ def _check_for_update() -> tuple[str, str] | None:
 # ---------------------------------------------------------------------------
 
 
-def _is_task_complete(content: str) -> bool:
-    return bool(re.search(r"^\*\*Status\*\*:\s*complete", content, re.MULTILINE))
-
-
-def _set_task_status(repo: Path, name: str, status: str) -> None:
-    meta = sessions.load_task(repo, name)
-    meta["status"] = status
-    sessions.save_task(meta)
-
-
-def _resolve_includes(
+def _cli_includes_to_entries(
     cli_worktree: tuple[Path, ...],
     cli_rw: tuple[Path, ...],
     cli_ro: tuple[Path, ...],
-    config_includes: list[str | dict],
-    repo: Path,
 ) -> list[IncludeEntry]:
-    """Merge CLI --include* flags with docker.yaml 'include:' entries into IncludeEntry objects.
+    """Convert click's tuple-shaped --include flags into IncludeEntry objects.
 
-    CLI paths are resolved against the current working directory (click.Path
-    handles that).  Config paths are resolved relative to the primary repo
-    root.  Duplicates (by resolved absolute path) are removed while preserving
-    order (CLI paths first).
+    Click hands cmd_new/cmd_resume three separate tuples (one per mode);
+    this helper grants them a single ordered list (worktree → rw → ro)
+    with duplicates dropped. Sessions then merges this with docker.yaml
+    entries via ``sessions.merge_includes_with_config``.
     """
     seen: set[Path] = set()
     result: list[IncludeEntry] = []
-
     for p, mode in (
         *((p, "worktree") for p in cli_worktree),
         *((p, "rw") for p in cli_rw),
@@ -159,129 +147,29 @@ def _resolve_includes(
         if resolved not in seen:
             seen.add(resolved)
             result.append(IncludeEntry(path=resolved, mode=mode))
-
-    for entry in config_includes:
-        path_str, config_mode = docker.parse_docker_include_entry(entry)
-        raw = Path(path_str)
-        resolved = (repo / raw).resolve() if not raw.is_absolute() else raw.resolve()
-        if not resolved.exists():
-            ui.warn(f"docker.yaml include path does not exist, skipping: {path_str}")
-            continue
-        if resolved in seen:
-            # CLI flag already added this path — check for a mode conflict.
-            existing = next(e for e in result if e.path == resolved)
-            if existing.mode != config_mode:
-                ui.note(
-                    f"--include* flag overrides docker.yaml mode for {path_str}: {config_mode!r} → {existing.mode!r}"
-                )
-        else:
-            seen.add(resolved)
-            result.append(IncludeEntry(path=resolved, mode=config_mode))
-
-    return result
-
-
-def _merge_include_updates(
-    current_entries: list[IncludeEntry],
-    updates: list[IncludeEntry],
-    meta: dict,
-    name: str,
-) -> list[IncludeEntry]:
-    """Merge resume-time --include* flags into the existing entry list.
-
-    For each update:
-    - If a matching path already exists, replace its mode (creating or removing
-      worktrees as needed).
-    - Otherwise, append as a new entry.
-
-    Saves the updated list to meta.json before returning.
-    """
-    if not updates:
-        return current_entries
-
-    by_path = {e.path: e for e in current_entries}
-
-    for update in updates:
-        existing = by_path.get(update.path)
-        if existing is None:
-            # New path — create worktree if needed (base resolved per-repo).
-            git.create_include_worktrees([update], name)
-            by_path[update.path] = update
-        elif existing.mode == update.mode:
-            pass  # no-op
-        else:
-            if not existing.is_reference() and update.is_reference():
-                ui.info(f"include mode {existing.mode!r} → {update.mode!r} for {update.path}; removing worktree.")
-                # Pass existing (mode="worktree") so remove_include_worktrees acts on it.
-                git.remove_include_worktrees([existing], name)
-            elif existing.is_reference() and not update.is_reference():
-                ui.info(f"include mode {existing.mode!r} → {update.mode!r} for {update.path}; creating worktree.")
-                git.create_include_worktrees([update], name)
-            by_path[update.path] = update
-
-    # Preserve original ordering, appending new entries at the end.
-    original_paths = [e.path for e in current_entries]
-    original_path_set = {e.path for e in current_entries}
-    new_paths = [e.path for e in updates if e.path not in original_path_set]
-    result = [by_path[p] for p in original_paths] + [by_path[p] for p in new_paths]
-
-    meta["include"] = serialize_include_entries(result)
-    sessions.save_task(meta)
     return result
 
 
 def _do_mark_done(name: str, repo: Path, worktree: Path) -> None:
-    meta = sessions.load_task(repo, name)
-    no_worktree = meta.get("no_worktree", False)
-    include_repos = load_include_entries(meta)
-    no_commit = meta.get("no_commit", False)
+    """CLI-facing mark-done: handles interactive prompts, then delegates."""
+    meta = sessions.load(repo, name)
+    commit_changes = False
 
-    if not no_worktree:
-        if worktree.exists():
-            task_path = sessions.find_task_file(worktree, name)
-            if task_path and task_path.exists():
-                content = task_path.read_text()
-                if "## Summary" not in content:
-                    ui.warn("task file has no ## Summary section — agent may not have completed cleanly.")
+    if not meta.no_worktree and worktree.exists():
+        task_path = sessions.find_task_file(worktree, name)
+        if task_path and task_path.exists():
+            content = task_path.read_text()
+            if "## Summary" not in content:
+                ui.warn("task file has no ## Summary section — agent may not have completed cleanly.")
 
-            if not no_commit and git.has_uncommitted_changes(worktree):
-                ui.warn("worktree has uncommitted changes.")
-                ui.info(git.uncommitted_changes_summary(worktree))
-                answer = input("Commit them as a final checkpoint before removing? [Y/n] ").strip().lower()
-                if answer != "n":
-                    sessions.run(["git", "add", "-A"], cwd=worktree)
-                    sessions.run(["git", "commit", "-m", f"task({name}): final checkpoint"], cwd=worktree)
+        if not meta.no_commit and git.has_uncommitted_changes(worktree):
+            ui.warn("worktree has uncommitted changes.")
+            ui.info(git.uncommitted_changes_summary(worktree))
+            answer = input("Commit them as a final checkpoint before removing? [Y/n] ").strip().lower()
+            commit_changes = answer != "n"
 
-            git.remove_worktree(repo, worktree)
-            ui.info(f"Worktree removed: {worktree}")
-        else:
-            ui.info(f"Worktree already gone: {worktree}")
-
-        if include_repos:
-            git.remove_include_worktrees(include_repos, name)
-
-    meta["status"] = "complete"
-    meta["completed"] = datetime.now().isoformat()
-    sessions.save_task(meta)
+    sessions.mark_done(meta, commit_changes=commit_changes)
     _cleanup_task(repo, name)
-
-    if not no_worktree:
-        ui.info(f"Branch retained: {meta['branch']}")
-    ui.success(f"Task '{name}' marked complete.")
-
-
-_WRAP_UP_PROMPT = (
-    "The user has indicated they believe this task is complete. "
-    "Please review the task file and assess whether the work is actually done. "
-    "If it is complete, update the task file: set **Status** to `complete`, "
-    "fill in the `## Summary` section documenting key decisions, patterns "
-    "established, gotchas, and anything a future agent should know, then remove "
-    "the `## Agreed Plan` and `## Progress Log` sections — they are working "
-    "scaffolding, not permanent record. The final file should read as a clean "
-    "ADR: Status/Branch/Created → Objective → Context → Summary. "
-    "If work remains unfinished, tell the user what is still outstanding and ask "
-    "whether they want to continue working or close the task out anyway."
-)
 
 
 def _cleanup_task(repo: Path, name: str) -> None:
@@ -294,65 +182,60 @@ def _cleanup_task(repo: Path, name: str) -> None:
     docker.remove_clipboard_dir(sessions.task_session_dir(repo, name))
 
 
-def _do_delete(name: str, repo: Path, worktree: Path, meta: dict, *, confirmed: bool = False) -> None:
-    branch = meta["branch"]
-    no_worktree = meta.get("no_worktree", False)
-    include_repos = load_include_entries(meta)
-
-    if not no_worktree:
-        if worktree.exists():
-            if git.has_uncommitted_changes(worktree):
-                ui.warn(f"Task '{name}': there are uncommitted changes in the worktree.")
-            if not confirmed:
-                answer = input(f"Delete task '{name}' (worktree + branch + metadata)? [y/N] ").strip().lower()
-                if answer != "y":
-                    ui.info("Aborted.")
-                    return
-            git.remove_worktree(repo, worktree, force=True)
+def _do_delete(meta: sessions.SessionMeta, *, confirmed: bool = False) -> None:
+    """CLI-facing delete: handles confirmation prompt, then delegates."""
+    if not confirmed:
+        if meta.no_worktree:
+            prompt = f"Delete task '{meta.name}' (metadata only)? [y/N] "
+        elif meta.worktree_path.exists():
+            if git.has_uncommitted_changes(meta.worktree_path):
+                ui.warn(f"Task '{meta.name}': there are uncommitted changes in the worktree.")
+            prompt = f"Delete task '{meta.name}' (worktree + branch + metadata)? [y/N] "
         else:
-            if not confirmed:
-                answer = input(f"Delete task '{name}' (branch + metadata)? [y/N] ").strip().lower()
-                if answer != "y":
-                    ui.info("Aborted.")
-                    return
-        if git.delete_branch(repo, branch):
-            ui.info(f"Branch deleted: {branch}")
-        else:
-            ui.info(f"Could not delete branch {branch} (may already be gone)")
+            prompt = f"Delete task '{meta.name}' (branch + metadata)? [y/N] "
+        answer = input(prompt).strip().lower()
+        if answer != "y":
+            ui.info("Aborted.")
+            return
 
-        if include_repos:
-            git.remove_include_worktrees(include_repos, name)
-            git.delete_include_branches(include_repos, name)
-    else:
-        if not confirmed:
-            answer = input(f"Delete task '{name}' (metadata only)? [y/N] ").strip().lower()
-            if answer != "y":
-                ui.info("Aborted.")
-                return
-
-    _cleanup_task(repo, name)
-    sessions.task_db_path(repo, name).unlink(missing_ok=True)
-    ui.success(f"Task '{name}' deleted.")
+    sessions.delete(meta)
+    _cleanup_task(meta.repo_path, meta.name)
 
 
-def _docker_context(
-    runtime: docker.Runtime | None,
-    worktree: Path | None,
+def _meta_for_launch(
     repo: Path,
-) -> tuple[docker.DockerConfig | None, list[str], str]:
-    """Return (config, features, container_workdir) for the three launch functions.
+    worktree: Path,
+    name: str,
+    branch: str,
+    no_worktree: bool,
+    backend: agent.AgentBackend,
+    is_chat: bool = False,
+) -> sessions.SessionMeta:
+    """PR2 test-seam shim — to be deleted in PR3 with the _launch_* wrappers.
 
-    Pass worktree=None for no-worktree mode; the container path becomes /workspace.
+    Synthesises a SessionMeta from the positional args that
+    cli._launch_new/_resume/_finalize still accept. Production callers
+    (cmd_new/cmd_chat/cmd_resume) already hold a full SessionMeta and
+    only unpack to positional args because ~30 existing test patches in
+    test_cli.py expect those wrapper signatures. Once PR3 rewrites
+    those tests to drive sessions.launch(meta, ...) directly, both this
+    helper and the wrappers go away.
+
+    Drops status/created/completed/session_id/no_commit/include from
+    the synthetic meta: sessions.launch reads ``meta.name``,
+    ``meta.repo_path``, ``meta.worktree_path``, ``meta.branch``,
+    ``meta.is_chat``, ``meta.no_worktree``, ``meta.session_dir`` — and
+    ``session_id`` enters launch as a separate kwarg, not via meta.
     """
-    config = docker.load_docker_config(worktree or repo) if runtime else None
-    features = docker.docker_features(config) if config else []
-    if runtime:
-        container_workdir = (
-            "/workspace" if worktree is None else f"{sessions.CONTAINER_REPO_ROOT}/{worktree.relative_to(repo)}"
-        )
-    else:
-        container_workdir = ""
-    return config, features, container_workdir
+    return sessions.SessionMeta(
+        name=name,
+        repo=str(repo),
+        worktree=str(worktree),
+        branch=branch,
+        type="chat" if is_chat else "task",
+        no_worktree=no_worktree,
+        agent=backend.kind,
+    )
 
 
 def _launch_finalize(
@@ -367,52 +250,12 @@ def _launch_finalize(
     no_worktree: bool = False,
     include_repos: list[IncludeEntry] | None = None,
 ) -> None:
-    include_repos = include_repos or []
-    env_ctx = sessions.sandbox_context(
-        name,
-        branch,
-        worktree,
-        repo,
-        main_branch,
-        bool(runtime),
-        no_worktree,
-        include_paths=include_repos,
+    meta = _meta_for_launch(repo, worktree, name, branch, no_worktree, backend)
+    features = sessions.launch(
+        meta, kind="finalize", backend=backend, runtime=runtime,
+        main_branch=main_branch, session_id=session_id,
+        include_repos=include_repos,
     )
-    system_prompt = sessions.SESSION_SYSTEM + "\n" + env_ctx
-    config, features, container_workdir = _docker_context(runtime, None if no_worktree else worktree, repo)
-    agent_cmd = backend.build_finalize_command(
-        session_id, system_prompt, _WRAP_UP_PROMPT, docker=bool(runtime), workdir=container_workdir
-    )
-    ui.banner(name, repo, branch=branch, sandbox=bool(runtime), worktree=not no_worktree, features=features)
-    _set_task_status(repo, name, "running")
-    try:
-        if runtime:
-            if no_worktree:
-                docker.launch_docker_no_worktree(
-                    worktree,
-                    name,
-                    backend,
-                    agent_cmd,
-                    config,
-                    runtime,
-                    include_repos=include_repos,
-                )
-            else:
-                docker.launch_docker(
-                    repo,
-                    worktree,
-                    name,
-                    backend,
-                    agent_cmd,
-                    config,
-                    runtime,
-                    include_repos=include_repos,
-                )
-        else:
-            os.chdir(worktree)
-            subprocess.run(agent_cmd, env=_session_env(name, repo))
-    finally:
-        _set_task_status(repo, name, "in-progress")
     _post_exit_check(
         name, repo, worktree, branch=branch, sandbox=bool(runtime), no_worktree=no_worktree, features=features
     )
@@ -430,7 +273,7 @@ def _post_exit_check(
     task_path = sessions.find_task_file(worktree, name)
     if task_path and task_path.exists():
         content = task_path.read_text()
-        if _is_task_complete(content):
+        if sessions.is_task_complete(content):
             click.echo()
             ui.banner(name, repo, branch=branch, sandbox=sandbox, worktree=not no_worktree, features=features)
             ui.success("  Task appears complete.")
@@ -451,30 +294,28 @@ def _post_exit_check(
     click.echo()
     choice = input("Choice [w/x/l, Enter = leave for later]: ").strip().lower()
     if choice == "w":
-        meta = sessions.load_task(repo, name)
-        session_id = meta.get("session_id")
-        if not session_id:
+        meta = sessions.load(repo, name)
+        if not meta.session_id:
             ui.error("no session ID found. Cannot relaunch.")
             return
-        backend = agent.from_kind(meta.get("agent", "CODEX"))
+        backend = agent.from_kind(meta.agent)
         runtime = docker.resolve_runtime(repo, worktree, no_docker=not sandbox, backend=backend)
         main_branch = git.get_default_branch(repo)
-        include_repos = load_include_entries(meta)
+        include_repos = load_include_entries({"include": meta.include})
         _launch_finalize(
             repo,
             worktree,
             name,
-            session_id,
+            meta.session_id,
             backend,
             runtime,
-            meta["branch"],
+            meta.branch,
             main_branch,
             no_worktree,
             include_repos=include_repos,
         )
     elif choice == "x":
-        meta = sessions.load_task(repo, name)
-        _do_delete(name, repo, worktree, meta)
+        _do_delete(sessions.load(repo, name))
     else:
         ui.info(f"Use `hatchery resume {name}` to continue.")
 
@@ -510,11 +351,6 @@ def _prompt_objective() -> str:
     return session.prompt("> ").strip()
 
 
-def _session_env(name: str, repo: Path) -> dict[str, str]:
-    """Env vars that identify the hatchery session to child processes (e.g. statusline scripts)."""
-    return {**os.environ, "HATCHERY_TASK": name, "HATCHERY_REPO": str(repo)}
-
-
 def _launch_new(
     repo: Path,
     worktree: Path,
@@ -529,65 +365,12 @@ def _launch_new(
     no_cache: bool = False,
     include_repos: list[IncludeEntry] | None = None,
 ) -> None:
-    include_repos = include_repos or []
-    session_dir = sessions.task_session_dir(repo, name)
-    backend.on_new_task(session_dir)
-    backend.on_before_launch(worktree)
-    if is_chat:
-        system_prompt = ""
-        initial_prompt = ""
-    else:
-        env_ctx = sessions.sandbox_context(
-            name,
-            branch,
-            worktree,
-            repo,
-            main_branch,
-            bool(runtime),
-            no_worktree,
-            include_paths=include_repos,
-        )
-        system_prompt = sessions.SESSION_SYSTEM + "\n" + env_ctx
-        initial_prompt = sessions.session_prompt(name, worktree)
-    config, features, container_workdir = _docker_context(runtime, None if no_worktree else worktree, repo)
-    agent_cmd = backend.build_new_command(
-        session_id, system_prompt, initial_prompt, docker=bool(runtime), workdir=container_workdir
+    meta = _meta_for_launch(repo, worktree, name, branch, no_worktree, backend, is_chat=is_chat)
+    features = sessions.launch(
+        meta, kind="new", backend=backend, runtime=runtime,
+        main_branch=main_branch, session_id=session_id,
+        no_cache=no_cache, include_repos=include_repos,
     )
-    if is_chat:
-        ui.chat_banner(name, repo, features=features)
-    else:
-        ui.banner(name, repo, branch=branch, sandbox=bool(runtime), worktree=not no_worktree, features=features)
-    _set_task_status(repo, name, "running")
-    try:
-        if runtime:
-            if no_worktree:
-                docker.launch_docker_no_worktree(
-                    worktree,
-                    name,
-                    backend,
-                    agent_cmd,
-                    config,
-                    runtime,
-                    no_cache=no_cache,
-                    include_repos=include_repos,
-                )
-            else:
-                docker.launch_docker(
-                    repo,
-                    worktree,
-                    name,
-                    backend,
-                    agent_cmd,
-                    config,
-                    runtime,
-                    no_cache=no_cache,
-                    include_repos=include_repos,
-                )
-        else:
-            os.chdir(worktree)
-            subprocess.run(agent_cmd, env=_session_env(name, repo))
-    finally:
-        _set_task_status(repo, name, "in-progress")
     if is_chat:
         _chat_post_exit(name, repo)
     else:
@@ -610,63 +393,12 @@ def _launch_resume(
     no_cache: bool = False,
     include_repos: list[IncludeEntry] | None = None,
 ) -> None:
-    include_repos = include_repos or []
-    backend.on_before_launch(worktree)
-    if is_chat:
-        system_prompt = ""
-        initial_prompt = ""
-    else:
-        env_ctx = sessions.sandbox_context(
-            name,
-            branch,
-            worktree,
-            repo,
-            main_branch,
-            bool(runtime),
-            no_worktree,
-            include_paths=include_repos,
-        )
-        system_prompt = sessions.SESSION_SYSTEM + "\n" + env_ctx
-        initial_prompt = sessions.session_prompt(name, worktree)
-    config, features, container_workdir = _docker_context(runtime, None if no_worktree else worktree, repo)
-    agent_cmd = backend.build_resume_command(
-        session_id, system_prompt, initial_prompt, docker=bool(runtime), workdir=container_workdir
+    meta = _meta_for_launch(repo, worktree, name, branch, no_worktree, backend, is_chat=is_chat)
+    features = sessions.launch(
+        meta, kind="resume", backend=backend, runtime=runtime,
+        main_branch=main_branch, session_id=session_id,
+        no_cache=no_cache, include_repos=include_repos,
     )
-    if is_chat:
-        ui.chat_banner(name, repo, features=features)
-    else:
-        ui.banner(name, repo, branch=branch, sandbox=bool(runtime), worktree=not no_worktree, features=features)
-    _set_task_status(repo, name, "running")
-    try:
-        if runtime:
-            if no_worktree:
-                docker.launch_docker_no_worktree(
-                    worktree,
-                    name,
-                    backend,
-                    agent_cmd,
-                    config,
-                    runtime,
-                    no_cache=no_cache,
-                    include_repos=include_repos,
-                )
-            else:
-                docker.launch_docker(
-                    repo,
-                    worktree,
-                    name,
-                    backend,
-                    agent_cmd,
-                    config,
-                    runtime,
-                    no_cache=no_cache,
-                    include_repos=include_repos,
-                )
-        else:
-            os.chdir(worktree)
-            subprocess.run(agent_cmd, env=_session_env(name, repo))
-    finally:
-        _set_task_status(repo, name, "in-progress")
     if is_chat:
         _chat_post_exit(name, repo)
     else:
@@ -675,29 +407,14 @@ def _launch_resume(
         )
 
 
-def _next_chat_name(repo: Path) -> str:
-    """Return the lowest available chat-N name for this repo."""
-    existing = sessions.repo_tasks_for_current_repo(repo)
-    used: set[int] = set()
-    for meta in existing:
-        if meta.get("type") == "chat":
-            name = meta.get("name", "")
-            if name.startswith("chat-") and name[5:].isdigit():
-                used.add(int(name[5:]))
-    n = 1
-    while n in used:
-        n += 1
-    return f"chat-{n}"
-
-
 def _chat_post_exit(name: str, repo: Path) -> None:
     """Simple post-exit for chat: offer to mark complete."""
     answer = input(f"\nMark chat '{name}' as complete? [Y/n] ").strip().lower()
     if answer != "n":
-        meta = sessions.load_task(repo, name)
-        meta["status"] = "complete"
-        meta["completed"] = datetime.now().isoformat()
-        sessions.save_task(meta)
+        meta = sessions.load(repo, name)
+        meta.status = "complete"
+        meta.completed = datetime.now().isoformat()
+        sessions.save(meta)
         _cleanup_task(repo, name)
         ui.success(f"Chat '{name}' marked complete.")
     else:
@@ -810,9 +527,9 @@ def cli(log_level: str, log_file: str | None) -> None:
 @click.option(
     "--from",
     "base",
-    default=sessions.DEFAULT_BASE,
+    default=DEFAULT_BASE,
     metavar="REF",
-    help=f"Branch or commit to fork from (default: {sessions.DEFAULT_BASE})",
+    help=f"Branch or commit to fork from (default: {DEFAULT_BASE})",
 )
 @click.option("--no-docker", is_flag=True, help="Run agent directly, even if a Dockerfile is present")
 @click.option(
@@ -917,152 +634,47 @@ def cmd_new(
     backend = cfg.resolve_backend(agent_name)
     use_editor = editor if editor is not None else cfg.open_editor
 
-    sessions.ensure_tasks_dir(repo)
-    if in_repo:
-        sessions.ensure_gitignore(repo)
-
-    # Resolve --include paths (CLI flags + docker.yaml 'include:' list).
-    # We do a quick load of docker.yaml from the repo root (not yet from the
-    # worktree) to pick up any existing include entries before the worktree is
-    # created. The worktree-based load inside _docker_context later is for
-    # mount/dind settings only.
-    _early_config = docker.load_docker_config(repo)
-    include_repos = _resolve_includes(include, include_rw, include_ro, _early_config.include, repo)
+    # Resolve --include paths: convert CLI tuples → entries, then sessions
+    # merges them with docker.yaml's 'include:' list.
+    early_config = docker.load_docker_config(repo)
+    include_repos = sessions.merge_includes_with_config(
+        _cli_includes_to_entries(include, include_rw, include_ro),
+        early_config.include,
+        repo,
+    )
 
     name = sessions.to_name(name)
-    db_path = sessions.task_db_path(repo, name)
-    if db_path.exists():
-        existing = json.loads(db_path.read_text())
-        if existing.get("status") in ("in-progress", "running"):
-            ui.error(f"task '{name}' is already in-progress. Choose a different name.")
-            sys.exit(1)
-        # completed/aborted → allow overwrite (git task file is permanent record)
-
-    session_id = str(uuid.uuid4())
-
-    if no_worktree:
-        worktree = repo
-        branch = ""
-        ui.info(f"Creating task: {name}")
-    else:
-        branch = f"hatchery/{name}"
-        worktree = sessions.worktrees_dir(repo) / name
-        ui.info(f"Creating task: {name}")
-        # When the user hasn't specified a base ref, resolve to origin/<default>
-        # so the task starts from the latest upstream commit rather than whatever
-        # local HEAD happens to be.
-        if base == sessions.DEFAULT_BASE and in_repo:
-            default = git.get_default_branch(repo)
-            fetch_result = sessions.run(["git", "fetch", "origin"], cwd=repo, check=False)
-            if fetch_result.returncode == 0:
-                base = f"origin/{default}"
-            else:
-                logger.debug("git fetch origin failed; using local %s as base", base)
-        elif in_repo:
-            # Explicit --from: fetch the owning remote if the ref is a remote-tracking branch.
-            git._fetch_if_remote(base, repo)
-        git.create_worktree(repo, branch, worktree, base)
-
-    if include_repos:
-        git.create_include_worktrees(include_repos, name)
-
+    objective = None if use_editor else _prompt_objective()
     try:
-        if in_repo:
-            if no_commit_docker or no_commit:
-                docker.ensure_docker_files_uncommitted(repo, worktree, backend)
-                df_created = dc_created = False
-            else:
-                df_created = docker.ensure_dockerfile(worktree, backend, source=repo)
-                dc_created = docker.ensure_docker_config(worktree, source=repo)
-            if df_created or dc_created:
-                ui.info("  Committing...")
-                sessions.run(
-                    [
-                        "git",
-                        "add",
-                        str(docker.dockerfile_path(worktree, backend).relative_to(worktree)),
-                        str(sessions.DOCKER_CONFIG),
-                    ],
-                    cwd=worktree,
-                )
-                sessions.run(
-                    ["git", "commit", "-m", "chore: add hatchery Docker configuration"],
-                    cwd=worktree,
-                )
-        else:
-            if not no_docker:
-                docker.ensure_dockerfile(worktree, backend)
-                docker.ensure_docker_config(worktree)
+        meta = sessions.create(
+            name=name, repo=repo, type="task", backend=backend,
+            base=base, no_worktree=no_worktree,
+            no_commit=no_commit, no_commit_docker=no_commit_docker,
+            no_docker=no_docker, in_repo=in_repo,
+            include_entries=include_repos, objective=objective, use_editor=use_editor,
+        )
+    except sessions.SessionCancelled:
+        sys.exit(1)
+    except KeyboardInterrupt:
+        ui.warn("Cancelled.")
+        sys.exit(1)
 
-        # Re-read docker.yaml from the worktree now that the user has had a
-        # chance to edit it.  Any include entries added there that weren't in
-        # the pre-worktree load are resolved and merged in.
-        _post_config = docker.load_docker_config(worktree)
-        _post_includes = _resolve_includes((), (), (), _post_config.include, worktree)
-        _new_includes = [e for e in _post_includes if e.path not in {x.path for x in include_repos}]
-        if _new_includes:
-            git.create_include_worktrees(_new_includes, name)
-            include_repos = include_repos + _new_includes
-
-        if use_editor:
-            task_path = sessions.write_task_file(worktree, name, branch)
-            content_before = task_path.read_text()
-            click.echo("\nOpening task file for editing...")
-            sessions.open_for_editing(task_path)
-            if task_path.read_text() == content_before:
-                ui.warn("Task file unchanged — cancelled.")
-                if not no_worktree:
-                    git.remove_worktree(repo, worktree)
-                    git.delete_branch(repo, branch)
-                sys.exit(1)
-        else:
-            objective = _prompt_objective()
-            task_path = sessions.write_task_file(worktree, name, branch, objective=objective)
-
-        if in_repo and not no_commit:
-            # Always add only the tasks directory — docker files are committed in a
-            # separate block above (if freshly created) and should never be swept up
-            # here (they may have been copied from the repo root but left uncommitted).
-            sessions.run(["git", "add", ".hatchery/tasks/"], cwd=worktree)
-            sessions.run(["git", "commit", "-m", f"task({name}): add task file"], cwd=worktree)
-
-        meta = {
-            "name": name,
-            "branch": branch,
-            "worktree": str(worktree),
-            "repo": str(repo),
-            "status": "in-progress",
-            "created": datetime.now().isoformat(),
-            "session_id": session_id,  # internal only, not shown in normal output
-            "no_worktree": no_worktree,
-            "no_commit": no_commit,
-            "agent": backend.kind,
-            "include": serialize_include_entries(include_repos),
-        }
-        sessions.save_task(meta)
-
-        runtime = docker.resolve_runtime(repo, worktree, no_docker, backend=backend)
-        main_branch = git.get_default_branch(repo) if in_repo else ""
+    runtime = docker.resolve_runtime(meta.repo_path, meta.worktree_path, no_docker, backend=backend)
+    main_branch = git.get_default_branch(repo) if in_repo else ""
+    include_repos = load_include_entries({"include": meta.include})
+    try:
         _launch_new(
-            repo,
-            worktree,
-            name,
-            session_id,
-            backend,
-            runtime,
-            branch,
-            main_branch,
-            no_worktree,
-            no_cache=rebuild_sandbox,
-            include_repos=include_repos,
+            meta.repo_path, meta.worktree_path, meta.name, meta.session_id or "",
+            backend, runtime, meta.branch, main_branch, meta.no_worktree,
+            no_cache=rebuild_sandbox, include_repos=include_repos,
         )
     except KeyboardInterrupt:
-        if not no_worktree:
-            git.remove_worktree(repo, worktree)
-            git.delete_branch(repo, branch)
-            if include_repos:
-                git.remove_include_worktrees(include_repos, name)
-                git.delete_include_branches(include_repos, name)
+        if not meta.no_worktree:
+            git.remove_worktree(repo, meta.worktree_path)
+            git.delete_branch(repo, meta.branch)
+        if include_repos:
+            git.remove_include_worktrees(include_repos, meta.name)
+            git.delete_include_branches(include_repos, meta.name)
         ui.warn("Cancelled.")
         sys.exit(1)
 
@@ -1092,52 +704,23 @@ def cmd_chat(name: str | None, agent_name: str, no_commit: bool) -> None:
     cfg = user_config.UserConfig.load()
     backend = cfg.resolve_backend(agent_name)
 
-    # Auto-generate name if not provided
-    if name is None:
-        name = _next_chat_name(repo)
-    else:
-        name = sessions.to_name(name)
+    name = sessions.next_chat_name(repo) if name is None else sessions.to_name(name)
 
-    db_path = sessions.task_db_path(repo, name)
-    if db_path.exists():
-        existing = json.loads(db_path.read_text())
-        if existing.get("status") in ("in-progress", "running"):
-            ui.error(f"chat '{name}' is already in-progress. Choose a different name or resume it.")
-            sys.exit(1)
-
-    # Ensure Docker scaffolding
-    df_created = docker.ensure_dockerfile(repo, backend)
-    dc_created = docker.ensure_docker_config(repo)
-    if in_repo and not no_commit and (df_created or dc_created):
-        ui.info("  Committing...")
-        sessions.run(
-            ["git", "add", str(docker.dockerfile_path(repo, backend).relative_to(repo)), str(sessions.DOCKER_CONFIG)],
-            cwd=repo,
+    try:
+        meta = sessions.create(
+            name=name, repo=repo, type="chat", backend=backend,
+            no_commit=no_commit, in_repo=in_repo,
         )
-        sessions.run(
-            ["git", "commit", "-m", "chore: add hatchery Docker configuration"],
-            cwd=repo,
-        )
+    except KeyboardInterrupt:
+        ui.warn("Cancelled.")
+        sys.exit(1)
 
     runtime = docker.resolve_runtime(repo, repo, no_docker=False, backend=backend)
-
-    session_id = str(uuid.uuid4())
-    meta = {
-        "name": name,
-        "type": "chat",
-        "branch": "",
-        "worktree": str(repo),
-        "repo": str(repo),
-        "status": "in-progress",
-        "created": datetime.now().isoformat(),
-        "session_id": session_id,
-        "no_worktree": True,
-        "agent": backend.kind,
-    }
-    sessions.save_task(meta)
-
     main_branch = git.get_default_branch(repo) if in_repo else ""
-    _launch_new(repo, repo, name, session_id, backend, runtime, "", main_branch, no_worktree=True, is_chat=True)
+    _launch_new(
+        repo, repo, meta.name, meta.session_id or "",
+        backend, runtime, "", main_branch, no_worktree=True, is_chat=True,
+    )
 
 
 @cli.command("resume")
@@ -1185,33 +768,37 @@ def cmd_resume(
     include_rw: tuple[Path, ...],
     include_ro: tuple[Path, ...],
 ) -> None:
-    """Resume exactly where you left off."""
+    """Resume exactly where you left off.
+
+    Reviving a session whose status is ``complete`` or ``archived`` is
+    supported on purpose — tasks sometimes get marked complete by accident,
+    and archived tasks are explicitly designed to be brought back. In both
+    cases the worktree (which was removed at mark-done / archive time) is
+    re-created from the saved branch and status flips to ``in-progress``.
+    """
     ui.hatchery_header(_version)
     repo, _ = git.git_root_or_cwd()
-    meta = sessions.load_task(repo, name)
-    worktree = Path(meta["worktree"])
-    repo = Path(meta["repo"])
-    no_worktree = meta.get("no_worktree", False)
+    meta = sessions.load(repo, name)
+    repo = meta.repo_path
 
-    backend = agent.from_kind(meta.get("agent", "CODEX"))
+    backend = agent.from_kind(meta.agent)
 
-    if not no_worktree and not worktree.exists():
-        if meta.get("status") == "archived":
-            ui.info(f"Re-creating worktree for archived task '{name}'...")
-            git.create_worktree(repo, meta["branch"], worktree, meta["branch"])
-            # Also restore include worktrees that were removed during archive.
-            _archived_includes = load_include_entries(meta)
-            if _archived_includes:
-                git.create_include_worktrees(_archived_includes, name)
-            meta["status"] = "in-progress"
-            sessions.save_task(meta)
-            ui.success(f"Worktree restored: {worktree}")
+    if not meta.no_worktree and not meta.worktree_path.exists():
+        if meta.status in ("archived", "complete"):
+            label = "archived" if meta.status == "archived" else "completed"
+            ui.info(f"Re-creating worktree for {label} task '{name}'...")
+            git.create_worktree(repo, meta.branch, meta.worktree_path, meta.branch)
+            archived_includes = load_include_entries({"include": meta.include})
+            if archived_includes:
+                git.create_include_worktrees(archived_includes, name)
+            meta.status = "in-progress"
+            sessions.save(meta)
+            ui.success(f"Worktree restored: {meta.worktree_path}")
         else:
-            ui.error(f"worktree {worktree} does not exist. Has this task been completed?")
+            ui.error(f"worktree {meta.worktree_path} does not exist.")
             sys.exit(1)
 
-    session_id = meta.get("session_id")
-    if not session_id:
+    if not meta.session_id:
         ui.error("no session ID found for this task. Cannot resume.")
         sys.exit(1)
 
@@ -1221,23 +808,22 @@ def cmd_resume(
             "starting a fresh session with the current task file as context."
         )
 
-    if meta.get("status") == "running":
+    if meta.status == "running":
         ui.note(f"task '{name}' was marked as running — a previous session may have exited unexpectedly.")
 
     # Restore Docker files if they were removed from the task branch (e.g. to
     # keep them out of a PR).  Generate in repo root if needed, then copy into
     # the worktree — neither location is committed.
-    if not no_docker and not no_worktree:
-        agent_df = docker.dockerfile_path(worktree, backend)
+    if not no_docker and not meta.no_worktree:
+        agent_df = docker.dockerfile_path(meta.worktree_path, backend)
         if not agent_df.exists():
             ui.note(
                 "Dockerfile missing from worktree — restoring from repo root "
                 "(will not be committed to the task branch)."
             )
-            docker.ensure_docker_files_uncommitted(repo, worktree, backend)
+            docker.ensure_docker_files_uncommitted(repo, meta.worktree_path, backend)
 
-    is_chat = meta.get("type") == "chat"
-    include_repos = load_include_entries(meta)
+    include_repos = load_include_entries({"include": meta.include})
 
     # Apply any --include* flags passed at resume time.
     updates = [
@@ -1245,21 +831,21 @@ def cmd_resume(
         *((IncludeEntry(path=p.resolve(), mode="rw")) for p in include_rw),
         *((IncludeEntry(path=p.resolve(), mode="ro")) for p in include_ro),
     ]
-    include_repos = _merge_include_updates(include_repos, updates, meta, name)
+    include_repos = sessions.merge_include_updates(include_repos, updates, meta)
 
-    runtime = docker.resolve_runtime(repo, worktree, no_docker, backend=backend)
+    runtime = docker.resolve_runtime(repo, meta.worktree_path, no_docker, backend=backend)
     main_branch = git.get_default_branch(repo)
     _launch_resume(
         repo,
-        worktree,
+        meta.worktree_path,
         name,
-        session_id,
+        meta.session_id,
         backend,
         runtime,
-        meta["branch"],
+        meta.branch,
         main_branch,
-        no_worktree,
-        is_chat=is_chat,
+        meta.no_worktree,
+        is_chat=meta.is_chat,
         no_cache=rebuild_sandbox,
         include_repos=include_repos,
     )
@@ -1289,11 +875,11 @@ def cmd_sandbox(shell: str, rebuild_sandbox: bool, no_commit: bool) -> None:
     dc_created = docker.ensure_docker_config(repo)
     if in_repo and not no_commit and (df_created or dc_created):
         ui.info("  Committing...")
-        sessions.run(
-            ["git", "add", str(docker.dockerfile_path(repo, backend).relative_to(repo)), str(sessions.DOCKER_CONFIG)],
+        run(
+            ["git", "add", str(docker.dockerfile_path(repo, backend).relative_to(repo)), str(DOCKER_CONFIG)],
             cwd=repo,
         )
-        sessions.run(
+        run(
             ["git", "commit", "-m", "chore: add hatchery Docker configuration"],
             cwd=repo,
         )
@@ -1301,7 +887,11 @@ def cmd_sandbox(shell: str, rebuild_sandbox: bool, no_commit: bool) -> None:
     config = docker.load_docker_config(repo)
     features = docker.docker_features(config)
     ui.banner("sandbox", repo, sandbox=True, worktree=False, features=features)
-    docker.launch_sandbox_shell(repo, backend, config, runtime, shell=shell, no_cache=rebuild_sandbox)
+    docker.launch_sandbox_shell(
+        repo, backend, config, runtime,
+        image_name=sessions.image_name(repo, "sandbox"),
+        shell=shell, no_cache=rebuild_sandbox,
+    )
 
 
 @cli.command("exec")
@@ -1311,7 +901,7 @@ def cmd_exec(name: str, shell: str) -> None:
     """Exec an interactive shell into a running task's container."""
     repo, _ = git.git_root_or_cwd()
     runtime = docker.detect_runtime()
-    docker.exec_task_shell(name, runtime, repo, shell=shell)
+    docker.exec_task_shell(sessions.container_name(repo, name), runtime, shell=shell)
 
 
 @cli.command("done")
@@ -1320,8 +910,8 @@ def cmd_done(names: tuple[str, ...]) -> None:
     """Mark complete and remove worktree."""
     repo, _ = git.git_root_or_cwd()
     for name in names:
-        meta = sessions.load_task(repo, name)
-        _do_mark_done(meta["name"], Path(meta["repo"]), Path(meta["worktree"]))
+        meta = sessions.load(repo, name)
+        _do_mark_done(meta.name, meta.repo_path, meta.worktree_path)
 
 
 @cli.command("abort", hidden=True)
@@ -1338,36 +928,15 @@ def cmd_archive(names: tuple[str, ...]) -> None:
     """Park a task: remove worktree, keep branch for later resumption."""
     repo, _ = git.git_root_or_cwd()
     for name in names:
-        meta = sessions.load_task(repo, name)
-        worktree = Path(meta["worktree"])
-        task_repo = Path(meta["repo"])
-        no_worktree = meta.get("no_worktree", False)
-        no_commit = meta.get("no_commit", False)
-
-        include_repos = load_include_entries(meta)
-
-        if no_worktree:
-            ui.note(f"Task '{name}': no-worktree task — no worktree or branch to remove.")
-        else:
-            if worktree.exists():
-                if not no_commit and git.has_uncommitted_changes(worktree):
-                    ui.warn(f"Task '{name}': there are uncommitted changes in the worktree.")
-                    ui.info(git.uncommitted_changes_summary(worktree))
-                    answer = input("Commit them as a checkpoint before archiving? [Y/n] ").strip().lower()
-                    if answer != "n":
-                        sessions.run(["git", "add", "-A"], cwd=worktree)
-                        sessions.run(["git", "commit", "-m", f"task({name}): checkpoint before archive"], cwd=worktree)
-                git.remove_worktree(task_repo, worktree)
-                ui.info(f"Worktree removed: {worktree}")
-            else:
-                ui.info(f"Task '{name}': worktree not found (may already be removed).")
-            if include_repos:
-                git.remove_include_worktrees(include_repos, name)
-            ui.info(f"Branch retained: {meta['branch']}")
-
-        meta["status"] = "archived"
-        sessions.save_task(meta)
-        ui.success(f"Task '{name}' archived. Resume with: hatchery resume {name}")
+        meta = sessions.load(repo, name)
+        commit_changes = False
+        if not meta.no_worktree and meta.worktree_path.exists():
+            if not meta.no_commit and git.has_uncommitted_changes(meta.worktree_path):
+                ui.warn(f"Task '{name}': there are uncommitted changes in the worktree.")
+                ui.info(git.uncommitted_changes_summary(meta.worktree_path))
+                answer = input("Commit them as a checkpoint before archiving? [Y/n] ").strip().lower()
+                commit_changes = answer != "n"
+        sessions.archive(meta, commit_changes=commit_changes)
 
 
 @cli.command("delete")
@@ -1376,18 +945,17 @@ def cmd_archive(names: tuple[str, ...]) -> None:
 def cmd_delete(names: tuple[str, ...], force: bool) -> None:
     """Delete task, branch, and all metadata."""
     repo, _ = git.git_root_or_cwd()
-    if len(names) > 1:
-        metas = [sessions.load_task(repo, n) for n in names]
+    metas = [sessions.load(repo, n) for n in names]
+    if len(metas) > 1:
         if not force:
-            answer = input(f"Delete {len(names)} tasks ({', '.join(names)})? [y/N] ").strip().lower()
+            answer = input(f"Delete {len(metas)} tasks ({', '.join(names)})? [y/N] ").strip().lower()
             if answer != "y":
                 ui.info("Aborted.")
                 return
         for meta in metas:
-            _do_delete(meta["name"], repo, Path(meta["worktree"]), meta, confirmed=True)
+            _do_delete(meta, confirmed=True)
     else:
-        meta = sessions.load_task(repo, names[0])
-        _do_delete(meta["name"], repo, Path(meta["worktree"]), meta, confirmed=force)
+        _do_delete(metas[0], confirmed=force)
 
 
 @cli.command("list")
@@ -1410,21 +978,20 @@ def cmd_list(show_all: bool) -> None:
 def cmd_status(name: str) -> None:
     """Show task file and metadata."""
     repo, _ = git.git_root_or_cwd()
-    meta = sessions.load_task(repo, name)
-    worktree = Path(meta["worktree"])
-    task_path = sessions.find_task_file(worktree, name)
+    meta = sessions.load(repo, name)
+    task_path = sessions.find_task_file(meta.worktree_path, name)
 
-    click.echo(click.style("Name:     ", bold=True) + meta["name"])
-    click.echo(click.style("Type:     ", bold=True) + meta.get("type", "task"))
-    click.echo(click.style("Status:   ", bold=True) + meta["status"])
-    click.echo(click.style("Agent:    ", bold=True) + meta.get("agent", "CODEX").lower())
-    click.echo(click.style("Branch:   ", bold=True) + meta["branch"])
-    click.echo(click.style("Worktree: ", bold=True) + meta["worktree"])
-    click.echo(click.style("Created:  ", bold=True) + meta.get("created", "unknown")[:16])
-    if meta.get("completed"):
-        click.echo(click.style("Completed:", bold=True) + meta["completed"][:16])
+    click.echo(click.style("Name:     ", bold=True) + meta.name)
+    click.echo(click.style("Type:     ", bold=True) + meta.type)
+    click.echo(click.style("Status:   ", bold=True) + meta.status)
+    click.echo(click.style("Agent:    ", bold=True) + meta.agent.lower())
+    click.echo(click.style("Branch:   ", bold=True) + meta.branch)
+    click.echo(click.style("Worktree: ", bold=True) + meta.worktree)
+    click.echo(click.style("Created:  ", bold=True) + (meta.created or "unknown")[:16])
+    if meta.completed:
+        click.echo(click.style("Completed:", bold=True) + meta.completed[:16])
     # Session ID shown here for debugging, kept out of normal workflow
-    click.echo(click.style("Session:  ", bold=True) + meta.get("session_id", "none"))
+    click.echo(click.style("Session:  ", bold=True) + (meta.session_id or "none"))
 
     if task_path and task_path.exists():
         click.echo()
@@ -1439,14 +1006,13 @@ def cmd_status(name: str) -> None:
 def cmd_shell(name: str) -> None:
     """Open a native shell in the task's worktree."""
     repo, _ = git.git_root_or_cwd()
-    meta = sessions.load_task(repo, name)
-    worktree = Path(meta["worktree"])
-    if not worktree.exists():
-        ui.error(f"Worktree not found: {worktree}")
+    meta = sessions.load(repo, name)
+    if not meta.worktree_path.exists():
+        ui.error(f"Worktree not found: {meta.worktree_path}")
         sys.exit(1)
     shell = os.environ.get("SHELL", "bash")
-    ui.note(f"Opening shell in {worktree}  (exit with Ctrl-D or 'exit')")
-    subprocess.run([shell], cwd=worktree)
+    ui.note(f"Opening shell in {meta.worktree_path}  (exit with Ctrl-D or 'exit')")
+    subprocess.run([shell], cwd=meta.worktree_path)
 
 
 # ---------------------------------------------------------------------------
@@ -1472,7 +1038,7 @@ def cmd_config_edit() -> None:
     cfg.save()
     # Edit → validate loop
     while True:
-        sessions.open_for_editing(config_path)
+        open_for_editing(config_path)
         error = user_config.validate_config_file(config_path)
         if error is None:
             break

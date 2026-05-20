@@ -9,6 +9,7 @@ import pytest
 import seekr_hatchery.agents as agent
 import seekr_hatchery.docker as docker
 import seekr_hatchery.sessions as sessions
+import seekr_hatchery.constants as constants
 
 
 def _make_mutator(key: str = "test-key"):
@@ -414,7 +415,7 @@ class TestSandboxContext:
 
     def test_docker_contains_repo_root(self):
         result = self._docker()
-        assert sessions.CONTAINER_REPO_ROOT in result
+        assert constants.CONTAINER_REPO_ROOT in result
 
     def test_docker_mentions_read_write(self):
         result = self._docker()
@@ -917,7 +918,7 @@ class TestSandboxContextIncludePaths:
         (repo_b / ".git").mkdir()
         import seekr_hatchery.sessions as sessions_mod
 
-        wt = repo_b / sessions_mod.WORKTREES_SUBDIR / "my-task"
+        wt = repo_b / constants.WORKTREES_SUBDIR / "my-task"
         wt.mkdir(parents=True)
         result = self._ctx(use_docker=True, no_worktree=False, include_paths=[self._entry(repo_b)])
         assert "/includes/repo-b/" in result
@@ -945,7 +946,7 @@ class TestSandboxContextIncludePaths:
         (repo_b / ".git").mkdir()
         import seekr_hatchery.sessions as sessions_mod
 
-        wt = repo_b / sessions_mod.WORKTREES_SUBDIR / "my-task"
+        wt = repo_b / constants.WORKTREES_SUBDIR / "my-task"
         wt.mkdir(parents=True)
         result = self._ctx(use_docker=False, no_worktree=False, include_paths=[self._entry(repo_b)])
         assert str(wt) in result
@@ -972,28 +973,21 @@ class TestSandboxContextIncludePaths:
 class TestExecTaskShell:
     """Verify exec_task_shell execs directly into the named container."""
 
-    def test_calls_docker_exec_with_container_name(self, tmp_path):
-        repo = tmp_path / "myrepo"
-        repo.mkdir()
+    def test_calls_docker_exec_with_container_name(self):
         with patch("seekr_hatchery.docker.subprocess.run") as mock_run:
-            docker.exec_task_shell("my-task", docker.Runtime.DOCKER, repo)
+            docker.exec_task_shell("hatchery-myrepo-deadbeef-my-task", docker.Runtime.DOCKER)
         cmd = mock_run.call_args[0][0]
-        expected_name = sessions.container_name(repo, "my-task")
-        assert cmd == ["docker", "exec", "-it", expected_name, "/bin/bash"]
+        assert cmd == ["docker", "exec", "-it", "hatchery-myrepo-deadbeef-my-task", "/bin/bash"]
 
-    def test_custom_shell_passed_to_exec(self, tmp_path):
-        repo = tmp_path / "myrepo"
-        repo.mkdir()
+    def test_custom_shell_passed_to_exec(self):
         with patch("seekr_hatchery.docker.subprocess.run") as mock_run:
-            docker.exec_task_shell("my-task", docker.Runtime.DOCKER, repo, shell="/bin/sh")
+            docker.exec_task_shell("hatchery-myrepo-deadbeef-my-task", docker.Runtime.DOCKER, shell="/bin/sh")
         cmd = mock_run.call_args[0][0]
         assert cmd[-1] == "/bin/sh"
 
-    def test_uses_podman_binary_for_podman_runtime(self, tmp_path):
-        repo = tmp_path / "myrepo"
-        repo.mkdir()
+    def test_uses_podman_binary_for_podman_runtime(self):
         with patch("seekr_hatchery.docker.subprocess.run") as mock_run:
-            docker.exec_task_shell("my-task", docker.Runtime.PODMAN, repo)
+            docker.exec_task_shell("hatchery-myrepo-deadbeef-my-task", docker.Runtime.PODMAN)
         cmd = mock_run.call_args[0][0]
         assert cmd[0] == "podman"
 

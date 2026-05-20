@@ -9,6 +9,7 @@ import pytest
 import seekr_hatchery.agents as agent
 import seekr_hatchery.docker as docker
 import seekr_hatchery.sessions as sessions
+import seekr_hatchery.constants as constants
 
 # ---------------------------------------------------------------------------
 # docker_available()
@@ -19,20 +20,20 @@ class TestDockerAvailable:
     def test_returns_true_when_rc_zero(self, monkeypatch):
         mock_result = MagicMock()
         mock_result.returncode = 0
-        monkeypatch.setattr(sessions, "run", lambda *a, **kw: mock_result)
+        monkeypatch.setattr(docker, "run", lambda *a, **kw: mock_result)
         assert docker.docker_available() is True
 
     def test_returns_false_when_rc_nonzero(self, monkeypatch):
         mock_result = MagicMock()
         mock_result.returncode = 1
-        monkeypatch.setattr(sessions, "run", lambda *a, **kw: mock_result)
+        monkeypatch.setattr(docker, "run", lambda *a, **kw: mock_result)
         assert docker.docker_available() is False
 
     def test_returns_false_when_binary_not_found(self, monkeypatch):
         def _raise(*a, **kw):
             raise FileNotFoundError("No such file or directory: 'docker'")
 
-        monkeypatch.setattr(sessions, "run", _raise)
+        monkeypatch.setattr(docker, "run", _raise)
         assert docker.docker_available() is False
 
 
@@ -45,20 +46,20 @@ class TestPodmanAvailable:
     def test_returns_true_when_rc_zero(self, monkeypatch):
         mock_result = MagicMock()
         mock_result.returncode = 0
-        monkeypatch.setattr(sessions, "run", lambda *a, **kw: mock_result)
+        monkeypatch.setattr(docker, "run", lambda *a, **kw: mock_result)
         assert docker.podman_available() is True
 
     def test_returns_false_when_rc_nonzero(self, monkeypatch):
         mock_result = MagicMock()
         mock_result.returncode = 1
-        monkeypatch.setattr(sessions, "run", lambda *a, **kw: mock_result)
+        monkeypatch.setattr(docker, "run", lambda *a, **kw: mock_result)
         assert docker.podman_available() is False
 
     def test_returns_false_when_binary_not_found(self, monkeypatch):
         def _raise(*a, **kw):
             raise FileNotFoundError("No such file or directory: 'podman'")
 
-        monkeypatch.setattr(sessions, "run", _raise)
+        monkeypatch.setattr(docker, "run", _raise)
         assert docker.podman_available() is False
 
 
@@ -642,7 +643,7 @@ class TestDockerMountsIncludes:
         git_dir = repo / ".git"
         git_dir.mkdir()
         (git_dir / "objects").mkdir()
-        worktree = repo / sessions_mod.WORKTREES_SUBDIR / "my-task"
+        worktree = repo / constants.WORKTREES_SUBDIR / "my-task"
         worktree.mkdir(parents=True)
         session_dir = tmp_path / "session"
         session_dir.mkdir()
@@ -683,7 +684,7 @@ class TestDockerMountsIncludes:
         (repo / ".git").mkdir()
         import seekr_hatchery.sessions as sessions_mod
 
-        worktree = repo / sessions_mod.WORKTREES_SUBDIR / "my-task"
+        worktree = repo / constants.WORKTREES_SUBDIR / "my-task"
         worktree.mkdir(parents=True)
         session_dir = tmp_path / "session"
         session_dir.mkdir()
@@ -738,7 +739,7 @@ class TestDockerMountsIncludes:
         git_dir.mkdir()
         (git_dir / "objects").mkdir()
         # Create a worktree — it should be ignored in reference mode
-        worktree = repo / sessions_mod.WORKTREES_SUBDIR / "my-task"
+        worktree = repo / constants.WORKTREES_SUBDIR / "my-task"
         worktree.mkdir(parents=True)
         session_dir = tmp_path / "session"
         session_dir.mkdir()
@@ -760,7 +761,7 @@ class TestDockerMountsIncludes:
         repo = tmp_path / "repo-c"
         repo.mkdir()
         (repo / ".git").mkdir()
-        worktree = repo / sessions_mod.WORKTREES_SUBDIR / "my-task"
+        worktree = repo / constants.WORKTREES_SUBDIR / "my-task"
         worktree.mkdir(parents=True)
         session_dir = tmp_path / "session"
         session_dir.mkdir()
@@ -864,7 +865,7 @@ class TestEnsureDockerFilesUncommitted:
 
         # Place files only in repo root
         (repo / ".hatchery" / "Dockerfile.codex").write_text("FROM debian\n")
-        (repo / sessions.DOCKER_CONFIG).write_text("schema_version: '1'\n")
+        (repo / constants.DOCKER_CONFIG).write_text("schema_version: '1'\n")
 
         # suppress interactive prompts (shouldn't be hit, but be safe)
         monkeypatch.setattr("builtins.input", lambda _: "n")
@@ -872,7 +873,7 @@ class TestEnsureDockerFilesUncommitted:
         docker.ensure_docker_files_uncommitted(repo, worktree, agent.CODEX)
 
         assert (worktree / ".hatchery" / "Dockerfile.codex").exists()
-        assert (worktree / sessions.DOCKER_CONFIG).exists()
+        assert (worktree / constants.DOCKER_CONFIG).exists()
 
     def test_generates_when_repo_root_also_missing(self, tmp_path, monkeypatch):
         """When neither repo root nor worktree has files, generates from template."""
@@ -887,8 +888,8 @@ class TestEnsureDockerFilesUncommitted:
 
         assert (repo / ".hatchery" / "Dockerfile.codex").exists()
         assert (worktree / ".hatchery" / "Dockerfile.codex").exists()
-        assert (repo / sessions.DOCKER_CONFIG).exists()
-        assert (worktree / sessions.DOCKER_CONFIG).exists()
+        assert (repo / constants.DOCKER_CONFIG).exists()
+        assert (worktree / constants.DOCKER_CONFIG).exists()
 
     def test_worktree_files_unchanged_when_already_present(self, tmp_path, monkeypatch):
         """When worktree already has files, they are not overwritten."""
@@ -900,7 +901,7 @@ class TestEnsureDockerFilesUncommitted:
         original_df = "FROM custom-image\n"
         original_cfg = "schema_version: '1'\nmounts: []\n"
         (worktree / ".hatchery" / "Dockerfile.codex").write_text(original_df)
-        (worktree / sessions.DOCKER_CONFIG).write_text(original_cfg)
+        (worktree / constants.DOCKER_CONFIG).write_text(original_cfg)
 
         monkeypatch.setattr("builtins.input", lambda _: "n")
 
@@ -908,7 +909,7 @@ class TestEnsureDockerFilesUncommitted:
 
         # Worktree files should be untouched
         assert (worktree / ".hatchery" / "Dockerfile.codex").read_text() == original_df
-        assert (worktree / sessions.DOCKER_CONFIG).read_text() == original_cfg
+        assert (worktree / constants.DOCKER_CONFIG).read_text() == original_cfg
 
 
 # ---------------------------------------------------------------------------

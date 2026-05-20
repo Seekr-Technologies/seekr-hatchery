@@ -7,6 +7,8 @@ import pytest
 import seekr_hatchery.git as git
 import seekr_hatchery.sessions as sessions_mod
 from seekr_hatchery.includes import IncludeEntry
+import seekr_hatchery.constants as constants
+import seekr_hatchery.utils as utils
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -16,18 +18,18 @@ from seekr_hatchery.includes import IncludeEntry
 def _git_repo(path: Path) -> Path:
     """Init a real git repo with one commit at path. Returns path."""
     path.mkdir(exist_ok=True)
-    sessions_mod.run(["git", "init", "--initial-branch=main", str(path)], check=False)
-    sessions_mod.run(["git", "init", str(path)], check=False)
+    utils.run(["git", "init", "--initial-branch=main", str(path)], check=False)
+    utils.run(["git", "init", str(path)], check=False)
     (path / "README").write_text("hi")
-    sessions_mod.run(["git", "add", "README"], cwd=path)
-    sessions_mod.run(["git", "-c", "user.email=t@t.com", "-c", "user.name=T", "commit", "-m", "init"], cwd=path)
+    utils.run(["git", "add", "README"], cwd=path)
+    utils.run(["git", "-c", "user.email=t@t.com", "-c", "user.name=T", "commit", "-m", "init"], cwd=path)
     return path
 
 
 def _bare_remote(path: Path) -> Path:
     """Init a bare git repo suitable for use as a remote. Returns path."""
     path.mkdir(exist_ok=True)
-    sessions_mod.run(["git", "init", "--bare", str(path)])
+    utils.run(["git", "init", "--bare", str(path)])
     # Ensure HEAD points to main regardless of git version's default.
     (path / "HEAD").write_text("ref: refs/heads/main\n")
     return path
@@ -54,7 +56,7 @@ class TestResolveMainRepo:
         main_repo = tmp_path / "main_repo"
         _git_repo(main_repo)
         worktree = tmp_path / "my_worktree"
-        sessions_mod.run(["git", "worktree", "add", "--detach", str(worktree)], cwd=main_repo)
+        utils.run(["git", "worktree", "add", "--detach", str(worktree)], cwd=main_repo)
 
         result = git._resolve_main_repo(worktree)
         assert result == main_repo
@@ -83,7 +85,7 @@ class TestGitRootOrCwdWorktree:
         main_repo = tmp_path / "main"
         _git_repo(main_repo)
         worktree = tmp_path / "wt"
-        sessions_mod.run(["git", "worktree", "add", "--detach", str(worktree)], cwd=main_repo)
+        utils.run(["git", "worktree", "add", "--detach", str(worktree)], cwd=main_repo)
 
         monkeypatch.chdir(worktree)
         path, in_repo = git.git_root_or_cwd()
@@ -105,20 +107,20 @@ class TestIncludeWorktreeHelpers:
         plain = tmp_path / "plain"
         plain.mkdir()
         git.create_include_worktrees([_entry(plain)], "my-task", "HEAD")
-        assert not (plain / sessions_mod.WORKTREES_SUBDIR).exists()
+        assert not (plain / constants.WORKTREES_SUBDIR).exists()
 
     def test_create_skips_reference_mode_entries(self, tmp_path):
         """reference mode entries (ro/rw) are skipped even if they are git repos."""
         repo = _git_repo(tmp_path / "repo-b")
         git.create_include_worktrees([_entry(repo, mode="ro")], "my-task", "HEAD")
         git.create_include_worktrees([_entry(repo, mode="rw")], "my-task", "HEAD")
-        assert not (repo / sessions_mod.WORKTREES_SUBDIR).exists()
+        assert not (repo / constants.WORKTREES_SUBDIR).exists()
 
     def test_create_calls_create_worktree_for_git_repo(self, tmp_path):
         """A directory with .git gets a worktree at the expected path."""
         repo = _git_repo(tmp_path / "repo-b")
         git.create_include_worktrees([_entry(repo)], "my-task", "main")
-        assert (repo / sessions_mod.WORKTREES_SUBDIR / "my-task").exists()
+        assert (repo / constants.WORKTREES_SUBDIR / "my-task").exists()
 
     def test_create_skips_non_git_passes_git(self, tmp_path):
         """Mixed list: git repo gets a worktree, plain dir is skipped."""
@@ -126,8 +128,8 @@ class TestIncludeWorktreeHelpers:
         plain = tmp_path / "data"
         plain.mkdir()
         git.create_include_worktrees([_entry(repo), _entry(plain)], "t", "main")
-        assert (repo / sessions_mod.WORKTREES_SUBDIR / "t").exists()
-        assert not (plain / sessions_mod.WORKTREES_SUBDIR).exists()
+        assert (repo / constants.WORKTREES_SUBDIR / "t").exists()
+        assert not (plain / constants.WORKTREES_SUBDIR).exists()
 
     def test_remove_skips_non_git_dir(self, tmp_path):
         plain = tmp_path / "plain"
@@ -137,15 +139,15 @@ class TestIncludeWorktreeHelpers:
     def test_remove_skips_reference_mode_entries(self, tmp_path):
         """reference mode entries are not touched by remove."""
         repo = _git_repo(tmp_path / "repo-b")
-        wt = repo / sessions_mod.WORKTREES_SUBDIR / "my-task"
-        sessions_mod.run(["git", "worktree", "add", "-b", "hatchery/my-task", str(wt), "main"], cwd=repo)
+        wt = repo / constants.WORKTREES_SUBDIR / "my-task"
+        utils.run(["git", "worktree", "add", "-b", "hatchery/my-task", str(wt), "main"], cwd=repo)
         git.remove_include_worktrees([_entry(repo, mode="ro")], "my-task")
         assert wt.exists()  # untouched
 
     def test_remove_calls_remove_worktree_for_git_repo(self, tmp_path):
         repo = _git_repo(tmp_path / "repo-b")
-        wt = repo / sessions_mod.WORKTREES_SUBDIR / "my-task"
-        sessions_mod.run(["git", "worktree", "add", "-b", "hatchery/my-task", str(wt), "main"], cwd=repo)
+        wt = repo / constants.WORKTREES_SUBDIR / "my-task"
+        utils.run(["git", "worktree", "add", "-b", "hatchery/my-task", str(wt), "main"], cwd=repo)
         assert wt.exists()
         git.remove_include_worktrees([_entry(repo)], "my-task")
         assert not wt.exists()
@@ -158,16 +160,16 @@ class TestIncludeWorktreeHelpers:
     def test_delete_branches_skips_reference_mode_entries(self, tmp_path):
         """reference mode entries don't have branches to delete."""
         repo = _git_repo(tmp_path / "repo-b")
-        sessions_mod.run(["git", "branch", "hatchery/my-task"], cwd=repo)
+        utils.run(["git", "branch", "hatchery/my-task"], cwd=repo)
         git.delete_include_branches([_entry(repo, mode="ro")], "my-task")
-        r = sessions_mod.run(["git", "rev-parse", "--verify", "hatchery/my-task"], cwd=repo, check=False)
+        r = utils.run(["git", "rev-parse", "--verify", "hatchery/my-task"], cwd=repo, check=False)
         assert r.returncode == 0  # branch still exists
 
     def test_delete_branches_calls_delete_branch_for_git_repo(self, tmp_path):
         repo = _git_repo(tmp_path / "repo-b")
-        sessions_mod.run(["git", "branch", "hatchery/my-task"], cwd=repo)
+        utils.run(["git", "branch", "hatchery/my-task"], cwd=repo)
         git.delete_include_branches([_entry(repo)], "my-task")
-        r = sessions_mod.run(["git", "rev-parse", "--verify", "hatchery/my-task"], cwd=repo, check=False)
+        r = utils.run(["git", "rev-parse", "--verify", "hatchery/my-task"], cwd=repo, check=False)
         assert r.returncode != 0  # branch deleted
 
     def test_create_fetches_and_uses_origin_default(self, tmp_path):
@@ -175,31 +177,31 @@ class TestIncludeWorktreeHelpers:
         new branch on origin/<default> so it starts from the latest upstream commit."""
         remote = _bare_remote(tmp_path / "remote")
         local = tmp_path / "local"
-        sessions_mod.run(["git", "clone", str(remote), str(local)])
+        utils.run(["git", "clone", str(remote), str(local)])
         (local / "README").write_text("hi")
-        sessions_mod.run(["git", "add", "README"], cwd=local)
-        sessions_mod.run(["git", "-c", "user.email=t@t.com", "-c", "user.name=T", "commit", "-m", "init"], cwd=local)
-        sessions_mod.run(["git", "push", "origin", "main"], cwd=local)
+        utils.run(["git", "add", "README"], cwd=local)
+        utils.run(["git", "-c", "user.email=t@t.com", "-c", "user.name=T", "commit", "-m", "init"], cwd=local)
+        utils.run(["git", "push", "origin", "main"], cwd=local)
 
         git.create_include_worktrees([_entry(local)], "my-task")
 
-        worktree = local / sessions_mod.WORKTREES_SUBDIR / "my-task"
+        worktree = local / constants.WORKTREES_SUBDIR / "my-task"
         assert worktree.exists()
-        result = sessions_mod.run(["git", "rev-parse", "hatchery/my-task"], cwd=local)
-        origin_main = sessions_mod.run(["git", "rev-parse", "origin/main"], cwd=local)
+        result = utils.run(["git", "rev-parse", "hatchery/my-task"], cwd=local)
+        origin_main = utils.run(["git", "rev-parse", "origin/main"], cwd=local)
         assert result.stdout.strip() == origin_main.stdout.strip()
 
     def test_create_falls_back_to_local_default_when_no_remote(self, tmp_path):
         """If there's no remote, create_include_worktrees falls back to the local branch."""
         repo = _git_repo(tmp_path / "repo")
         git.create_include_worktrees([_entry(repo)], "my-task")
-        assert (repo / sessions_mod.WORKTREES_SUBDIR / "my-task").exists()
+        assert (repo / constants.WORKTREES_SUBDIR / "my-task").exists()
 
     def test_create_uses_explicit_base_without_fetching(self, tmp_path):
         """An explicit base is passed through directly with no fetch."""
         repo = _git_repo(tmp_path / "repo")
         git.create_include_worktrees([_entry(repo)], "my-task", base="main")
-        assert (repo / sessions_mod.WORKTREES_SUBDIR / "my-task").exists()
+        assert (repo / constants.WORKTREES_SUBDIR / "my-task").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -214,48 +216,48 @@ class TestFetchIfRemote:
         """Returns (local, remote) — local cloned from bare remote, one commit pushed."""
         remote = _bare_remote(tmp_path / "remote")
         local = tmp_path / "local"
-        sessions_mod.run(["git", "clone", str(remote), str(local)])
+        utils.run(["git", "clone", str(remote), str(local)])
         (local / "README").write_text("hi")
-        sessions_mod.run(["git", "add", "README"], cwd=local)
-        sessions_mod.run(["git", "-c", "user.email=t@t.com", "-c", "user.name=T", "commit", "-m", "init"], cwd=local)
-        sessions_mod.run(["git", "push", "origin", "main"], cwd=local)
+        utils.run(["git", "add", "README"], cwd=local)
+        utils.run(["git", "-c", "user.email=t@t.com", "-c", "user.name=T", "commit", "-m", "init"], cwd=local)
+        utils.run(["git", "push", "origin", "main"], cwd=local)
         return local, remote
 
     def test_remote_tracking_branch_fetches(self, tmp_path):
         """origin/main resolves to refs/remotes/origin/main — origin is fetched."""
         local, remote = self._repo_with_remote(tmp_path)
         # Add a new commit to the remote directly so a fetch would advance origin/main.
-        sessions_mod.run(["git", "clone", str(remote), str(tmp_path / "other")])
+        utils.run(["git", "clone", str(remote), str(tmp_path / "other")])
         (tmp_path / "other" / "NEW").write_text("new")
-        sessions_mod.run(["git", "add", "NEW"], cwd=tmp_path / "other")
-        sessions_mod.run(
+        utils.run(["git", "add", "NEW"], cwd=tmp_path / "other")
+        utils.run(
             ["git", "-c", "user.email=t@t.com", "-c", "user.name=T", "commit", "-m", "second"], cwd=tmp_path / "other"
         )
-        sessions_mod.run(["git", "push", "origin", "main"], cwd=tmp_path / "other")
+        utils.run(["git", "push", "origin", "main"], cwd=tmp_path / "other")
 
-        before = sessions_mod.run(["git", "rev-parse", "origin/main"], cwd=local).stdout.strip()
+        before = utils.run(["git", "rev-parse", "origin/main"], cwd=local).stdout.strip()
         git._fetch_if_remote("origin/main", local)
-        after = sessions_mod.run(["git", "rev-parse", "origin/main"], cwd=local).stdout.strip()
+        after = utils.run(["git", "rev-parse", "origin/main"], cwd=local).stdout.strip()
         assert before != after  # fetch advanced origin/main
 
     def test_local_branch_with_slash_not_fetched(self, tmp_path):
         """hatchery/my-task is a local branch — no fetch."""
         local, _ = self._repo_with_remote(tmp_path)
-        sessions_mod.run(["git", "branch", "hatchery/my-task"], cwd=local)
+        utils.run(["git", "branch", "hatchery/my-task"], cwd=local)
         # Record origin/main before; if a fetch happened it would be a no-op here,
         # but the key test is no exception and no remote activity.
-        before = sessions_mod.run(["git", "rev-parse", "origin/main"], cwd=local).stdout.strip()
+        before = utils.run(["git", "rev-parse", "origin/main"], cwd=local).stdout.strip()
         git._fetch_if_remote("hatchery/my-task", local)
-        after = sessions_mod.run(["git", "rev-parse", "origin/main"], cwd=local).stdout.strip()
+        after = utils.run(["git", "rev-parse", "origin/main"], cwd=local).stdout.strip()
         assert before == after  # origin/main unchanged (no fetch)
 
     def test_no_slash_not_fetched(self, tmp_path):
         """HEAD and plain branch names have no slash — nothing happens."""
         local, _ = self._repo_with_remote(tmp_path)
-        before = sessions_mod.run(["git", "rev-parse", "origin/main"], cwd=local).stdout.strip()
+        before = utils.run(["git", "rev-parse", "origin/main"], cwd=local).stdout.strip()
         git._fetch_if_remote("HEAD", local)
         git._fetch_if_remote("main", local)
-        after = sessions_mod.run(["git", "rev-parse", "origin/main"], cwd=local).stdout.strip()
+        after = utils.run(["git", "rev-parse", "origin/main"], cwd=local).stdout.strip()
         assert before == after
 
     def test_unknown_remote_prefix_not_fetched(self, tmp_path):
@@ -270,20 +272,20 @@ class TestFetchIfRemote:
         remote = _bare_remote(tmp_path / "remote")
         # Push a commit to the remote via a separate clone.
         seed = tmp_path / "seed"
-        sessions_mod.run(["git", "clone", str(remote), str(seed)])
+        utils.run(["git", "clone", str(remote), str(seed)])
         (seed / "README").write_text("hi")
-        sessions_mod.run(["git", "add", "README"], cwd=seed)
-        sessions_mod.run(["git", "-c", "user.email=t@t.com", "-c", "user.name=T", "commit", "-m", "init"], cwd=seed)
-        sessions_mod.run(["git", "push", "origin", "main"], cwd=seed)
+        utils.run(["git", "add", "README"], cwd=seed)
+        utils.run(["git", "-c", "user.email=t@t.com", "-c", "user.name=T", "commit", "-m", "init"], cwd=seed)
+        utils.run(["git", "push", "origin", "main"], cwd=seed)
 
         # Clone again but clear the remote-tracking ref to simulate "not yet fetched".
         local = tmp_path / "local"
-        sessions_mod.run(["git", "clone", str(remote), str(local)])
-        sessions_mod.run(["git", "update-ref", "-d", "refs/remotes/origin/main"], cwd=local)
+        utils.run(["git", "clone", str(remote), str(local)])
+        utils.run(["git", "update-ref", "-d", "refs/remotes/origin/main"], cwd=local)
 
         # origin/main no longer resolves — heuristic should kick in and fetch.
         git._fetch_if_remote("origin/main", local)
-        result = sessions_mod.run(["git", "rev-parse", "origin/main"], cwd=local, check=False)
+        result = utils.run(["git", "rev-parse", "origin/main"], cwd=local, check=False)
         assert result.returncode == 0  # fetch restored it
 
 
