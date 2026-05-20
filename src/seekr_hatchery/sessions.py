@@ -4,7 +4,6 @@ Cross-module constants live in :mod:`seekr_hatchery.constants`; generic
 subprocess / editor / naming utilities live in :mod:`seekr_hatchery.utils`.
 """
 
-import hashlib
 import json
 import logging
 import os
@@ -29,7 +28,7 @@ from seekr_hatchery.constants import (
 )
 from seekr_hatchery.includes import IncludeEntry, load_include_entries, serialize_include_entries
 from seekr_hatchery.models import SCHEMA_VERSION, SessionMeta
-from seekr_hatchery.utils import open_for_editing, run, unique_basename
+from seekr_hatchery.utils import open_for_editing, repo_id, run, to_name, unique_basename
 
 if TYPE_CHECKING:
     from seekr_hatchery.agents.agent_backend import AgentBackend
@@ -228,20 +227,6 @@ def session_prompt(name: str, worktree: Path) -> str:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def to_name(raw: str) -> str:
-    """Normalise a task name to a filesystem/branch-safe slug."""
-    s = raw.lower()
-    s = re.sub(r"[^a-z0-9]+", "-", s)
-    return s.strip("-")[:50]
-
-
-def repo_id(repo: Path) -> str:
-    """Stable, human-readable identifier for a repo path."""
-    short_hash = hashlib.sha256(str(repo).encode()).hexdigest()[:8]
-    basename = to_name(repo.name)[:20]
-    return f"{basename}-{short_hash}"
 
 
 def _task_dir(repo: Path, name: str) -> Path:

@@ -13,6 +13,7 @@ from pydantic import ValidationError
 import seekr_hatchery.agents as agent
 import seekr_hatchery.constants as constants
 import seekr_hatchery.sessions as sessions
+import seekr_hatchery.utils as utils
 from seekr_hatchery.includes import IncludeEntry, IncludeItem
 
 
@@ -32,13 +33,13 @@ class TestSaveTask:
     def test_creates_json_file(self, fake_tasks_db):
         meta = {"name": "my-task", "repo": str(_REPO), "status": "in-progress"}
         sessions.save_task(meta)
-        path = fake_tasks_db / sessions.repo_id(_REPO) / "my-task" / "meta.json"
+        path = fake_tasks_db / utils.repo_id(_REPO) / "my-task" / "meta.json"
         assert path.exists()
 
     def test_stamps_schema_version(self, fake_tasks_db):
         meta = {"name": "my-task", "repo": str(_REPO), "status": "in-progress"}
         sessions.save_task(meta)
-        path = fake_tasks_db / sessions.repo_id(_REPO) / "my-task" / "meta.json"
+        path = fake_tasks_db / utils.repo_id(_REPO) / "my-task" / "meta.json"
         saved = json.loads(path.read_text())
         assert saved["schema_version"] == sessions.SCHEMA_VERSION
 
@@ -47,12 +48,12 @@ class TestSaveTask:
         monkeypatch.setattr(sessions, "_TASKS_DB_DIR", db)
         meta = {"name": "task1", "repo": str(_REPO), "status": "in-progress"}
         sessions.save_task(meta)
-        assert (db / sessions.repo_id(_REPO) / "task1" / "meta.json").exists()
+        assert (db / utils.repo_id(_REPO) / "task1" / "meta.json").exists()
 
     def test_file_is_valid_json(self, fake_tasks_db):
         meta = {"name": "test", "repo": str(_REPO), "status": "in-progress", "branch": "hatchery/test"}
         sessions.save_task(meta)
-        path = fake_tasks_db / sessions.repo_id(_REPO) / "test" / "meta.json"
+        path = fake_tasks_db / utils.repo_id(_REPO) / "test" / "meta.json"
         loaded = json.loads(path.read_text())
         assert isinstance(loaded, dict)
 
@@ -61,7 +62,7 @@ class TestSaveTask:
         sessions.save_task(meta)
         meta["status"] = "complete"
         sessions.save_task(meta)
-        path = fake_tasks_db / sessions.repo_id(_REPO) / "task" / "meta.json"
+        path = fake_tasks_db / utils.repo_id(_REPO) / "task" / "meta.json"
         saved = json.loads(path.read_text())
         assert saved["status"] == "complete"
 
@@ -76,7 +77,7 @@ class TestSaveTask:
             "session_id": "uuid-1234",
         }
         sessions.save_task(meta)
-        path = fake_tasks_db / sessions.repo_id(_REPO) / "full-task" / "meta.json"
+        path = fake_tasks_db / utils.repo_id(_REPO) / "full-task" / "meta.json"
         saved = json.loads(path.read_text())
         for key in meta:
             assert saved[key] == meta[key]
@@ -130,7 +131,7 @@ class TestLoadTask:
 def _write_scoped(fake_tasks_db: Path, task: dict) -> None:
     """Write a task JSON to the unified dir path for its repo."""
     repo = Path(task["repo"])
-    task_dir = fake_tasks_db / sessions.repo_id(repo) / task["name"]
+    task_dir = fake_tasks_db / utils.repo_id(repo) / task["name"]
     task_dir.mkdir(parents=True, exist_ok=True)
     (task_dir / "meta.json").write_text(json.dumps(task))
 
@@ -456,7 +457,7 @@ class TestSessionMetaRoundTrip:
             del fields[missing]
             # Write directly to disk; save_task itself requires name+repo to
             # compute the path, so we can't go through it here.
-            path = sessions._TASKS_DB_DIR / sessions.repo_id(Path("/r")) / "x" / "meta.json"
+            path = sessions._TASKS_DB_DIR / utils.repo_id(Path("/r")) / "x" / "meta.json"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(fields))
             with pytest.raises(ValidationError):
@@ -497,7 +498,7 @@ class TestSessionMetaRoundTrip:
         }
         # Write directly — save_task would stamp schema_version back to the
         # current value, defeating the test.
-        path = sessions._TASKS_DB_DIR / sessions.repo_id(Path("/r")) / "fv" / "meta.json"
+        path = sessions._TASKS_DB_DIR / utils.repo_id(Path("/r")) / "fv" / "meta.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(future))
         with pytest.raises(SystemExit) as exc_info:

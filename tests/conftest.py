@@ -9,6 +9,7 @@ import seekr_hatchery.agents as agent
 import seekr_hatchery.sessions as sessions
 import seekr_hatchery.user_config as user_config
 import seekr_hatchery.constants as constants
+import seekr_hatchery.utils as utils
 
 # ---------------------------------------------------------------------------
 # SpyBackend — records every lifecycle call for assertion in test_cli.py
@@ -177,7 +178,7 @@ def sample_meta(fake_tasks_db: Path) -> dict:
         "schema_version": 1,
     }
     # Write to the unified dir path matching repo="/some/repo"
-    task_dir = fake_tasks_db / sessions.repo_id(Path("/some/repo")) / "my-task"
+    task_dir = fake_tasks_db / utils.repo_id(Path("/some/repo")) / "my-task"
     task_dir.mkdir(parents=True, exist_ok=True)
     (task_dir / "meta.json").write_text(json.dumps(meta))
     return meta

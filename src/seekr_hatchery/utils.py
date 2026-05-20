@@ -7,8 +7,10 @@ module — putting these utilities anywhere else would force callers to
 function-level-import to dodge a cycle.
 """
 
+import hashlib
 import logging
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -43,6 +45,29 @@ def run(
     else:
         logger.debug("  -> rc=%d stdout=%r stderr=%r", result.returncode, result.stdout[:200], result.stderr[:200])
     return result
+
+
+def to_name(raw: str) -> str:
+    """Normalise a task name to a filesystem/branch-safe slug.
+
+    Lowercases, replaces runs of non-alphanumeric chars with ``-``, strips
+    leading/trailing dashes, and truncates to 50 chars. Pure — no I/O.
+    """
+    s = raw.lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    return s.strip("-")[:50]
+
+
+def repo_id(repo: Path) -> str:
+    """Stable, human-readable identifier for a repo path.
+
+    Combines ``to_name(repo.name)`` (up to 20 chars) with an 8-char SHA-256
+    suffix of the absolute path, so repos with the same basename at
+    different paths get different ids.
+    """
+    short_hash = hashlib.sha256(str(repo).encode()).hexdigest()[:8]
+    basename = to_name(repo.name)[:20]
+    return f"{basename}-{short_hash}"
 
 
 def unique_basename(name: str, used: set[str]) -> str:

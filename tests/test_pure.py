@@ -7,9 +7,10 @@ from unittest.mock import patch
 import pytest
 
 import seekr_hatchery.agents as agent
+import seekr_hatchery.constants as constants
 import seekr_hatchery.docker as docker
 import seekr_hatchery.sessions as sessions
-import seekr_hatchery.constants as constants
+import seekr_hatchery.utils as utils
 
 
 def _make_mutator(key: str = "test-key"):
@@ -55,52 +56,52 @@ class TestFindTaskFile:
 
 class TestToName:
     def test_lowercases(self):
-        assert sessions.to_name("MyTask") == "mytask"
+        assert utils.to_name("MyTask") == "mytask"
 
     def test_replaces_spaces_with_hyphens(self):
-        assert sessions.to_name("add auth") == "add-auth"
+        assert utils.to_name("add auth") == "add-auth"
 
     def test_replaces_special_chars_with_hyphens(self):
-        assert sessions.to_name("fix: bug #42") == "fix-bug-42"
+        assert utils.to_name("fix: bug #42") == "fix-bug-42"
 
     def test_collapses_consecutive_separators(self):
-        assert sessions.to_name("a  b   c") == "a-b-c"
+        assert utils.to_name("a  b   c") == "a-b-c"
 
     def test_strips_leading_hyphens(self):
-        assert sessions.to_name("--task") == "task"
+        assert utils.to_name("--task") == "task"
 
     def test_strips_trailing_hyphens(self):
-        assert sessions.to_name("task--") == "task"
+        assert utils.to_name("task--") == "task"
 
     def test_strips_both_ends(self):
-        assert sessions.to_name("  task  ") == "task"
+        assert utils.to_name("  task  ") == "task"
 
     def test_truncates_to_50_chars(self):
         long_name = "a" * 60
-        result = sessions.to_name(long_name)
+        result = utils.to_name(long_name)
         assert len(result) == 50
 
     def test_truncation_at_boundary(self):
         name = "a" * 50
-        assert sessions.to_name(name) == name
+        assert utils.to_name(name) == name
 
     def test_handles_empty_string(self):
-        assert sessions.to_name("") == ""
+        assert utils.to_name("") == ""
 
     def test_handles_all_special_chars(self):
-        assert sessions.to_name("!!!") == ""
+        assert utils.to_name("!!!") == ""
 
     def test_alphanumeric_unchanged(self):
-        assert sessions.to_name("abc123") == "abc123"
+        assert utils.to_name("abc123") == "abc123"
 
     def test_hyphens_in_input_preserved(self):
-        assert sessions.to_name("my-task-name") == "my-task-name"
+        assert utils.to_name("my-task-name") == "my-task-name"
 
     def test_underscores_replaced(self):
-        assert sessions.to_name("my_task") == "my-task"
+        assert utils.to_name("my_task") == "my-task"
 
     def test_mixed_case_with_symbols(self):
-        assert sessions.to_name("Add-Authentication") == "add-authentication"
+        assert utils.to_name("Add-Authentication") == "add-authentication"
 
 
 # ---------------------------------------------------------------------------
@@ -167,33 +168,33 @@ class TestSessionPrompt:
 class TestRepoId:
     def test_contains_repo_basename(self):
         repo = Path("/home/user/my-project")
-        result = sessions.repo_id(repo)
+        result = utils.repo_id(repo)
         assert result.startswith("my-project-")
 
     def test_contains_hash_suffix(self):
         repo = Path("/some/repo")
-        result = sessions.repo_id(repo)
+        result = utils.repo_id(repo)
         parts = result.rsplit("-", 1)
         assert len(parts) == 2
         assert len(parts[1]) == 8
 
     def test_stable_for_same_path(self):
         repo = Path("/some/repo")
-        assert sessions.repo_id(repo) == sessions.repo_id(repo)
+        assert utils.repo_id(repo) == utils.repo_id(repo)
 
     def test_different_for_different_paths(self):
         repo_a = Path("/repos/project-a")
         repo_b = Path("/repos/project-b")
-        assert sessions.repo_id(repo_a) != sessions.repo_id(repo_b)
+        assert utils.repo_id(repo_a) != utils.repo_id(repo_b)
 
     def test_same_basename_different_path_differs(self):
         repo_a = Path("/alice/myapp")
         repo_b = Path("/bob/myapp")
         # Same basename but different full paths → different IDs
-        assert sessions.repo_id(repo_a) != sessions.repo_id(repo_b)
+        assert utils.repo_id(repo_a) != utils.repo_id(repo_b)
 
     def test_returns_string(self):
-        assert isinstance(sessions.repo_id(Path("/some/repo")), str)
+        assert isinstance(utils.repo_id(Path("/some/repo")), str)
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +206,7 @@ class TestTaskDbPath:
     def test_returns_unified_dir_path_in_tasks_db_dir(self, fake_tasks_db):
         repo = Path("/some/repo")
         result = sessions.task_db_path(repo, "my-task")
-        expected = fake_tasks_db / sessions.repo_id(repo) / "my-task" / "meta.json"
+        expected = fake_tasks_db / utils.repo_id(repo) / "my-task" / "meta.json"
         assert result == expected
 
     def test_extension_is_json(self, fake_tasks_db):
@@ -852,7 +853,7 @@ class TestTaskContainerName:
     def test_format(self, tmp_path):
         repo = tmp_path / "my-project"
         repo.mkdir()
-        expected = f"hatchery-{sessions.repo_id(repo)}-my-task"
+        expected = f"hatchery-{utils.repo_id(repo)}-my-task"
         assert sessions.container_name(repo, "my-task") == expected
 
     def test_different_paths_same_name_differ(self, tmp_path):

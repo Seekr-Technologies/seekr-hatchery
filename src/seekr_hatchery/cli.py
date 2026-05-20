@@ -22,6 +22,7 @@ import seekr_hatchery.git as git
 import seekr_hatchery.sessions as sessions
 import seekr_hatchery.ui as ui
 import seekr_hatchery.user_config as user_config
+import seekr_hatchery.utils as utils
 from seekr_hatchery.constants import DEFAULT_BASE, DOCKER_CONFIG
 from seekr_hatchery.includes import IncludeEntry, load_include_entries
 from seekr_hatchery.utils import open_for_editing, run
@@ -554,7 +555,7 @@ def cmd_new(
         repo,
     )
 
-    name = sessions.to_name(name)
+    name = utils.to_name(name)
     objective = None if use_editor else _prompt_objective()
     try:
         meta = sessions.create(
@@ -615,7 +616,7 @@ def cmd_chat(name: str | None, agent_name: str, no_commit: bool) -> None:
     cfg = user_config.UserConfig.load()
     backend = cfg.resolve_backend(agent_name)
 
-    name = sessions.next_chat_name(repo) if name is None else sessions.to_name(name)
+    name = sessions.next_chat_name(repo) if name is None else utils.to_name(name)
 
     try:
         meta = sessions.create(
