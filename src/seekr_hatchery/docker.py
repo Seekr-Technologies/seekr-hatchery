@@ -356,6 +356,7 @@ def ensure_dockerfile(
     df = dockerfile_path(repo, backend)
     if df.exists():
         return False
+    df.parent.mkdir(parents=True, exist_ok=True)
     if source is not None:
         source_df = dockerfile_path(source, backend)
         if source_df.exists():
@@ -365,7 +366,6 @@ def ensure_dockerfile(
                 "(uncommitted — will not be committed to this worktree branch)"
             )
             return False
-    df.parent.mkdir(parents=True, exist_ok=True)
     text = _DOCKERFILE_TEMPLATE.read_text()
     text = text.replace("{{AGENT_INSTALL}}", backend.dockerfile_install)
     text = text.replace("{{DIND}}", _comment_out(DIND_DOCKERFILE_LINES))
@@ -416,6 +416,7 @@ def ensure_docker_config(repo: Path, *, source: Path | None = None) -> bool:
     config_file = repo / DOCKER_CONFIG
     if config_file.exists():
         return False
+    config_file.parent.mkdir(parents=True, exist_ok=True)
     if source is not None:
         source_config = source / DOCKER_CONFIG
         if source_config.exists():
@@ -425,7 +426,6 @@ def ensure_docker_config(repo: Path, *, source: Path | None = None) -> bool:
                 "(uncommitted — will not be committed to this worktree branch)"
             )
             return False
-    config_file.parent.mkdir(parents=True, exist_ok=True)
     config_file.write_text(_DOCKER_CONFIG_TEMPLATE.read_text())
     ui.info(f"  Created {DOCKER_CONFIG}")
     answer = input("  Would you like to edit the docker config? [Y/n] ").strip().lower()

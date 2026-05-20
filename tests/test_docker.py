@@ -875,6 +875,30 @@ class TestEnsureDockerFilesUncommitted:
         assert (worktree / ".hatchery" / "Dockerfile.codex").exists()
         assert (worktree / constants.DOCKER_CONFIG).exists()
 
+    def test_copies_from_source_when_target_parent_dir_missing(self, tmp_path, monkeypatch):
+        """``ensure_dockerfile(target, source=...)`` must create target/.hatchery/
+        before shutil.copy2 lands. Regression for the bug where the mkdir ran
+        only on the generate-from-template path and the source-copy path failed
+        with FileNotFoundError if .hatchery/ didn't exist in the target.
+        """
+        source = tmp_path / "source"
+        target = tmp_path / "target"
+        (source / ".hatchery").mkdir(parents=True)
+        target.mkdir()  # target exists but has NO .hatchery/ subdir
+        (source / ".hatchery" / "Dockerfile.codex").write_text("FROM debian\n")
+        (source / constants.DOCKER_CONFIG).write_text("schema_version: '1'\n")
+
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+
+        # Should not raise FileNotFoundError; should copy both files.
+        docker.ensure_dockerfile(target, agent.CODEX, source=source)
+        docker.ensure_docker_config(target, source=source)
+
+        assert (target / ".hatchery" / "Dockerfile.codex").exists()
+        assert (target / constants.DOCKER_CONFIG).exists()
+        # Content matches the source (we copied, not generated from template).
+        assert (target / ".hatchery" / "Dockerfile.codex").read_text() == "FROM debian\n"
+
     def test_generates_when_repo_root_also_missing(self, tmp_path, monkeypatch):
         """When neither repo root nor worktree has files, generates from template."""
         repo = tmp_path / "repo"
