@@ -190,3 +190,39 @@ def fake_repo(tmp_path: Path) -> Path:
     repo.mkdir()
     (repo / ".git").mkdir()
     return repo
+
+
+@pytest.fixture()
+def no_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every ``input()`` call return ``"n"``.
+
+    Production code prompts during routine operations (edit Dockerfile?, commit
+    checkpoint?, etc.). Real-fs tests want those prompts to default cleanly so
+    the test doesn't hang on stdin. Using this fixture is the lightweight
+    alternative to patching every individual interactive helper.
+    """
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: "n")
+
+
+@pytest.fixture()
+def git_repo(tmp_path: Path) -> Path:
+    """A real git repo with an initial commit on ``main``.
+
+    Use this when a test exercises code that calls real git (worktree creation,
+    branch operations, log/status), instead of patching every git call.
+
+    Author identity is configured *locally* on the repo so subsequent commits
+    (including ones made by hatchery into worktrees of this repo) succeed
+    without needing the real user's ~/.gitconfig.
+    """
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--initial-branch=main", str(repo)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t.com"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "T"], check=True, capture_output=True)
+    (repo / "README").write_text("test\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "init"], check=True, capture_output=True)
+    return repo
