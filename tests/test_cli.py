@@ -11,13 +11,20 @@ import seekr_hatchery.docker as docker
 import seekr_hatchery.sessions as sessions
 from seekr_hatchery.cli import (
     TaskNameType,
-    _launch_finalize,
-    _launch_new,
-    _launch_resume,
     cli,
 )
 from seekr_hatchery.sessions import _WRAP_UP_PROMPT, next_chat_name
 from seekr_hatchery.includes import IncludeEntry
+
+
+def _launch_meta(name="t", repo="/repo", worktree="/worktree", branch="b",
+                 is_chat=False, no_worktree=False, agent_kind="CODEX"):
+    """Build a SessionMeta for sessions.launch hook/chat/status tests."""
+    return sessions.SessionMeta(
+        name=name, repo=repo, worktree=worktree, branch=branch,
+        type="chat" if is_chat else "task",
+        no_worktree=no_worktree, agent=agent_kind,
+    )
 import seekr_hatchery.constants as constants
 
 # ---------------------------------------------------------------------------
@@ -141,7 +148,7 @@ def _new_patches():
         patch("seekr_hatchery.sessions.open_for_editing"),
         patch("seekr_hatchery.cli.sessions.save_task"),
         patch("seekr_hatchery.cli.docker.resolve_runtime"),
-        patch("seekr_hatchery.cli._launch_new"),
+        patch("seekr_hatchery.cli._launch"),
         patch("seekr_hatchery.cli._prompt_objective", return_value="Default objective"),
         patch("seekr_hatchery.git.run", shared_run),  # same mock; git.add_and_commit flows through
     ]
@@ -1009,7 +1016,7 @@ class TestCliResume:
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
             patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
-            patch("seekr_hatchery.cli._launch_resume") as mock_launch,
+            patch("seekr_hatchery.cli._launch") as mock_launch,
         ):
             runner.invoke(cli, ["resume", "my-task"])
 
@@ -1026,7 +1033,7 @@ class TestCliResume:
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None) as mock_docker,
             patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
-            patch("seekr_hatchery.cli._launch_resume"),
+            patch("seekr_hatchery.cli._launch"),
         ):
             runner.invoke(cli, ["resume", "my-task", "--no-docker"])
 
@@ -1049,7 +1056,7 @@ class TestCliResume:
             patch("seekr_hatchery.cli.docker.dockerfile_path", return_value=missing_df),
             patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted") as mock_ensure,
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
-            patch("seekr_hatchery.cli._launch_resume"),
+            patch("seekr_hatchery.cli._launch"),
         ):
             result = runner.invoke(cli, ["resume", "my-task"])
 
@@ -1070,7 +1077,7 @@ class TestCliResume:
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
             patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted") as mock_ensure,
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
-            patch("seekr_hatchery.cli._launch_resume"),
+            patch("seekr_hatchery.cli._launch"),
         ):
             runner.invoke(cli, ["resume", "my-task"])
 
@@ -1088,7 +1095,7 @@ class TestCliResume:
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
             patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted") as mock_ensure,
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
-            patch("seekr_hatchery.cli._launch_resume"),
+            patch("seekr_hatchery.cli._launch"),
         ):
                 runner.invoke(cli, ["resume", "my-task", "--no-docker"])
 
@@ -1497,7 +1504,7 @@ mock_root,
         assert saved_meta.get("no_worktree") is True
 
     def test_no_worktree_with_dockerfile_propagates_flag_to_launch(self):
-        """--no-worktree flag must reach _launch_new (the docker dispatch is mocked)."""
+        """--no-worktree flag must reach cli._launch (the docker dispatch is mocked)."""
         runner = CliRunner()
 
         with ExitStack() as stack:
@@ -1508,10 +1515,9 @@ mock_root,
             result = runner.invoke(cli, ["new", "my-task", "--no-worktree"])
 
         assert result.exit_code == 0
-        call_kwargs = mock_launch.call_args
-        args = call_kwargs[0] if call_kwargs[0] else []
-        kwargs = call_kwargs[1] if call_kwargs[1] else {}
-        assert True in args or kwargs.get("no_worktree") is True
+        # cli._launch is called with a SessionMeta whose no_worktree=True
+        meta_arg = mock_launch.call_args[0][0]
+        assert meta_arg.no_worktree is True
 
     def test_auto_enable_when_not_in_repo(self):
         """When git_root_or_cwd returns in_repo=False, no_worktree is auto-enabled."""
@@ -1626,7 +1632,7 @@ mock_root,
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
-            patch("seekr_hatchery.cli._launch_resume") as mock_launch,
+            patch("seekr_hatchery.cli._launch") as mock_launch,
         ):
             runner.invoke(cli, ["resume", "my-task"])
 
@@ -1709,18 +1715,17 @@ class TestLaunchHooks:
 
     def _patches(self) -> list:
         return [
-            patch("seekr_hatchery.cli.sessions.task_session_dir", return_value=Path("/session")),
-            patch("seekr_hatchery.cli.sessions.sandbox_context", return_value="ctx"),
-            patch("seekr_hatchery.cli.sessions._SESSION_SYSTEM", "sys"),
-            patch("seekr_hatchery.cli.sessions.session_prompt", return_value="prompt"),
-            patch("seekr_hatchery.cli.subprocess.run"),
+            patch("seekr_hatchery.sessions.task_session_dir", return_value=Path("/session")),
+            patch("seekr_hatchery.sessions.sandbox_context", return_value="ctx"),
+            patch("seekr_hatchery.sessions._SESSION_SYSTEM", "sys"),
+            patch("seekr_hatchery.sessions.session_prompt", return_value="prompt"),
+            patch("seekr_hatchery.sessions.subprocess.run"),
             patch(
-                "seekr_hatchery.cli.sessions.load_task",
+                "seekr_hatchery.sessions.load_task",
                 return_value={"name": "t", "status": "in-progress", "branch": "b"},
             ),
-            patch("seekr_hatchery.cli.sessions.save_task"),
-            patch("seekr_hatchery.cli._post_exit_check"),
-            patch("seekr_hatchery.cli.os.chdir"),
+            patch("seekr_hatchery.sessions.save_task"),
+            patch("seekr_hatchery.sessions.os.chdir"),
         ]
 
     def test_launch_new_hook_order(self, spy_backend):
@@ -1728,15 +1733,9 @@ class TestLaunchHooks:
         with ExitStack() as stack:
             for p in self._patches():
                 stack.enter_context(p)
-            _launch_new(
-                repo=Path("/repo"),
-                worktree=Path("/worktree"),
-                name="t",
-                session_id="sid",
-                backend=spy_backend,
-                runtime=None,
-                branch="b",
-                main_branch="main",
+            sessions.launch(
+                _launch_meta(), kind="new", backend=spy_backend,
+                runtime=None, main_branch="main", session_id="sid",
             )
 
         call_names = [c[0] for c in spy_backend.calls]
@@ -1755,15 +1754,9 @@ class TestLaunchHooks:
         with ExitStack() as stack:
             for p in self._patches():
                 stack.enter_context(p)
-            _launch_resume(
-                repo=Path("/repo"),
-                worktree=Path("/worktree"),
-                name="t",
-                session_id="sid",
-                backend=spy_backend,
-                runtime=None,
-                branch="b",
-                main_branch="main",
+            sessions.launch(
+                _launch_meta(), kind="resume", backend=spy_backend,
+                runtime=None, main_branch="main", session_id="sid",
             )
 
         call_names = [c[0] for c in spy_backend.calls]
@@ -1780,15 +1773,9 @@ class TestLaunchHooks:
         with ExitStack() as stack:
             for p in self._patches():
                 stack.enter_context(p)
-            _launch_finalize(
-                repo=Path("/repo"),
-                worktree=Path("/worktree"),
-                name="t",
-                session_id="sid",
-                backend=spy_backend,
-                runtime=None,
-                branch="b",
-                main_branch="main",
+            sessions.launch(
+                _launch_meta(), kind="finalize", backend=spy_backend,
+                runtime=None, main_branch="main", session_id="sid",
             )
 
         call_names = [c[0] for c in spy_backend.calls]
@@ -1850,7 +1837,7 @@ class TestRunningState:
         assert result.exit_code == 1
 
     def test_launch_new_sets_running_then_restores_in_progress(self, spy_backend):
-        """After _launch_new exits, status should go running then in-progress."""
+        """After sessions.launch exits, status should go running then in-progress."""
         statuses_saved: list[str] = []
 
         def fake_load_task(repo: Path, name: str) -> dict:
@@ -1860,25 +1847,19 @@ class TestRunningState:
             statuses_saved.append(meta["status"])
 
         with (
-            patch("seekr_hatchery.cli.sessions.task_session_dir", return_value=Path("/session")),
-            patch("seekr_hatchery.cli.sessions.sandbox_context", return_value="ctx"),
-            patch("seekr_hatchery.cli.sessions._SESSION_SYSTEM", "sys"),
-            patch("seekr_hatchery.cli.sessions.session_prompt", return_value="prompt"),
-            patch("seekr_hatchery.cli.subprocess.run"),
-            patch("seekr_hatchery.cli.sessions.load_task", side_effect=fake_load_task),
-            patch("seekr_hatchery.cli.sessions.save_task", side_effect=fake_save_task),
-            patch("seekr_hatchery.cli._post_exit_check"),
-            patch("seekr_hatchery.cli.os.chdir"),
+            patch("seekr_hatchery.sessions.task_session_dir", return_value=Path("/session")),
+            patch("seekr_hatchery.sessions.sandbox_context", return_value="ctx"),
+            patch("seekr_hatchery.sessions._SESSION_SYSTEM", "sys"),
+            patch("seekr_hatchery.sessions.session_prompt", return_value="prompt"),
+            patch("seekr_hatchery.sessions.subprocess.run"),
+            patch("seekr_hatchery.sessions.load_task", side_effect=fake_load_task),
+            patch("seekr_hatchery.sessions.save_task", side_effect=fake_save_task),
+            patch("seekr_hatchery.sessions.os.chdir"),
         ):
-            _launch_new(
-                repo=Path("/repo"),
-                worktree=Path("/worktree"),
-                name="my-task",
-                session_id="sid-123",
-                backend=spy_backend,
-                runtime=None,
-                branch="hatchery/my-task",
-                main_branch="main",
+            sessions.launch(
+                _launch_meta(name="my-task", branch="hatchery/my-task"),
+                kind="new", backend=spy_backend,
+                runtime=None, main_branch="main", session_id="sid-123",
             )
 
         assert statuses_saved == ["running", "in-progress"]
@@ -1970,20 +1951,18 @@ class TestNextChatName:
 
 
 class TestLaunchNewChat:
-    """Assert that _launch_new with is_chat=True passes no system/initial prompt."""
+    """sessions.launch with is_chat passes empty system/initial prompts."""
 
     def _patches(self):
         return [
-            patch("seekr_hatchery.cli.sessions.task_session_dir", return_value=Path("/session")),
-            patch("seekr_hatchery.cli.subprocess.run"),
+            patch("seekr_hatchery.sessions.task_session_dir", return_value=Path("/session")),
+            patch("seekr_hatchery.sessions.subprocess.run"),
             patch(
-                "seekr_hatchery.cli.sessions.load_task",
+                "seekr_hatchery.sessions.load_task",
                 return_value={"name": "t", "status": "in-progress", "branch": ""},
             ),
-            patch("seekr_hatchery.cli.sessions.save_task"),
-            patch("seekr_hatchery.cli._post_exit_check"),
-            patch("seekr_hatchery.cli._chat_post_exit"),
-            patch("seekr_hatchery.cli.os.chdir"),
+            patch("seekr_hatchery.sessions.save_task"),
+            patch("seekr_hatchery.sessions.os.chdir"),
         ]
 
     def test_launch_new_chat_empty_system_prompt(self, spy_backend):
@@ -1991,17 +1970,10 @@ class TestLaunchNewChat:
         with ExitStack() as stack:
             for p in self._patches():
                 stack.enter_context(p)
-            _launch_new(
-                repo=Path("/repo"),
-                worktree=Path("/repo"),
-                name="chat-1",
-                session_id="sid",
-                backend=spy_backend,
-                runtime=None,
-                branch="",
-                main_branch="main",
-                no_worktree=True,
-                is_chat=True,
+            sessions.launch(
+                _launch_meta(name="chat-1", worktree="/repo", branch="", is_chat=True, no_worktree=True),
+                kind="new", backend=spy_backend,
+                runtime=None, main_branch="main", session_id="sid",
             )
 
         build_call = [c for c in spy_backend.calls if c[0] == "build_new_command"][0]
@@ -2013,65 +1985,52 @@ class TestLaunchNewChat:
         with ExitStack() as stack:
             for p in self._patches():
                 stack.enter_context(p)
-            _launch_new(
-                repo=Path("/repo"),
-                worktree=Path("/repo"),
-                name="chat-1",
-                session_id="sid",
-                backend=spy_backend,
-                runtime=None,
-                branch="",
-                main_branch="main",
-                no_worktree=True,
-                is_chat=True,
+            sessions.launch(
+                _launch_meta(name="chat-1", worktree="/repo", branch="", is_chat=True, no_worktree=True),
+                kind="new", backend=spy_backend,
+                runtime=None, main_branch="main", session_id="sid",
             )
 
         build_call = [c for c in spy_backend.calls if c[0] == "build_new_command"][0]
         initial_prompt = build_call[3]
         assert initial_prompt == ""
 
-    def test_launch_new_chat_calls_chat_post_exit(self, spy_backend):
+
+class TestCliLaunchDispatch:
+    """cli._launch dispatches to chat or task post-exit based on meta.is_chat."""
+
+    def _patches(self):
+        return [
+            patch("seekr_hatchery.cli.sessions.launch", return_value=[]),
+            patch("seekr_hatchery.cli._post_exit_check"),
+            patch("seekr_hatchery.cli._chat_post_exit"),
+        ]
+
+    def test_chat_calls_chat_post_exit(self, spy_backend):
+        from seekr_hatchery import cli as cli_mod
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in self._patches()]
-            mock_post_exit = mocks[4]  # _post_exit_check
-            mock_chat_post_exit = mocks[5]  # _chat_post_exit
-            _launch_new(
-                repo=Path("/repo"),
-                worktree=Path("/repo"),
-                name="chat-1",
-                session_id="sid",
-                backend=spy_backend,
-                runtime=None,
-                branch="",
-                main_branch="main",
-                no_worktree=True,
-                is_chat=True,
+            _, mock_post_exit, mock_chat_post_exit = mocks
+            cli_mod._launch(
+                _launch_meta(name="chat-1", worktree="/repo", branch="", is_chat=True, no_worktree=True),
+                kind="new", backend=spy_backend,
+                runtime=None, main_branch="main", session_id="sid",
             )
 
         assert mock_chat_post_exit.called
         assert not mock_post_exit.called
 
-    def test_launch_new_task_calls_post_exit_check(self, spy_backend):
-        """Non-chat launch should still use _post_exit_check."""
+    def test_task_calls_post_exit_check(self, spy_backend):
+        from seekr_hatchery import cli as cli_mod
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in self._patches()]
-            mock_post_exit = mocks[4]
-            mock_chat_post_exit = mocks[5]
-            # Need sandbox_context, session_prompt, SESSION_SYSTEM for task mode
-            stack.enter_context(patch("seekr_hatchery.cli.sessions.sandbox_context", return_value="ctx"))
-            stack.enter_context(patch("seekr_hatchery.cli.sessions.session_prompt", return_value="prompt"))
-            stack.enter_context(patch("seekr_hatchery.cli.sessions._SESSION_SYSTEM", "sys"))
-            _launch_new(
-                repo=Path("/repo"),
-                worktree=Path("/worktree"),
-                name="t",
-                session_id="sid",
-                backend=spy_backend,
-                runtime=None,
-                branch="b",
-                main_branch="main",
+            _, mock_post_exit, mock_chat_post_exit = mocks
+            cli_mod._launch(
+                _launch_meta(),
+                kind="new", backend=spy_backend,
+                runtime=None, main_branch="main", session_id="sid",
             )
 
         assert mock_post_exit.called
@@ -2079,19 +2038,17 @@ class TestLaunchNewChat:
 
 
 class TestLaunchResumeChat:
-    """Assert that _launch_resume with is_chat=True passes no system/initial prompt."""
+    """sessions.launch resume with is_chat passes empty system prompt."""
 
     def _patches(self):
         return [
-            patch("seekr_hatchery.cli.subprocess.run"),
+            patch("seekr_hatchery.sessions.subprocess.run"),
             patch(
-                "seekr_hatchery.cli.sessions.load_task",
+                "seekr_hatchery.sessions.load_task",
                 return_value={"name": "t", "status": "in-progress", "branch": ""},
             ),
-            patch("seekr_hatchery.cli.sessions.save_task"),
-            patch("seekr_hatchery.cli._post_exit_check"),
-            patch("seekr_hatchery.cli._chat_post_exit"),
-            patch("seekr_hatchery.cli.os.chdir"),
+            patch("seekr_hatchery.sessions.save_task"),
+            patch("seekr_hatchery.sessions.os.chdir"),
         ]
 
     def test_launch_resume_chat_empty_system_prompt(self, spy_backend):
@@ -2099,44 +2056,15 @@ class TestLaunchResumeChat:
         with ExitStack() as stack:
             for p in self._patches():
                 stack.enter_context(p)
-            _launch_resume(
-                repo=Path("/repo"),
-                worktree=Path("/repo"),
-                name="chat-1",
-                session_id="sid",
-                backend=spy_backend,
-                runtime=None,
-                branch="",
-                main_branch="main",
-                no_worktree=True,
-                is_chat=True,
+            sessions.launch(
+                _launch_meta(name="chat-1", worktree="/repo", branch="", is_chat=True, no_worktree=True),
+                kind="resume", backend=spy_backend,
+                runtime=None, main_branch="main", session_id="sid",
             )
 
         build_call = [c for c in spy_backend.calls if c[0] == "build_resume_command"][0]
         system_prompt = build_call[2]
         assert system_prompt == ""
-
-    def test_launch_resume_chat_calls_chat_post_exit(self, spy_backend):
-
-        with ExitStack() as stack:
-            mocks = [stack.enter_context(p) for p in self._patches()]
-            mock_post_exit = mocks[3]
-            mock_chat_post_exit = mocks[4]
-            _launch_resume(
-                repo=Path("/repo"),
-                worktree=Path("/repo"),
-                name="chat-1",
-                session_id="sid",
-                backend=spy_backend,
-                runtime=None,
-                branch="",
-                main_branch="main",
-                no_worktree=True,
-                is_chat=True,
-            )
-
-        assert mock_chat_post_exit.called
-        assert not mock_post_exit.called
 
 
 class TestCmdChatDispatch:
@@ -2161,7 +2089,7 @@ class TestCmdChatDispatch:
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli.sessions.save_task", side_effect=lambda m: saved_meta.update(m)),
-            patch("seekr_hatchery.cli._launch_new"),
+            patch("seekr_hatchery.cli._launch"),
             patch("seekr_hatchery.cli.sessions.task_db_path") as mock_db_path,
         ):
             mock_db_path.return_value = MagicMock(exists=lambda: False)
@@ -2184,7 +2112,7 @@ class TestCmdChatDispatch:
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli.sessions.save_task", side_effect=lambda m: saved_meta.update(m)),
-            patch("seekr_hatchery.cli._launch_new"),
+            patch("seekr_hatchery.cli._launch"),
             patch("seekr_hatchery.cli.sessions.task_db_path") as mock_db_path,
         ):
             mock_db_path.return_value = MagicMock(exists=lambda: False)
@@ -2205,18 +2133,16 @@ class TestCmdChatDispatch:
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli.sessions.save_task"),
-            patch("seekr_hatchery.cli._launch_new") as mock_launch,
+            patch("seekr_hatchery.cli._launch") as mock_launch,
             patch("seekr_hatchery.cli.sessions.task_db_path") as mock_db_path,
         ):
             mock_db_path.return_value = MagicMock(exists=lambda: False)
             runner.invoke(cli, ["chat"])
 
         assert mock_launch.called
-        call_kwargs = mock_launch.call_args
-        args = call_kwargs[0] if call_kwargs[0] else []
-        kwargs = call_kwargs[1] if call_kwargs[1] else {}
-        # is_chat should be True (either as positional or keyword arg)
-        assert kwargs.get("is_chat") is True or (len(args) > 9 and args[9] is True)
+        # cli._launch receives a SessionMeta; chat sessions have meta.is_chat=True.
+        meta_arg = mock_launch.call_args[0][0]
+        assert meta_arg.is_chat is True
 
 
 class TestCmdStatusShowsType:
@@ -2273,16 +2199,13 @@ class TestResumeChat:
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
-            patch("seekr_hatchery.cli._launch_resume") as mock_launch,
+            patch("seekr_hatchery.cli._launch") as mock_launch,
         ):
             runner.invoke(cli, ["resume", "chat-1"])
 
         assert mock_launch.called
-        call_kwargs = mock_launch.call_args
-        args = call_kwargs[0] if call_kwargs[0] else []
-        kwargs = call_kwargs[1] if call_kwargs[1] else {}
-        # is_chat should be True
-        assert kwargs.get("is_chat") is True or (len(args) > 9 and args[9] is True)
+        meta_arg = mock_launch.call_args[0][0]
+        assert meta_arg.is_chat is True
 
     def test_resume_passes_is_chat_false_for_task(self, tmp_path, fake_tasks_db):
         runner = CliRunner()
@@ -2295,17 +2218,13 @@ class TestResumeChat:
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
             patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
-            patch("seekr_hatchery.cli._launch_resume") as mock_launch,
+            patch("seekr_hatchery.cli._launch") as mock_launch,
         ):
             runner.invoke(cli, ["resume", "my-task"])
 
         assert mock_launch.called
-        call_kwargs = mock_launch.call_args
-        args = call_kwargs[0] if call_kwargs[0] else []
-        kwargs = call_kwargs[1] if call_kwargs[1] else {}
-        # is_chat should be False (default)
-        is_chat = kwargs.get("is_chat", False) if kwargs else (args[9] if len(args) > 9 else False)
-        assert is_chat is False
+        meta_arg = mock_launch.call_args[0][0]
+        assert meta_arg.is_chat is False
 
 
 # ---------------------------------------------------------------------------
@@ -2524,7 +2443,7 @@ mock_root,
         assert any(repo_b.resolve() == e.path for e in call_includes)
 
     def test_include_passed_to_launch_new(self, tmp_path):
-        """include_repos is forwarded to _launch_new."""
+        """include_repos is forwarded to cli._launch."""
         runner = CliRunner()
         repo_b = tmp_path / "repo-b"
         repo_b.mkdir()
@@ -2823,7 +2742,7 @@ class TestCliResumeInclude:
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli.git.create_include_worktrees"),
             patch("seekr_hatchery.cli.git.remove_include_worktrees"),
-            patch("seekr_hatchery.cli._launch_resume") as mock_launch,
+            patch("seekr_hatchery.cli._launch") as mock_launch,
         ):
             result = runner.invoke(cli, ["resume", "my-task", *extra_args])
             launch_kwargs = mock_launch.call_args[1] if mock_launch.called else {}
@@ -2898,7 +2817,7 @@ class TestCliResumeInclude:
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli.git.create_include_worktrees") as mock_create,
             patch("seekr_hatchery.cli.git.remove_include_worktrees") as mock_remove,
-            patch("seekr_hatchery.cli._launch_resume") as mock_launch,
+            patch("seekr_hatchery.cli._launch") as mock_launch,
         ):
             result = runner.invoke(cli, ["resume", "my-task", "--include-ro", str(repo_b)])
 
@@ -2927,7 +2846,7 @@ class TestCliResumeInclude:
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli.git.create_include_worktrees") as mock_create,
             patch("seekr_hatchery.cli.git.remove_include_worktrees") as mock_remove,
-            patch("seekr_hatchery.cli._launch_resume") as mock_launch,
+            patch("seekr_hatchery.cli._launch") as mock_launch,
         ):
             result = runner.invoke(cli, ["resume", "my-task", "--include", str(repo_b)])
 
@@ -2968,7 +2887,7 @@ class TestCliResumeInclude:
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli.git.create_include_worktrees") as mock_create,
             patch("seekr_hatchery.cli.git.remove_include_worktrees") as mock_remove,
-            patch("seekr_hatchery.cli._launch_resume") as mock_launch,
+            patch("seekr_hatchery.cli._launch") as mock_launch,
         ):
             result = runner.invoke(cli, ["resume", "my-task", "--include-ro", str(repo_b)])
 
@@ -3003,7 +2922,7 @@ class TestCliResumeInclude:
             patch("seekr_hatchery.cli.git.create_worktree"),
             patch("seekr_hatchery.cli.git.create_include_worktrees") as mock_create_inc,
             patch("seekr_hatchery.cli.git.remove_include_worktrees"),
-            patch("seekr_hatchery.cli._launch_resume"),
+            patch("seekr_hatchery.cli._launch"),
         ):
             result = runner.invoke(cli, ["resume", "my-task"])
 
@@ -3045,7 +2964,7 @@ class TestCliResumeInclude:
             patch("seekr_hatchery.cli.git.create_worktree"),
             patch("seekr_hatchery.cli.git.create_include_worktrees") as mock_create_inc,
             patch("seekr_hatchery.cli.git.remove_include_worktrees"),
-            patch("seekr_hatchery.cli._launch_resume") as mock_launch,
+            patch("seekr_hatchery.cli._launch") as mock_launch,
         ):
             result = runner.invoke(cli, ["resume", "my-task"])
 
@@ -3331,7 +3250,7 @@ class TestDoDeleteInclude:
 
 class TestLaunchFinalizeInclude:
     def test_include_repos_passed_to_sandbox_context(self, tmp_path, spy_backend):
-        """_launch_finalize include entries appear in the system prompt."""
+        """sessions.launch include entries appear in the system prompt for finalize."""
         repo = tmp_path / "repo"
         repo.mkdir()
         (repo / ".git").mkdir()
@@ -3343,22 +3262,16 @@ class TestLaunchFinalizeInclude:
 
         with (
             patch("seekr_hatchery.sessions.set_status"),
-            patch("seekr_hatchery.cli._post_exit_check"),
-            patch("seekr_hatchery.cli.sessions.sandbox_context", wraps=sessions.sandbox_context) as mock_ctx,
+            patch("seekr_hatchery.sessions.sandbox_context", wraps=sessions.sandbox_context) as mock_ctx,
             patch("seekr_hatchery.sessions.docker.launch_context", return_value=(MagicMock(), [], "/workspace")),
-            patch("seekr_hatchery.cli.os.chdir"),
-            patch("seekr_hatchery.cli.subprocess.run"),
+            patch("seekr_hatchery.sessions.os.chdir"),
+            patch("seekr_hatchery.sessions.subprocess.run"),
         ):
-            _launch_finalize(
-                repo,
-                worktree,
-                "my-task",
-                "sid-1",
-                spy_backend,
-                runtime=None,
-                branch="hatchery/my-task",
-                main_branch="main",
-                no_worktree=True,
+            sessions.launch(
+                _launch_meta(name="my-task", repo=str(repo), worktree=str(worktree),
+                             branch="hatchery/my-task", no_worktree=True, agent_kind=spy_backend.kind),
+                kind="finalize", backend=spy_backend,
+                runtime=None, main_branch="main", session_id="sid-1",
                 include_repos=[entry_b],
             )
 
@@ -3367,7 +3280,7 @@ class TestLaunchFinalizeInclude:
         assert entry_b in kwargs.get("include_paths", [])
 
     def test_include_repos_forwarded_to_launch_docker(self, tmp_path, spy_backend):
-        """_launch_finalize forwards include_repos to docker.run_session."""
+        """sessions.launch forwards include_repos to docker.run_session."""
         repo = tmp_path / "repo"
         repo.mkdir()
         (repo / ".git").mkdir()
@@ -3383,7 +3296,6 @@ class TestLaunchFinalizeInclude:
         config.kubernetes = None
         with (
             patch("seekr_hatchery.sessions.set_status"),
-            patch("seekr_hatchery.cli._post_exit_check"),
             patch("seekr_hatchery.sessions.get_or_create_proxy_token", return_value="tok"),
             patch("seekr_hatchery.sessions.docker.run_session") as mock_run_session,
             patch(
@@ -3391,16 +3303,11 @@ class TestLaunchFinalizeInclude:
                 return_value=(config, [], "/repo/.hatchery/worktrees/my-task"),
             ),
         ):
-            _launch_finalize(
-                repo,
-                worktree,
-                "my-task",
-                "sid-1",
-                spy_backend,
-                runtime=MagicMock(),
-                branch="hatchery/my-task",
-                main_branch="main",
-                no_worktree=False,
+            sessions.launch(
+                _launch_meta(name="my-task", repo=str(repo), worktree=str(worktree),
+                             branch="hatchery/my-task", agent_kind=spy_backend.kind),
+                kind="finalize", backend=spy_backend,
+                runtime=MagicMock(), main_branch="main", session_id="sid-1",
                 include_repos=[entry_b],
             )
 

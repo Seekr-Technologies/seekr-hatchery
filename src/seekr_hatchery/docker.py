@@ -799,48 +799,6 @@ def build_mounts(
     return mounts
 
 
-def docker_mounts(
-    repo: Path,
-    worktree: Path,
-    name: str,
-    backend: agent.AgentBackend,
-    session_dir: Path,
-    config: DockerConfig,
-    git_sentinel_files: list[tuple[Path, str]] | None = None,
-    worktree_git_ptr: Path | None = None,
-) -> list[str]:
-    """Shim: delegate to ``build_mounts`` for the worktree case.
-
-    Kept for callers (and tests) that still construct mounts from positional
-    repo / worktree / name. Will be removed once all callers migrate to
-    build_mounts(meta, ...).
-    """
-    meta = SessionMeta(name=name, repo=str(repo), worktree=str(worktree), no_worktree=False)
-    return build_mounts(
-        meta,
-        backend,
-        session_dir,
-        config,
-        git_sentinel_files=git_sentinel_files,
-        worktree_git_ptr=worktree_git_ptr,
-    )
-
-
-def docker_mounts_no_worktree(
-    cwd: Path,
-    backend: agent.AgentBackend,
-    session_dir: Path,
-    config: DockerConfig,
-) -> list[str]:
-    """Shim: delegate to ``build_mounts`` for the no-worktree case.
-
-    The placeholder name doesn't appear in the returned mounts because
-    no_worktree=True skips the worktree-specific paths.
-    """
-    meta = SessionMeta(name="-", repo=str(cwd), worktree=str(cwd), no_worktree=True)
-    return build_mounts(meta, backend, session_dir, config)
-
-
 def _docker_mounts_includes(
     include_entries: list[IncludeEntry],
     name: str,

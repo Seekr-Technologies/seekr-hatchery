@@ -10,6 +10,12 @@ import seekr_hatchery.agents as agent
 import seekr_hatchery.docker as docker
 import seekr_hatchery.sessions as sessions
 import seekr_hatchery.constants as constants
+from seekr_hatchery.models import SessionMeta
+
+
+def _no_wt_meta(cwd):
+    """Synthetic SessionMeta for no-worktree mount tests."""
+    return SessionMeta(name="-", repo=str(cwd), worktree=str(cwd), no_worktree=True)
 
 # ---------------------------------------------------------------------------
 # docker_available()
@@ -1194,7 +1200,7 @@ class TestNoWorktreeFollowSymlinks:
         monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
 
         cfg = docker.DockerConfig(follow_symlinks=False)
-        mounts = docker.docker_mounts_no_worktree(cwd, self._make_backend(), tmp_path, cfg)
+        mounts = docker.build_mounts(_no_wt_meta(cwd), self._make_backend(), tmp_path, cfg)
 
         target = external.resolve()
         assert not any(f"{target}:{target}:rw" == m for m in mounts)
@@ -1208,7 +1214,7 @@ class TestNoWorktreeFollowSymlinks:
         monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
 
         cfg = docker.DockerConfig(follow_symlinks=True)
-        mounts = docker.docker_mounts_no_worktree(cwd, self._make_backend(), tmp_path, cfg)
+        mounts = docker.build_mounts(_no_wt_meta(cwd), self._make_backend(), tmp_path, cfg)
 
         target = external.resolve()
         assert f"{target}:{target}:rw" in mounts
@@ -1241,7 +1247,7 @@ class TestClipboardImageMount:
         monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
 
         cfg = docker.DockerConfig(clipboard_images=True)
-        mounts = docker.docker_mounts_no_worktree(cwd, self._make_backend(), session_dir, cfg)
+        mounts = docker.build_mounts(_no_wt_meta(cwd), self._make_backend(), session_dir, cfg)
 
         clip = session_dir / "clipboard"
         assert f"{clip}:{clip}:rw" in mounts
@@ -1256,7 +1262,7 @@ class TestClipboardImageMount:
         monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
 
         cfg = docker.DockerConfig(clipboard_images=False)
-        mounts = docker.docker_mounts_no_worktree(cwd, self._make_backend(), session_dir, cfg)
+        mounts = docker.build_mounts(_no_wt_meta(cwd), self._make_backend(), session_dir, cfg)
 
         clip = session_dir / "clipboard"
         assert not any(f"{clip}:" in m for m in mounts)

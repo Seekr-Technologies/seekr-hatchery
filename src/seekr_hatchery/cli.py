@@ -11,6 +11,7 @@ import sys
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 import click
 from click.shell_completion import CompletionItem
@@ -202,63 +203,36 @@ def _do_delete(meta: sessions.SessionMeta, *, confirmed: bool = False) -> None:
     _cleanup_task(meta.repo_path, meta.name)
 
 
-def _meta_for_launch(
-    repo: Path,
-    worktree: Path,
-    name: str,
-    branch: str,
-    no_worktree: bool,
-    backend: agent.AgentBackend,
-    is_chat: bool = False,
-) -> sessions.SessionMeta:
-    """PR2 test-seam shim — to be deleted in PR3 with the _launch_* wrappers.
-
-    Synthesises a SessionMeta from the positional args that
-    cli._launch_new/_resume/_finalize still accept. Production callers
-    (cmd_new/cmd_chat/cmd_resume) already hold a full SessionMeta and
-    only unpack to positional args because ~30 existing test patches in
-    test_cli.py expect those wrapper signatures. Once PR3 rewrites
-    those tests to drive sessions.launch(meta, ...) directly, both this
-    helper and the wrappers go away.
-
-    Drops status/created/completed/session_id/no_commit/include from
-    the synthetic meta: sessions.launch reads ``meta.name``,
-    ``meta.repo_path``, ``meta.worktree_path``, ``meta.branch``,
-    ``meta.is_chat``, ``meta.no_worktree``, ``meta.session_dir`` — and
-    ``session_id`` enters launch as a separate kwarg, not via meta.
-    """
-    return sessions.SessionMeta(
-        name=name,
-        repo=str(repo),
-        worktree=str(worktree),
-        branch=branch,
-        type="chat" if is_chat else "task",
-        no_worktree=no_worktree,
-        agent=backend.kind,
-    )
-
-
-def _launch_finalize(
-    repo: Path,
-    worktree: Path,
-    name: str,
-    session_id: str,
+def _launch(
+    meta: sessions.SessionMeta,
+    *,
+    kind: Literal["new", "resume", "finalize"],
     backend: agent.AgentBackend,
     runtime: docker.Runtime | None,
-    branch: str,
     main_branch: str,
-    no_worktree: bool = False,
+    session_id: str,
+    no_cache: bool = False,
     include_repos: list[IncludeEntry] | None = None,
 ) -> None:
-    meta = _meta_for_launch(repo, worktree, name, branch, no_worktree, backend)
+    """CLI-layer launch: ``sessions.launch`` followed by the post-exit prompts.
+
+    ``sessions.launch`` is pure with respect to the CLI — it doesn't prompt
+    the user. The post-exit interaction ("did the task complete?",
+    "mark done?", "wrap up?") is CLI-domain and lives here.
+    """
     features = sessions.launch(
-        meta, kind="finalize", backend=backend, runtime=runtime,
+        meta, kind=kind, backend=backend, runtime=runtime,
         main_branch=main_branch, session_id=session_id,
-        include_repos=include_repos,
+        no_cache=no_cache, include_repos=include_repos,
     )
-    _post_exit_check(
-        name, repo, worktree, branch=branch, sandbox=bool(runtime), no_worktree=no_worktree, features=features
-    )
+    if meta.is_chat:
+        _chat_post_exit(meta.name, meta.repo_path)
+    else:
+        _post_exit_check(
+            meta.name, meta.repo_path, meta.worktree_path,
+            branch=meta.branch, sandbox=bool(runtime),
+            no_worktree=meta.no_worktree, features=features,
+        )
 
 
 def _post_exit_check(
@@ -302,16 +276,9 @@ def _post_exit_check(
         runtime = docker.resolve_runtime(repo, worktree, no_docker=not sandbox, backend=backend)
         main_branch = git.get_default_branch(repo)
         include_repos = load_include_entries({"include": meta.include})
-        _launch_finalize(
-            repo,
-            worktree,
-            name,
-            meta.session_id,
-            backend,
-            runtime,
-            meta.branch,
-            main_branch,
-            no_worktree,
+        _launch(
+            meta, kind="finalize", backend=backend, runtime=runtime,
+            main_branch=main_branch, session_id=meta.session_id,
             include_repos=include_repos,
         )
     elif choice == "x":
@@ -349,62 +316,6 @@ def _prompt_objective() -> str:
     click.echo("\nDescribe the task:\n")
     session: PromptSession[str] = PromptSession(key_bindings=kb, multiline=True)
     return session.prompt("> ").strip()
-
-
-def _launch_new(
-    repo: Path,
-    worktree: Path,
-    name: str,
-    session_id: str,
-    backend: agent.AgentBackend,
-    runtime: docker.Runtime | None,
-    branch: str,
-    main_branch: str,
-    no_worktree: bool = False,
-    is_chat: bool = False,
-    no_cache: bool = False,
-    include_repos: list[IncludeEntry] | None = None,
-) -> None:
-    meta = _meta_for_launch(repo, worktree, name, branch, no_worktree, backend, is_chat=is_chat)
-    features = sessions.launch(
-        meta, kind="new", backend=backend, runtime=runtime,
-        main_branch=main_branch, session_id=session_id,
-        no_cache=no_cache, include_repos=include_repos,
-    )
-    if is_chat:
-        _chat_post_exit(name, repo)
-    else:
-        _post_exit_check(
-            name, repo, worktree, branch=branch, sandbox=bool(runtime), no_worktree=no_worktree, features=features
-        )
-
-
-def _launch_resume(
-    repo: Path,
-    worktree: Path,
-    name: str,
-    session_id: str,
-    backend: agent.AgentBackend,
-    runtime: docker.Runtime | None,
-    branch: str,
-    main_branch: str,
-    no_worktree: bool = False,
-    is_chat: bool = False,
-    no_cache: bool = False,
-    include_repos: list[IncludeEntry] | None = None,
-) -> None:
-    meta = _meta_for_launch(repo, worktree, name, branch, no_worktree, backend, is_chat=is_chat)
-    features = sessions.launch(
-        meta, kind="resume", backend=backend, runtime=runtime,
-        main_branch=main_branch, session_id=session_id,
-        no_cache=no_cache, include_repos=include_repos,
-    )
-    if is_chat:
-        _chat_post_exit(name, repo)
-    else:
-        _post_exit_check(
-            name, repo, worktree, branch=branch, sandbox=bool(runtime), no_worktree=no_worktree, features=features
-        )
 
 
 def _chat_post_exit(name: str, repo: Path) -> None:
@@ -663,9 +574,9 @@ def cmd_new(
     main_branch = git.get_default_branch(repo) if in_repo else ""
     include_repos = load_include_entries({"include": meta.include})
     try:
-        _launch_new(
-            meta.repo_path, meta.worktree_path, meta.name, meta.session_id or "",
-            backend, runtime, meta.branch, main_branch, meta.no_worktree,
+        _launch(
+            meta, kind="new", backend=backend, runtime=runtime,
+            main_branch=main_branch, session_id=meta.session_id or "",
             no_cache=rebuild_sandbox, include_repos=include_repos,
         )
     except KeyboardInterrupt:
@@ -717,9 +628,9 @@ def cmd_chat(name: str | None, agent_name: str, no_commit: bool) -> None:
 
     runtime = docker.resolve_runtime(repo, repo, no_docker=False, backend=backend)
     main_branch = git.get_default_branch(repo) if in_repo else ""
-    _launch_new(
-        repo, repo, meta.name, meta.session_id or "",
-        backend, runtime, "", main_branch, no_worktree=True, is_chat=True,
+    _launch(
+        meta, kind="new", backend=backend, runtime=runtime,
+        main_branch=main_branch, session_id=meta.session_id or "",
     )
 
 
@@ -835,19 +746,10 @@ def cmd_resume(
 
     runtime = docker.resolve_runtime(repo, meta.worktree_path, no_docker, backend=backend)
     main_branch = git.get_default_branch(repo)
-    _launch_resume(
-        repo,
-        meta.worktree_path,
-        name,
-        meta.session_id,
-        backend,
-        runtime,
-        meta.branch,
-        main_branch,
-        meta.no_worktree,
-        is_chat=meta.is_chat,
-        no_cache=rebuild_sandbox,
-        include_repos=include_repos,
+    _launch(
+        meta, kind="resume", backend=backend, runtime=runtime,
+        main_branch=main_branch, session_id=meta.session_id,
+        no_cache=rebuild_sandbox, include_repos=include_repos,
     )
 
 

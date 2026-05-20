@@ -122,7 +122,10 @@ def no_wt_run(
     # and ~/.codex to exist.
     agent.CODEX.on_before_container_start(session_dir, "test-proxy-token", "/workspace")
     (Path.home() / ".codex").mkdir(parents=True, exist_ok=True)
-    mounts = docker.docker_mounts_no_worktree(no_wt_cwd, agent.CODEX, session_dir, docker.DockerConfig())
+    from seekr_hatchery.models import SessionMeta
+
+    no_wt_meta = SessionMeta(name="test-no-wt", repo=str(no_wt_cwd), worktree=str(no_wt_cwd), no_worktree=True)
+    mounts = docker.build_mounts(no_wt_meta, agent.CODEX, session_dir, docker.DockerConfig())
 
     def run(
         command: list[str],
@@ -244,14 +247,15 @@ def wt_run(
     git_ptr = session_dir / "git_ptr"
     git_ptr.write_text(f"gitdir: {constants.CONTAINER_REPO_ROOT}/.git/worktrees/{task_name}\n")
 
-    mounts = docker.docker_mounts(
-        wt_repo,
-        wt_worktree,
-        task_name,
+    from seekr_hatchery.models import SessionMeta
+
+    wt_meta = SessionMeta(name=task_name, repo=str(wt_repo), worktree=str(wt_worktree), no_worktree=False)
+    mounts = docker.build_mounts(
+        wt_meta,
         agent.CODEX,
         session_dir,
         docker.DockerConfig(),
-        git_sentinels,
+        git_sentinel_files=git_sentinels,
         worktree_git_ptr=git_ptr,
     )
 
