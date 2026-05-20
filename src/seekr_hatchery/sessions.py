@@ -41,10 +41,7 @@ __all__ = [
     "IncludeEntry",
     "SessionMeta",
     "load_include_entries",
-    "open_for_editing",
-    "run",
     "serialize_include_entries",
-    "unique_basename",
 ]
 
 
@@ -492,28 +489,6 @@ def session_env(name: str, repo: Path) -> dict[str, str]:
     return {**os.environ, "HATCHERY_TASK": name, "HATCHERY_REPO": str(repo)}
 
 
-def docker_context(
-    runtime,  # docker.Runtime | None — typed at call site to avoid cycle
-    worktree: Path | None,
-    repo: Path,
-):
-    """Return (config, features, container_workdir) for the launch path.
-
-    Pass ``worktree=None`` for no-worktree mode; the container path becomes
-    ``/workspace``. When ``runtime`` is None we're in native mode and the
-    workdir field is unused.
-    """
-    config = docker.load_docker_config(worktree or repo) if runtime else None
-    features = docker.docker_features(config) if config else []
-    if runtime:
-        container_workdir = (
-            "/workspace" if worktree is None else f"{CONTAINER_REPO_ROOT}/{worktree.relative_to(repo)}"
-        )
-    else:
-        container_workdir = ""
-    return config, features, container_workdir
-
-
 def next_chat_name(repo: Path) -> str:
     """Return the lowest available chat-N name for this repo."""
     used: set[int] = set()
@@ -624,12 +599,6 @@ def merge_include_updates(
 # ---------------------------------------------------------------------------
 
 
-def _final_commit(worktree: Path, message: str) -> None:
-    """Stage everything in *worktree* and commit with *message*."""
-    run(["git", "add", "-A"], cwd=worktree)
-    run(["git", "commit", "-m", message], cwd=worktree)
-
-
 def _check_not_in_progress(repo: Path, name: str, *, label: str = "session") -> None:
     """Exit if a session with this name is currently in-progress/running."""
     path = task_db_path(repo, name)
@@ -647,18 +616,13 @@ def _check_not_in_progress(repo: Path, name: str, *, label: str = "session") -> 
 def _commit_docker_files(backend: "AgentBackend", worktree: Path) -> None:
     """Stage and commit any newly created Docker scaffolding files."""
     ui.info("  Committing...")
-    run(
-        [
-            "git",
-            "add",
+    git.add_and_commit(
+        worktree,
+        "chore: add hatchery Docker configuration",
+        paths=[
             str(docker.dockerfile_path(worktree, backend).relative_to(worktree)),
             str(DOCKER_CONFIG),
         ],
-        cwd=worktree,
-    )
-    run(
-        ["git", "commit", "-m", "chore: add hatchery Docker configuration"],
-        cwd=worktree,
     )
 
 
@@ -679,7 +643,7 @@ def mark_done(meta: SessionMeta, *, commit_changes: bool = False) -> None:
     if not meta.no_worktree:
         if meta.worktree_path.exists():
             if commit_changes:
-                _final_commit(meta.worktree_path, f"task({meta.name}): final checkpoint")
+                git.add_and_commit(meta.worktree_path, f"task({meta.name}): final checkpoint")
             git.remove_worktree(meta.repo_path, meta.worktree_path)
             ui.info(f"Worktree removed: {meta.worktree_path}")
         else:
@@ -710,7 +674,7 @@ def archive(meta: SessionMeta, *, commit_changes: bool = False) -> None:
     else:
         if meta.worktree_path.exists():
             if commit_changes:
-                _final_commit(meta.worktree_path, f"task({meta.name}): checkpoint before archive")
+                git.add_and_commit(meta.worktree_path, f"task({meta.name}): checkpoint before archive")
             git.remove_worktree(meta.repo_path, meta.worktree_path)
             ui.info(f"Worktree removed: {meta.worktree_path}")
         else:
@@ -883,8 +847,7 @@ def create(
                 write_task_file(worktree, name, branch, objective=objective)
 
             if in_repo and not no_commit:
-                run(["git", "add", ".hatchery/tasks/"], cwd=worktree)
-                run(["git", "commit", "-m", f"task({name}): add task file"], cwd=worktree)
+                git.add_and_commit(worktree, f"task({name}): add task file", paths=[".hatchery/tasks/"])
     except KeyboardInterrupt:
         if cleanup_worktree is not None:
             git.remove_worktree(repo, cleanup_worktree)
@@ -970,9 +933,7 @@ def launch(
         system_prompt = _SESSION_SYSTEM + "\n" + env_ctx
         initial_prompt = "" if kind == "finalize" else session_prompt(meta.name, meta.worktree_path)
 
-    config, features, container_workdir = docker_context(
-        runtime, None if meta.no_worktree else meta.worktree_path, meta.repo_path
-    )
+    config, features, container_workdir = docker.launch_context(meta, runtime)
 
     docker_flag = bool(runtime)
     if kind == "new":

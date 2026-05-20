@@ -229,3 +229,36 @@ def get_default_branch(repo: Path) -> str:
         if r.returncode == 0:
             return candidate
     return "main"  # safe last-resort default
+
+
+# ---------------------------------------------------------------------------
+# Commit helpers
+# ---------------------------------------------------------------------------
+
+
+def add(repo: Path, paths: list[str] | None = None) -> None:
+    """Stage files in *repo*. Defaults to ``git add -A`` (all changes).
+
+    Pass an explicit *paths* list (relative to *repo*) to stage only specific
+    files — this matters when the working tree has unrelated dirty files that
+    must not be swept into an auto-commit.
+    """
+    if paths is None:
+        run(["git", "add", "-A"], cwd=repo)
+    else:
+        run(["git", "add", *paths], cwd=repo)
+
+
+def commit(repo: Path, message: str) -> None:
+    """Create a commit in *repo* with *message*."""
+    run(["git", "commit", "-m", message], cwd=repo)
+
+
+def add_and_commit(repo: Path, message: str, *, paths: list[str] | None = None) -> None:
+    """Stage and commit in one step (convenience over ``add`` + ``commit``).
+
+    With *paths*=None, stages everything (``git add -A``); otherwise stages
+    only the listed paths.
+    """
+    add(repo, paths)
+    commit(repo, message)

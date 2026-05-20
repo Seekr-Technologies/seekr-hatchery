@@ -119,8 +119,14 @@ class TestHelp:
 
 
 def _new_patches():
-    """Common context managers for cmd_new tests."""
+    """Common context managers for cmd_new tests.
 
+    ``run`` is patched on every module that has a local ``from utils import run``
+    binding (sessions, git). Both patches share a single MagicMock so tests can
+    read all git invocations from one call_args_list — including the bare
+    ``run([\"git\", \"add\", ...])`` issued indirectly by ``git.add_and_commit``.
+    """
+    shared_run = MagicMock(return_value=MagicMock(returncode=0, stdout="", stderr=""))
     return [
         patch("seekr_hatchery.cli.git.git_root_or_cwd"),
         patch("seekr_hatchery.cli.sessions.ensure_gitignore"),
@@ -130,13 +136,14 @@ def _new_patches():
         patch("seekr_hatchery.cli.sessions.task_db_path"),
         patch("seekr_hatchery.cli.sessions.worktrees_dir"),
         patch("seekr_hatchery.cli.git.create_worktree"),
-        patch("seekr_hatchery.sessions.run"),  # git add / git commit inside sessions.create
+        patch("seekr_hatchery.sessions.run", shared_run),  # mock_run — both sessions and git share
         patch("seekr_hatchery.cli.sessions.write_task_file"),
         patch("seekr_hatchery.sessions.open_for_editing"),
         patch("seekr_hatchery.cli.sessions.save_task"),
         patch("seekr_hatchery.cli.docker.resolve_runtime"),
         patch("seekr_hatchery.cli._launch_new"),
         patch("seekr_hatchery.cli._prompt_objective", return_value="Default objective"),
+        patch("seekr_hatchery.git.run", shared_run),  # same mock; git.add_and_commit flows through
     ]
 
 
@@ -144,7 +151,7 @@ class TestCliNew:
     def _setup_mocks(self, mocks):
 
         (
-            mock_root,
+mock_root,
             _,
             _,
             _,
@@ -158,6 +165,7 @@ class TestCliNew:
             mock_save,
             mock_docker,
             mock_launch,
+            _,
             _,
         ) = mocks
         mock_root.return_value = (Path("/repo"), True)
@@ -234,7 +242,7 @@ class TestCliNew:
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-                mock_root,
+mock_root,
                 _,
                 _,
                 _,
@@ -249,7 +257,8 @@ class TestCliNew:
                 mock_docker,
                 _,
                 mock_prompt,
-            ) = mocks
+                _,
+        ) = mocks
 
             mock_root.return_value = (Path("/repo"), True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
@@ -274,7 +283,7 @@ class TestCliNew:
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-                mock_root,
+mock_root,
                 _,
                 _,
                 _,
@@ -289,7 +298,8 @@ class TestCliNew:
                 mock_docker,
                 _,
                 mock_prompt,
-            ) = mocks
+                _,
+        ) = mocks
 
             mock_root.return_value = (Path("/repo"), True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
@@ -316,7 +326,7 @@ class TestCliNew:
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-                mock_root,
+mock_root,
                 _,
                 _,
                 _,
@@ -331,7 +341,8 @@ class TestCliNew:
                 mock_docker,
                 _,
                 _,
-            ) = mocks
+                _,
+        ) = mocks
             mock_root.return_value = (Path("/repo"), True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
             mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
@@ -354,7 +365,7 @@ class TestCliNew:
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-                mock_root,
+mock_root,
                 _,
                 _,
                 _,
@@ -369,7 +380,8 @@ class TestCliNew:
                 mock_docker,
                 mock_launch,
                 _,
-            ) = mocks
+                _,
+        ) = mocks
             mock_remove_wt = stack.enter_context(patch("seekr_hatchery.cli.git.remove_worktree"))
             mock_delete_br = stack.enter_context(patch("seekr_hatchery.cli.git.delete_branch"))
             mock_root.return_value = (Path("/repo"), True)
@@ -393,7 +405,7 @@ class TestCliNew:
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-                mock_root,
+mock_root,
                 _,
                 _,
                 mock_ensure_df,
@@ -408,7 +420,8 @@ class TestCliNew:
                 mock_docker,
                 _,
                 _,
-            ) = mocks
+                _,
+        ) = mocks
             mock_root.return_value = (Path("/repo"), True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
             mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
@@ -429,7 +442,7 @@ class TestCliNew:
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-                mock_root,
+mock_root,
                 _,
                 _,
                 mock_ensure_df,
@@ -444,7 +457,8 @@ class TestCliNew:
                 mock_docker,
                 _,
                 _,
-            ) = mocks
+                _,
+        ) = mocks
             mock_remove_wt = stack.enter_context(patch("seekr_hatchery.cli.git.remove_worktree"))
             mock_delete_br = stack.enter_context(patch("seekr_hatchery.cli.git.delete_branch"))
             mock_root.return_value = (Path("/repo"), True)
@@ -466,7 +480,7 @@ class TestCliNew:
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-                mock_root,
+mock_root,
                 _,
                 _,
                 mock_ensure_df,
@@ -481,7 +495,8 @@ class TestCliNew:
                 mock_docker,
                 _,
                 _,
-            ) = mocks
+                _,
+        ) = mocks
             mock_remove_wt = stack.enter_context(patch("seekr_hatchery.cli.git.remove_worktree"))
             mock_delete_br = stack.enter_context(patch("seekr_hatchery.cli.git.delete_branch"))
             mock_root.return_value = (Path("/repo"), True)
@@ -509,7 +524,7 @@ class TestCliNew:
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-                mock_root,
+mock_root,
                 _,
                 _,
                 mock_ensure_df,
@@ -524,7 +539,8 @@ class TestCliNew:
                 mock_docker,
                 _,
                 _,
-            ) = mocks
+                _,
+        ) = mocks
             repo = Path("/repo")
             mock_root.return_value = (repo, True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
@@ -554,7 +570,7 @@ class TestCliNew:
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-                mock_root,
+mock_root,
                 _,
                 _,
                 mock_ensure_df,
@@ -569,7 +585,8 @@ class TestCliNew:
                 mock_docker,
                 _,
                 _,
-            ) = mocks
+                _,
+        ) = mocks
             repo = Path("/repo")
             mock_root.return_value = (repo, True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
@@ -602,7 +619,7 @@ class TestCliNew:
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-                mock_root,
+mock_root,
                 _,
                 _,
                 mock_ensure_df,
@@ -617,7 +634,8 @@ class TestCliNew:
                 mock_docker,
                 _,
                 _,
-            ) = mocks
+                _,
+        ) = mocks
             repo = Path("/repo")
             mock_root.return_value = (repo, True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
@@ -646,7 +664,7 @@ class TestCliNew:
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-                mock_root,
+mock_root,
                 _,
                 _,
                 mock_ensure_df,
@@ -661,7 +679,8 @@ class TestCliNew:
                 mock_docker,
                 _,
                 _,
-            ) = mocks
+                _,
+        ) = mocks
             repo = Path("/repo")
             mock_root.return_value = (repo, True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
@@ -694,7 +713,7 @@ class TestCliNew:
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-                mock_root,
+mock_root,
                 _,
                 _,
                 mock_ensure_df,
@@ -709,7 +728,8 @@ class TestCliNew:
                 mock_docker,
                 _,
                 _,
-            ) = mocks
+                _,
+        ) = mocks
             repo = Path("/repo")
             mock_root.return_value = (repo, True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
@@ -736,7 +756,7 @@ class TestCliNew:
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-                mock_root,
+mock_root,
                 _,
                 _,
                 mock_ensure_df,
@@ -751,7 +771,8 @@ class TestCliNew:
                 mock_docker,
                 _,
                 _,
-            ) = mocks
+                _,
+        ) = mocks
             repo = Path("/repo")
             mock_root.return_value = (repo, True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
@@ -774,7 +795,7 @@ class TestCliNew:
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-                mock_root,
+mock_root,
                 _,
                 _,
                 mock_ensure_df,
@@ -789,7 +810,8 @@ class TestCliNew:
                 mock_docker,
                 _,
                 _,
-            ) = mocks
+                _,
+        ) = mocks
             repo = Path("/repo")
             mock_root.return_value = (repo, True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
@@ -811,7 +833,7 @@ class TestCliNew:
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-                mock_root,
+mock_root,
                 _,
                 _,
                 mock_ensure_df,
@@ -826,7 +848,8 @@ class TestCliNew:
                 mock_docker,
                 _,
                 _,
-            ) = mocks
+                _,
+        ) = mocks
             repo = Path("/repo")
             mock_root.return_value = (repo, True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
@@ -1122,7 +1145,7 @@ class TestSandbox:
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
             patch("seekr_hatchery.cli.docker.ensure_dockerfile", return_value=True) as mock_df,
             patch("seekr_hatchery.cli.docker.ensure_docker_config", return_value=False),
-            patch("seekr_hatchery.cli.run"),
+            patch("seekr_hatchery.cli.git.add_and_commit"),
             patch("seekr_hatchery.cli.docker.detect_runtime", return_value=docker.Runtime.DOCKER),
             patch("seekr_hatchery.cli.docker.launch_sandbox_shell"),
         ):
@@ -1426,7 +1449,7 @@ class TestCliNoWorktree:
     def _setup_no_worktree_mocks(self, mocks, in_repo: bool = True):
 
         (
-            mock_root,
+mock_root,
             _,
             _,
             _,
@@ -1440,6 +1463,7 @@ class TestCliNoWorktree:
             mock_save,
             mock_docker,
             mock_launch,
+            _,
             _,
         ) = mocks
         mock_root.return_value = (Path("/repo"), in_repo)
@@ -1524,7 +1548,7 @@ class TestCliNoWorktree:
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-                mock_root,
+mock_root,
                 _,
                 _,
                 mock_ensure_df,
@@ -1539,7 +1563,8 @@ class TestCliNoWorktree:
                 mock_docker,
                 _,
                 _,
-            ) = mocks
+                _,
+        ) = mocks
             mock_root.return_value = (Path("/some/dir"), False)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
             mock_wt_dir.return_value = Path("/some/dir/.hatchery/worktrees")
@@ -1558,7 +1583,7 @@ class TestCliNoWorktree:
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-                mock_root,
+mock_root,
                 _,
                 _,
                 mock_ensure_df,
@@ -1573,7 +1598,8 @@ class TestCliNoWorktree:
                 mock_docker,
                 _,
                 _,
-            ) = mocks
+                _,
+        ) = mocks
             mock_root.return_value = (Path("/some/dir"), False)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
             mock_wt_dir.return_value = Path("/some/dir/.hatchery/worktrees")
@@ -2418,7 +2444,7 @@ class TestCliNewInclude:
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-                mock_root,
+mock_root,
                 _,
                 _,
                 _,
@@ -2433,7 +2459,8 @@ class TestCliNewInclude:
                 mock_docker,
                 _,
                 _,
-            ) = mocks
+                _,
+        ) = mocks
             mock_root.return_value = (Path("/repo"), True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
             mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
@@ -2462,7 +2489,7 @@ class TestCliNewInclude:
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-                mock_root,
+mock_root,
                 _,
                 _,
                 _,
@@ -2477,7 +2504,8 @@ class TestCliNewInclude:
                 mock_docker,
                 _,
                 _,
-            ) = mocks
+                _,
+        ) = mocks
             mock_root.return_value = (Path("/repo"), True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
             mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
@@ -2504,7 +2532,7 @@ class TestCliNewInclude:
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-                mock_root,
+mock_root,
                 _,
                 _,
                 _,
@@ -2519,7 +2547,8 @@ class TestCliNewInclude:
                 mock_docker,
                 mock_launch,
                 _,
-            ) = mocks
+                _,
+        ) = mocks
             mock_root.return_value = (Path("/repo"), True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
             mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
@@ -2547,7 +2576,7 @@ class TestCliNewInclude:
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-                mock_root,
+mock_root,
                 _,
                 _,
                 _,
@@ -2562,7 +2591,8 @@ class TestCliNewInclude:
                 mock_docker,
                 mock_launch,
                 _,
-            ) = mocks
+                _,
+        ) = mocks
             mock_root.return_value = (Path("/repo"), True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
             mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
@@ -2593,7 +2623,7 @@ class TestCliNewInclude:
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
-            (mock_root, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, mock_save, mock_docker, _, _) = (
+            (mock_root, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, mock_save, mock_docker, _, _, _) = (
                 mocks
             )
             mock_root.return_value = (Path("/repo"), True)
@@ -2628,7 +2658,7 @@ class TestCliNewInclude:
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
-            (mock_root, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, mock_save, mock_docker, _, _) = (
+            (mock_root, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, mock_save, mock_docker, _, _, _) = (
                 mocks
             )
             mock_root.return_value = (Path("/repo"), True)
@@ -2660,7 +2690,7 @@ class TestCliNewInclude:
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
-            (mock_root, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, _, mock_docker, _, _) = mocks
+            (mock_root, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, _, mock_docker, _, _, _) = mocks
             mock_root.return_value = (Path("/repo"), True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
             mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
@@ -2691,7 +2721,7 @@ class TestCliNewInclude:
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
-            (mock_root, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, mock_save, mock_docker, _, _) = (
+            (mock_root, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, mock_save, mock_docker, _, _, _) = (
                 mocks
             )
             mock_root.return_value = (tmp_path, True)
@@ -2730,7 +2760,7 @@ class TestCliNewInclude:
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
-            (mock_root, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, mock_save, mock_docker, _, _) = (
+            (mock_root, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, mock_save, mock_docker, _, _, _) = (
                 mocks
             )
             mock_root.return_value = (tmp_path, True)
@@ -3043,7 +3073,7 @@ class TestCliResumeInclude:
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
-            (mock_root, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, mock_save, mock_docker, _, _) = (
+            (mock_root, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, mock_save, mock_docker, _, _, _) = (
                 mocks
             )
             mock_root.return_value = (tmp_path, True)
@@ -3315,7 +3345,7 @@ class TestLaunchFinalizeInclude:
             patch("seekr_hatchery.sessions.set_status"),
             patch("seekr_hatchery.cli._post_exit_check"),
             patch("seekr_hatchery.cli.sessions.sandbox_context", wraps=sessions.sandbox_context) as mock_ctx,
-            patch("seekr_hatchery.sessions.docker_context", return_value=(MagicMock(), [], "/workspace")),
+            patch("seekr_hatchery.sessions.docker.launch_context", return_value=(MagicMock(), [], "/workspace")),
             patch("seekr_hatchery.cli.os.chdir"),
             patch("seekr_hatchery.cli.subprocess.run"),
         ):
@@ -3347,7 +3377,7 @@ class TestLaunchFinalizeInclude:
         repo_b.mkdir()
         entry_b = IncludeEntry(path=repo_b, mode="worktree")
 
-        # docker_context returns a config whose .kubernetes is None so sessions.launch
+        # docker.launch_context returns a config whose .kubernetes is None so sessions.launch
         # short-circuits the kubectl-token write that would otherwise hit fs.
         config = MagicMock()
         config.kubernetes = None
@@ -3357,7 +3387,7 @@ class TestLaunchFinalizeInclude:
             patch("seekr_hatchery.sessions.get_or_create_proxy_token", return_value="tok"),
             patch("seekr_hatchery.sessions.docker.run_session") as mock_run_session,
             patch(
-                "seekr_hatchery.sessions.docker_context",
+                "seekr_hatchery.sessions.docker.launch_context",
                 return_value=(config, [], "/repo/.hatchery/worktrees/my-task"),
             ),
         ):

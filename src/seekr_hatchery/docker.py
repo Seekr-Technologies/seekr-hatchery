@@ -502,6 +502,34 @@ def load_docker_config(root: Path) -> DockerConfig:
         sys.exit(1)
 
 
+def launch_context(
+    meta: SessionMeta,
+    runtime: "Runtime | None",
+) -> tuple[DockerConfig | None, list[str], str]:
+    """Return (config, features, container_workdir) for the launch path.
+
+    Composes :func:`load_docker_config` + :func:`docker_features` with the
+    container-workdir derivation that sessions.launch needs to set up the
+    agent command. ``runtime=None`` → no docker (native mode); the workdir
+    field is empty in that case and the caller doesn't pass it to the
+    agent's command builder.
+
+    Worktree mode mounts the repo at ``CONTAINER_REPO_ROOT`` and uses
+    ``<repo>/<rel-to-worktree>`` as the container WORKDIR; no-worktree mode
+    bind-mounts cwd at ``/workspace``.
+    """
+    if runtime is None:
+        return None, [], ""
+    root = meta.repo_path if meta.no_worktree else meta.worktree_path
+    config = load_docker_config(root)
+    features = docker_features(config)
+    if meta.no_worktree:
+        container_workdir = "/workspace"
+    else:
+        container_workdir = f"{CONTAINER_REPO_ROOT}/{meta.worktree_path.relative_to(meta.repo_path)}"
+    return config, features, container_workdir
+
+
 def _construct_docker_mounts(config: DockerConfig) -> list[str]:
     """Resolve a DockerConfig into docker -v mount strings.
 

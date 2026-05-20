@@ -875,13 +875,10 @@ def cmd_sandbox(shell: str, rebuild_sandbox: bool, no_commit: bool) -> None:
     dc_created = docker.ensure_docker_config(repo)
     if in_repo and not no_commit and (df_created or dc_created):
         ui.info("  Committing...")
-        run(
-            ["git", "add", str(docker.dockerfile_path(repo, backend).relative_to(repo)), str(DOCKER_CONFIG)],
-            cwd=repo,
-        )
-        run(
-            ["git", "commit", "-m", "chore: add hatchery Docker configuration"],
-            cwd=repo,
+        git.add_and_commit(
+            repo,
+            "chore: add hatchery Docker configuration",
+            paths=[str(docker.dockerfile_path(repo, backend).relative_to(repo)), str(DOCKER_CONFIG)],
         )
     runtime = docker.detect_runtime()
     config = docker.load_docker_config(repo)
