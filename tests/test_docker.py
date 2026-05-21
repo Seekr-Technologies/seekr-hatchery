@@ -295,6 +295,16 @@ class TestRunContainerRuntime:
         cmd = self._capture_cmd(monkeypatch, runtime=docker.Runtime.PODMAN)
         assert cmd[0] == "podman"
 
+    # --- --init (PID 1 zombie reaping) ---
+
+    def test_docker_runtime_adds_init(self, monkeypatch):
+        cmd = self._capture_cmd(monkeypatch, runtime=docker.Runtime.DOCKER)
+        assert "--init" in cmd
+
+    def test_podman_runtime_adds_init(self, monkeypatch):
+        cmd = self._capture_cmd(monkeypatch, runtime=docker.Runtime.PODMAN)
+        assert "--init" in cmd
+
     # --- Podman outer-container flags ---
 
     def test_podman_userns_keep_id_on_linux(self, monkeypatch):

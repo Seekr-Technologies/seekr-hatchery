@@ -1052,7 +1052,11 @@ def _run_container(
     flag on Linux even when the API proxy is not active (e.g. when the kubectl
     feature is enabled and the container needs to reach the RBAC proxy).
     """
-    cmd = [runtime.binary, "run", "--rm"]
+    # --init injects a minimal init process (tini for docker, catatonit for
+    # podman) as PID 1 so SIGCHLD is handled and zombie children of the agent
+    # process get reaped. Without it, long-running containers accumulate
+    # zombies from tool shell-outs and tool calls eventually hang.
+    cmd = [runtime.binary, "run", "--rm", "--init"]
     if _command_override is None or _interactive:
         cmd += ["-it"]
     for mount in mounts:
