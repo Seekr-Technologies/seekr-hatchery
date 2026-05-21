@@ -521,8 +521,7 @@ def merge_includes_with_config(
             existing = next(e for e in result if e.path == resolved)
             if existing.mode != config_mode:
                 ui.note(
-                    f"--include* flag overrides docker.yaml mode for {path_str}: "
-                    f"{config_mode!r} → {existing.mode!r}"
+                    f"--include* flag overrides docker.yaml mode for {path_str}: {config_mode!r} → {existing.mode!r}"
                 )
         else:
             seen.add(resolved)
@@ -804,7 +803,11 @@ def create(
             new_entries: list[IncludeEntry] = []
             for raw_entry in post_config.include:
                 path_str, mode = docker.parse_docker_include_entry(raw_entry)
-                resolved = (worktree / Path(path_str)).resolve() if not Path(path_str).is_absolute() else Path(path_str).resolve()
+                resolved = (
+                    (worktree / Path(path_str)).resolve()
+                    if not Path(path_str).is_absolute()
+                    else Path(path_str).resolve()
+                )
                 if resolved not in post_include_paths and resolved.exists():
                     new_entries.append(IncludeEntry(path=resolved, mode=mode))
                     post_include_paths.add(resolved)
@@ -938,9 +941,12 @@ def launch(
         ui.chat_banner(meta.name, meta.repo_path, features=features)
     else:
         ui.banner(
-            meta.name, meta.repo_path,
-            branch=meta.branch, sandbox=bool(runtime),
-            worktree=not meta.no_worktree, features=features,
+            meta.name,
+            meta.repo_path,
+            branch=meta.branch,
+            sandbox=bool(runtime),
+            worktree=not meta.no_worktree,
+            features=features,
         )
 
     set_status(meta.repo_path, meta.name, "running")
@@ -955,7 +961,10 @@ def launch(
                 get_or_create_kubectl_token(meta.session_dir) if config and config.kubernetes else None
             )
             docker.run_session(
-                meta, backend, agent_cmd, config,
+                meta,
+                backend,
+                agent_cmd,
+                config,
                 proxy_token=proxy_token,
                 kubectl_proxy_token=kubectl_proxy_token,
                 runtime=runtime,

@@ -25,7 +25,7 @@ import seekr_hatchery.user_config as user_config
 import seekr_hatchery.utils as utils
 from seekr_hatchery.constants import DEFAULT_BASE, DOCKER_CONFIG
 from seekr_hatchery.includes import IncludeEntry, load_include_entries
-from seekr_hatchery.utils import open_for_editing, run
+from seekr_hatchery.utils import open_for_editing
 
 logger = logging.getLogger("hatchery")
 
@@ -222,17 +222,26 @@ def _launch(
     "mark done?", "wrap up?") is CLI-domain and lives here.
     """
     features = sessions.launch(
-        meta, kind=kind, backend=backend, runtime=runtime,
-        main_branch=main_branch, session_id=session_id,
-        no_cache=no_cache, include_repos=include_repos,
+        meta,
+        kind=kind,
+        backend=backend,
+        runtime=runtime,
+        main_branch=main_branch,
+        session_id=session_id,
+        no_cache=no_cache,
+        include_repos=include_repos,
     )
     if meta.is_chat:
         _chat_post_exit(meta.name, meta.repo_path)
     else:
         _post_exit_check(
-            meta.name, meta.repo_path, meta.worktree_path,
-            branch=meta.branch, sandbox=bool(runtime),
-            no_worktree=meta.no_worktree, features=features,
+            meta.name,
+            meta.repo_path,
+            meta.worktree_path,
+            branch=meta.branch,
+            sandbox=bool(runtime),
+            no_worktree=meta.no_worktree,
+            features=features,
         )
 
 
@@ -278,8 +287,12 @@ def _post_exit_check(
         main_branch = git.get_default_branch(repo)
         include_repos = load_include_entries({"include": meta.include})
         _launch(
-            meta, kind="finalize", backend=backend, runtime=runtime,
-            main_branch=main_branch, session_id=meta.session_id,
+            meta,
+            kind="finalize",
+            backend=backend,
+            runtime=runtime,
+            main_branch=main_branch,
+            session_id=meta.session_id,
             include_repos=include_repos,
         )
     elif choice == "x":
@@ -559,11 +572,19 @@ def cmd_new(
     objective = None if use_editor else _prompt_objective()
     try:
         meta = sessions.create(
-            name=name, repo=repo, type="task", backend=backend,
-            base=base, no_worktree=no_worktree,
-            no_commit=no_commit, no_commit_docker=no_commit_docker,
-            no_docker=no_docker, in_repo=in_repo,
-            include_entries=include_repos, objective=objective, use_editor=use_editor,
+            name=name,
+            repo=repo,
+            type="task",
+            backend=backend,
+            base=base,
+            no_worktree=no_worktree,
+            no_commit=no_commit,
+            no_commit_docker=no_commit_docker,
+            no_docker=no_docker,
+            in_repo=in_repo,
+            include_entries=include_repos,
+            objective=objective,
+            use_editor=use_editor,
         )
     except sessions.SessionCancelled:
         sys.exit(1)
@@ -576,9 +597,14 @@ def cmd_new(
     include_repos = load_include_entries({"include": meta.include})
     try:
         _launch(
-            meta, kind="new", backend=backend, runtime=runtime,
-            main_branch=main_branch, session_id=meta.session_id or "",
-            no_cache=rebuild_sandbox, include_repos=include_repos,
+            meta,
+            kind="new",
+            backend=backend,
+            runtime=runtime,
+            main_branch=main_branch,
+            session_id=meta.session_id or "",
+            no_cache=rebuild_sandbox,
+            include_repos=include_repos,
         )
     except KeyboardInterrupt:
         if not meta.no_worktree:
@@ -620,8 +646,12 @@ def cmd_chat(name: str | None, agent_name: str, no_commit: bool) -> None:
 
     try:
         meta = sessions.create(
-            name=name, repo=repo, type="chat", backend=backend,
-            no_commit=no_commit, in_repo=in_repo,
+            name=name,
+            repo=repo,
+            type="chat",
+            backend=backend,
+            no_commit=no_commit,
+            in_repo=in_repo,
         )
     except KeyboardInterrupt:
         ui.warn("Cancelled.")
@@ -630,8 +660,12 @@ def cmd_chat(name: str | None, agent_name: str, no_commit: bool) -> None:
     runtime = docker.resolve_runtime(repo, repo, no_docker=False, backend=backend)
     main_branch = git.get_default_branch(repo) if in_repo else ""
     _launch(
-        meta, kind="new", backend=backend, runtime=runtime,
-        main_branch=main_branch, session_id=meta.session_id or "",
+        meta,
+        kind="new",
+        backend=backend,
+        runtime=runtime,
+        main_branch=main_branch,
+        session_id=meta.session_id or "",
     )
 
 
@@ -748,9 +782,14 @@ def cmd_resume(
     runtime = docker.resolve_runtime(repo, meta.worktree_path, no_docker, backend=backend)
     main_branch = git.get_default_branch(repo)
     _launch(
-        meta, kind="resume", backend=backend, runtime=runtime,
-        main_branch=main_branch, session_id=meta.session_id,
-        no_cache=rebuild_sandbox, include_repos=include_repos,
+        meta,
+        kind="resume",
+        backend=backend,
+        runtime=runtime,
+        main_branch=main_branch,
+        session_id=meta.session_id,
+        no_cache=rebuild_sandbox,
+        include_repos=include_repos,
     )
 
 
@@ -788,9 +827,13 @@ def cmd_sandbox(shell: str, rebuild_sandbox: bool, no_commit: bool) -> None:
     features = docker.docker_features(config)
     ui.banner("sandbox", repo, sandbox=True, worktree=False, features=features)
     docker.launch_sandbox_shell(
-        repo, backend, config, runtime,
+        repo,
+        backend,
+        config,
+        runtime,
         image_name=sessions.image_name(repo, "sandbox"),
-        shell=shell, no_cache=rebuild_sandbox,
+        shell=shell,
+        no_cache=rebuild_sandbox,
     )
 
 

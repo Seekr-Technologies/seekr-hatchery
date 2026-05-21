@@ -4,11 +4,10 @@ from pathlib import Path
 
 import pytest
 
-import seekr_hatchery.git as git
-import seekr_hatchery.sessions as sessions_mod
-from seekr_hatchery.includes import IncludeEntry
 import seekr_hatchery.constants as constants
+import seekr_hatchery.git as git
 import seekr_hatchery.utils as utils
+from seekr_hatchery.includes import IncludeEntry
 
 # ---------------------------------------------------------------------------
 # Helpers

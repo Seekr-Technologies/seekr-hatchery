@@ -917,7 +917,6 @@ class TestSandboxContextIncludePaths:
         repo_b = tmp_path / "repo-b"
         repo_b.mkdir()
         (repo_b / ".git").mkdir()
-        import seekr_hatchery.sessions as sessions_mod
 
         wt = repo_b / constants.WORKTREES_SUBDIR / "my-task"
         wt.mkdir(parents=True)
@@ -945,7 +944,6 @@ class TestSandboxContextIncludePaths:
         repo_b = tmp_path / "repo-b"
         repo_b.mkdir()
         (repo_b / ".git").mkdir()
-        import seekr_hatchery.sessions as sessions_mod
 
         wt = repo_b / constants.WORKTREES_SUBDIR / "my-task"
         wt.mkdir(parents=True)

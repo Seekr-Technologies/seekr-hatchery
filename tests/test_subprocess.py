@@ -7,7 +7,6 @@ from unittest.mock import MagicMock
 import pytest
 
 import seekr_hatchery.git as git
-import seekr_hatchery.sessions as sessions
 import seekr_hatchery.utils as utils
 
 # ---------------------------------------------------------------------------

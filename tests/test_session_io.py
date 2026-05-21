@@ -21,6 +21,7 @@ def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
     """Small helper to run git in *repo* during the real-fs tests."""
     return subprocess.run(["git", "-C", str(repo), *args], check=check, capture_output=True, text=True)
 
+
 # ---------------------------------------------------------------------------
 # save_task
 # ---------------------------------------------------------------------------
@@ -579,7 +580,10 @@ class TestSessionCreateTask:
 
     def test_task_file_contains_objective(self, git_repo, fake_tasks_db, no_input):
         sessions.create(
-            name="t", repo=git_repo, type="task", backend=agent.CODEX,
+            name="t",
+            repo=git_repo,
+            type="task",
+            backend=agent.CODEX,
             objective="The task is to do X.",
         )
         task_file = sessions.find_task_file(git_repo / ".hatchery" / "worktrees" / "t", "t")
@@ -588,8 +592,12 @@ class TestSessionCreateTask:
 
     def test_no_worktree_skips_branch_and_worktree(self, git_repo, fake_tasks_db, no_input):
         meta = sessions.create(
-            name="t", repo=git_repo, type="task", backend=agent.CODEX,
-            no_worktree=True, objective="x",
+            name="t",
+            repo=git_repo,
+            type="task",
+            backend=agent.CODEX,
+            no_worktree=True,
+            objective="x",
         )
         assert _git(git_repo, "rev-parse", "--verify", "hatchery/t", check=False).returncode != 0
         assert meta.worktree_path == git_repo
@@ -606,8 +614,12 @@ class TestSessionCreateTask:
         ref.mkdir()
         entries = [IncludeEntry(path=ref, mode="ro")]
         meta = sessions.create(
-            name="t", repo=git_repo, type="task", backend=agent.CODEX,
-            include_entries=entries, objective="x",
+            name="t",
+            repo=git_repo,
+            type="task",
+            backend=agent.CODEX,
+            include_entries=entries,
+            objective="x",
         )
         assert any(e["mode"] == "ro" and Path(e["path"]) == ref for e in meta.include)
 
@@ -620,8 +632,12 @@ class TestSessionCreateTask:
 
     def test_no_commit_skips_task_file_commit(self, git_repo, fake_tasks_db, no_input):
         sessions.create(
-            name="t", repo=git_repo, type="task", backend=agent.CODEX,
-            no_commit=True, objective="x",
+            name="t",
+            repo=git_repo,
+            type="task",
+            backend=agent.CODEX,
+            no_commit=True,
+            objective="x",
         )
         worktree = git_repo / ".hatchery" / "worktrees" / "t"
         log = _git(worktree, "log", "--oneline").stdout
@@ -798,7 +814,10 @@ class TestSessionCancelledRollback:
 
         with pytest.raises(sessions.SessionCancelled):
             sessions.create(
-                name="t", repo=git_repo, type="task", backend=agent.CODEX,
+                name="t",
+                repo=git_repo,
+                type="task",
+                backend=agent.CODEX,
                 use_editor=True,
             )
 
@@ -809,14 +828,19 @@ class TestSessionCancelledRollback:
         # No meta.json on disk (sessions.save_task never reached).
         assert not sessions.task_db_path(git_repo, "t").exists()
 
-    def test_unchanged_editor_rolls_back_include_worktrees(self, git_repo, fake_tasks_db, no_input, tmp_path, monkeypatch):
+    def test_unchanged_editor_rolls_back_include_worktrees(
+        self, git_repo, fake_tasks_db, no_input, tmp_path, monkeypatch
+    ):
         repo_b = _make_include_repo(tmp_path, "repo-b")
 
         monkeypatch.setattr("seekr_hatchery.sessions.open_for_editing", lambda _p: None)
 
         with pytest.raises(sessions.SessionCancelled):
             sessions.create(
-                name="t", repo=git_repo, type="task", backend=agent.CODEX,
+                name="t",
+                repo=git_repo,
+                type="task",
+                backend=agent.CODEX,
                 use_editor=True,
                 include_entries=[IncludeEntry(path=repo_b, mode="worktree")],
             )
@@ -841,8 +865,12 @@ class TestSessionLaunchDockerBranch:
         wt = tmp_path / "wt"
         wt.mkdir()
         meta = sessions.SessionMeta(
-            name="t", repo=str(tmp_path), worktree=str(wt),
-            branch="hatchery/t", session_id="sid", status="in-progress",
+            name="t",
+            repo=str(tmp_path),
+            worktree=str(wt),
+            branch="hatchery/t",
+            session_id="sid",
+            status="in-progress",
         )
         sessions.save(meta)
         (wt / ".hatchery" / "tasks").mkdir(parents=True, exist_ok=True)
@@ -850,19 +878,26 @@ class TestSessionLaunchDockerBranch:
 
         # Stub the docker primitives that sessions.launch would otherwise hit.
         from unittest.mock import MagicMock
+
         fake_config = MagicMock()
         fake_config.kubernetes = None  # short-circuit the kubectl-token write
         runtime_sentinel = MagicMock(name="Runtime")
 
         with (
-            patch("seekr_hatchery.sessions.docker.launch_context",
-                  return_value=(fake_config, ["docker"], "/repo/.hatchery/worktrees/t")),
+            patch(
+                "seekr_hatchery.sessions.docker.launch_context",
+                return_value=(fake_config, ["docker"], "/repo/.hatchery/worktrees/t"),
+            ),
             patch("seekr_hatchery.sessions.docker.run_session") as mock_run_session,
             patch("seekr_hatchery.sessions.get_or_create_proxy_token", return_value="tok"),
         ):
             sessions.launch(
-                meta, kind="new", backend=spy_backend, runtime=runtime_sentinel,
-                main_branch="main", session_id="sid",
+                meta,
+                kind="new",
+                backend=spy_backend,
+                runtime=runtime_sentinel,
+                main_branch="main",
+                session_id="sid",
             )
 
         # docker.run_session was called with meta + the proxy token.
@@ -899,8 +934,12 @@ class TestMergeIncludeUpdates:
         repo_b = _make_include_repo(tmp_path, "repo-b")
         entry = IncludeEntry(path=repo_b, mode=mode)
         meta = sessions.create(
-            name="t", repo=git_repo, type="task", backend=agent.CODEX,
-            objective="x", include_entries=[entry],
+            name="t",
+            repo=git_repo,
+            type="task",
+            backend=agent.CODEX,
+            objective="x",
+            include_entries=[entry],
         )
         return meta, repo_b, entry
 
@@ -965,8 +1004,10 @@ class TestMergeIncludesWithConfig:
         assert result[0].mode == "ro"
 
     def test_config_entry_appended_when_not_in_cli(self, tmp_path):
-        ref_a = tmp_path / "a"; ref_a.mkdir()
-        ref_b = tmp_path / "b"; ref_b.mkdir()
+        ref_a = tmp_path / "a"
+        ref_a.mkdir()
+        ref_b = tmp_path / "b"
+        ref_b.mkdir()
         cli_entries = [IncludeEntry(path=ref_a.resolve(), mode="ro")]
         config = [IncludeItem(path=str(ref_b), mode="worktree")]
 

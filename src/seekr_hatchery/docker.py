@@ -422,8 +422,7 @@ def ensure_docker_config(repo: Path, *, source: Path | None = None) -> bool:
         if source_config.exists():
             shutil.copy2(source_config, config_file)
             ui.warn(
-                f"  Copied {DOCKER_CONFIG} from repo root "
-                "(uncommitted — will not be committed to this worktree branch)"
+                f"  Copied {DOCKER_CONFIG} from repo root (uncommitted — will not be committed to this worktree branch)"
             )
             return False
     config_file.write_text(_DOCKER_CONFIG_TEMPLATE.read_text())

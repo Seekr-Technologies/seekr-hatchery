@@ -7,10 +7,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import seekr_hatchery.agents as agent
+import seekr_hatchery.constants as constants
 import seekr_hatchery.docker as docker
 import seekr_hatchery.git as git
 import seekr_hatchery.sessions as sessions
-import seekr_hatchery.constants as constants
 
 # ---------------------------------------------------------------------------
 # write_task_file

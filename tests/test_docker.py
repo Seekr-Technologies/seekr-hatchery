@@ -7,15 +7,15 @@ from unittest.mock import MagicMock
 import pytest
 
 import seekr_hatchery.agents as agent
-import seekr_hatchery.docker as docker
-import seekr_hatchery.sessions as sessions
 import seekr_hatchery.constants as constants
+import seekr_hatchery.docker as docker
 from seekr_hatchery.models import SessionMeta
 
 
 def _no_wt_meta(cwd):
     """Synthetic SessionMeta for no-worktree mount tests."""
     return SessionMeta(name="-", repo=str(cwd), worktree=str(cwd), no_worktree=True)
+
 
 # ---------------------------------------------------------------------------
 # docker_available()
@@ -652,7 +652,6 @@ class TestDockerMountsIncludes:
 
     def test_git_repo_with_worktree_gets_layered_mounts(self, tmp_path):
         """A git repo in worktree mode with a task worktree gets layered mounts."""
-        import seekr_hatchery.sessions as sessions_mod
 
         repo = tmp_path / "repo-b"
         repo.mkdir()
@@ -698,7 +697,6 @@ class TestDockerMountsIncludes:
         repo = tmp_path / "repo-b"
         repo.mkdir()
         (repo / ".git").mkdir()
-        import seekr_hatchery.sessions as sessions_mod
 
         worktree = repo / constants.WORKTREES_SUBDIR / "my-task"
         worktree.mkdir(parents=True)
@@ -747,7 +745,6 @@ class TestDockerMountsIncludes:
 
     def test_reference_mode_git_repo_no_layered_mounts(self, tmp_path):
         """mode='ro' on a git repo with a worktree still just does a simple ro mount."""
-        import seekr_hatchery.sessions as sessions_mod
 
         repo = tmp_path / "repo-b"
         repo.mkdir()
@@ -772,7 +769,6 @@ class TestDockerMountsIncludes:
 
     def test_reference_rw_git_repo_no_layered_mounts(self, tmp_path):
         """mode='rw' on a git repo with a worktree still just does a simple rw reference mount."""
-        import seekr_hatchery.sessions as sessions_mod
 
         repo = tmp_path / "repo-c"
         repo.mkdir()

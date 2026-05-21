@@ -6,10 +6,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-from seekr_hatchery.constants import WORKTREES_SUBDIR
-from seekr_hatchery.utils import run
 import seekr_hatchery.ui as ui
+from seekr_hatchery.constants import WORKTREES_SUBDIR
 from seekr_hatchery.includes import IncludeEntry
+from seekr_hatchery.utils import run
 
 logger = logging.getLogger("hatchery")
 

@@ -6,9 +6,9 @@ from pathlib import Path
 import pytest
 
 import seekr_hatchery.agents as agent
+import seekr_hatchery.constants as constants
 import seekr_hatchery.sessions as sessions
 import seekr_hatchery.user_config as user_config
-import seekr_hatchery.constants as constants
 import seekr_hatchery.utils as utils
 
 # ---------------------------------------------------------------------------

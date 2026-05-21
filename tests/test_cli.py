@@ -7,25 +7,31 @@ from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
 
+import seekr_hatchery.constants as constants
 import seekr_hatchery.docker as docker
 import seekr_hatchery.sessions as sessions
 from seekr_hatchery.cli import (
     TaskNameType,
     cli,
 )
-from seekr_hatchery.sessions import _WRAP_UP_PROMPT, next_chat_name
 from seekr_hatchery.includes import IncludeEntry
+from seekr_hatchery.sessions import _WRAP_UP_PROMPT, next_chat_name
 
 
-def _launch_meta(name="t", repo="/repo", worktree="/worktree", branch="b",
-                 is_chat=False, no_worktree=False, agent_kind="CODEX"):
+def _launch_meta(
+    name="t", repo="/repo", worktree="/worktree", branch="b", is_chat=False, no_worktree=False, agent_kind="CODEX"
+):
     """Build a SessionMeta for sessions.launch hook/chat/status tests."""
     return sessions.SessionMeta(
-        name=name, repo=repo, worktree=worktree, branch=branch,
+        name=name,
+        repo=repo,
+        worktree=worktree,
+        branch=branch,
         type="chat" if is_chat else "task",
-        no_worktree=no_worktree, agent=agent_kind,
+        no_worktree=no_worktree,
+        agent=agent_kind,
     )
-import seekr_hatchery.constants as constants
+
 
 # ---------------------------------------------------------------------------
 # --version
@@ -158,7 +164,7 @@ class TestCliNew:
     def _setup_mocks(self, mocks):
 
         (
-mock_root,
+            mock_root,
             _,
             _,
             _,
@@ -249,7 +255,7 @@ mock_root,
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-mock_root,
+                mock_root,
                 _,
                 _,
                 _,
@@ -265,7 +271,7 @@ mock_root,
                 _,
                 mock_prompt,
                 _,
-        ) = mocks
+            ) = mocks
 
             mock_root.return_value = (Path("/repo"), True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
@@ -290,7 +296,7 @@ mock_root,
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-mock_root,
+                mock_root,
                 _,
                 _,
                 _,
@@ -306,7 +312,7 @@ mock_root,
                 _,
                 mock_prompt,
                 _,
-        ) = mocks
+            ) = mocks
 
             mock_root.return_value = (Path("/repo"), True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
@@ -333,7 +339,7 @@ mock_root,
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-mock_root,
+                mock_root,
                 _,
                 _,
                 _,
@@ -349,7 +355,7 @@ mock_root,
                 _,
                 _,
                 _,
-        ) = mocks
+            ) = mocks
             mock_root.return_value = (Path("/repo"), True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
             mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
@@ -372,7 +378,7 @@ mock_root,
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-mock_root,
+                mock_root,
                 _,
                 _,
                 _,
@@ -388,7 +394,7 @@ mock_root,
                 mock_launch,
                 _,
                 _,
-        ) = mocks
+            ) = mocks
             mock_remove_wt = stack.enter_context(patch("seekr_hatchery.cli.git.remove_worktree"))
             mock_delete_br = stack.enter_context(patch("seekr_hatchery.cli.git.delete_branch"))
             mock_root.return_value = (Path("/repo"), True)
@@ -412,7 +418,7 @@ mock_root,
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-mock_root,
+                mock_root,
                 _,
                 _,
                 mock_ensure_df,
@@ -428,7 +434,7 @@ mock_root,
                 _,
                 _,
                 _,
-        ) = mocks
+            ) = mocks
             mock_root.return_value = (Path("/repo"), True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
             mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
@@ -449,7 +455,7 @@ mock_root,
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-mock_root,
+                mock_root,
                 _,
                 _,
                 mock_ensure_df,
@@ -465,7 +471,7 @@ mock_root,
                 _,
                 _,
                 _,
-        ) = mocks
+            ) = mocks
             mock_remove_wt = stack.enter_context(patch("seekr_hatchery.cli.git.remove_worktree"))
             mock_delete_br = stack.enter_context(patch("seekr_hatchery.cli.git.delete_branch"))
             mock_root.return_value = (Path("/repo"), True)
@@ -487,7 +493,7 @@ mock_root,
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-mock_root,
+                mock_root,
                 _,
                 _,
                 mock_ensure_df,
@@ -503,7 +509,7 @@ mock_root,
                 _,
                 _,
                 _,
-        ) = mocks
+            ) = mocks
             mock_remove_wt = stack.enter_context(patch("seekr_hatchery.cli.git.remove_worktree"))
             mock_delete_br = stack.enter_context(patch("seekr_hatchery.cli.git.delete_branch"))
             mock_root.return_value = (Path("/repo"), True)
@@ -531,7 +537,7 @@ mock_root,
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-mock_root,
+                mock_root,
                 _,
                 _,
                 mock_ensure_df,
@@ -547,7 +553,7 @@ mock_root,
                 _,
                 _,
                 _,
-        ) = mocks
+            ) = mocks
             repo = Path("/repo")
             mock_root.return_value = (repo, True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
@@ -577,7 +583,7 @@ mock_root,
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-mock_root,
+                mock_root,
                 _,
                 _,
                 mock_ensure_df,
@@ -593,7 +599,7 @@ mock_root,
                 _,
                 _,
                 _,
-        ) = mocks
+            ) = mocks
             repo = Path("/repo")
             mock_root.return_value = (repo, True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
@@ -626,7 +632,7 @@ mock_root,
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-mock_root,
+                mock_root,
                 _,
                 _,
                 mock_ensure_df,
@@ -642,7 +648,7 @@ mock_root,
                 _,
                 _,
                 _,
-        ) = mocks
+            ) = mocks
             repo = Path("/repo")
             mock_root.return_value = (repo, True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
@@ -671,7 +677,7 @@ mock_root,
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-mock_root,
+                mock_root,
                 _,
                 _,
                 mock_ensure_df,
@@ -687,7 +693,7 @@ mock_root,
                 _,
                 _,
                 _,
-        ) = mocks
+            ) = mocks
             repo = Path("/repo")
             mock_root.return_value = (repo, True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
@@ -720,7 +726,7 @@ mock_root,
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-mock_root,
+                mock_root,
                 _,
                 _,
                 mock_ensure_df,
@@ -736,7 +742,7 @@ mock_root,
                 _,
                 _,
                 _,
-        ) = mocks
+            ) = mocks
             repo = Path("/repo")
             mock_root.return_value = (repo, True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
@@ -763,7 +769,7 @@ mock_root,
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-mock_root,
+                mock_root,
                 _,
                 _,
                 mock_ensure_df,
@@ -779,7 +785,7 @@ mock_root,
                 _,
                 _,
                 _,
-        ) = mocks
+            ) = mocks
             repo = Path("/repo")
             mock_root.return_value = (repo, True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
@@ -802,7 +808,7 @@ mock_root,
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-mock_root,
+                mock_root,
                 _,
                 _,
                 mock_ensure_df,
@@ -818,7 +824,7 @@ mock_root,
                 _,
                 _,
                 _,
-        ) = mocks
+            ) = mocks
             repo = Path("/repo")
             mock_root.return_value = (repo, True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
@@ -840,7 +846,7 @@ mock_root,
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-mock_root,
+                mock_root,
                 _,
                 _,
                 mock_ensure_df,
@@ -856,7 +862,7 @@ mock_root,
                 _,
                 _,
                 _,
-        ) = mocks
+            ) = mocks
             repo = Path("/repo")
             mock_root.return_value = (repo, True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
@@ -1097,7 +1103,7 @@ class TestCliResume:
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch"),
         ):
-                runner.invoke(cli, ["resume", "my-task", "--no-docker"])
+            runner.invoke(cli, ["resume", "my-task", "--no-docker"])
 
         assert not mock_ensure.called
 
@@ -1456,7 +1462,7 @@ class TestCliNoWorktree:
     def _setup_no_worktree_mocks(self, mocks, in_repo: bool = True):
 
         (
-mock_root,
+            mock_root,
             _,
             _,
             _,
@@ -1554,7 +1560,7 @@ mock_root,
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-mock_root,
+                mock_root,
                 _,
                 _,
                 mock_ensure_df,
@@ -1570,7 +1576,7 @@ mock_root,
                 _,
                 _,
                 _,
-        ) = mocks
+            ) = mocks
             mock_root.return_value = (Path("/some/dir"), False)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
             mock_wt_dir.return_value = Path("/some/dir/.hatchery/worktrees")
@@ -1589,7 +1595,7 @@ mock_root,
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-mock_root,
+                mock_root,
                 _,
                 _,
                 mock_ensure_df,
@@ -1605,7 +1611,7 @@ mock_root,
                 _,
                 _,
                 _,
-        ) = mocks
+            ) = mocks
             mock_root.return_value = (Path("/some/dir"), False)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
             mock_wt_dir.return_value = Path("/some/dir/.hatchery/worktrees")
@@ -1623,8 +1629,12 @@ mock_root,
         # no_worktree=True means meta.worktree_path doesn't need to exist
         nonexistent = tmp_path / "does-not-exist"
         meta = sessions.SessionMeta(
-            name="my-task", branch="", worktree=str(nonexistent), repo=str(tmp_path),
-            session_id="sid-456", no_worktree=True,
+            name="my-task",
+            branch="",
+            worktree=str(nonexistent),
+            repo=str(tmp_path),
+            session_id="sid-456",
+            no_worktree=True,
         )
 
         with (
@@ -1734,8 +1744,12 @@ class TestLaunchHooks:
             for p in self._patches():
                 stack.enter_context(p)
             sessions.launch(
-                _launch_meta(), kind="new", backend=spy_backend,
-                runtime=None, main_branch="main", session_id="sid",
+                _launch_meta(),
+                kind="new",
+                backend=spy_backend,
+                runtime=None,
+                main_branch="main",
+                session_id="sid",
             )
 
         call_names = [c[0] for c in spy_backend.calls]
@@ -1755,8 +1769,12 @@ class TestLaunchHooks:
             for p in self._patches():
                 stack.enter_context(p)
             sessions.launch(
-                _launch_meta(), kind="resume", backend=spy_backend,
-                runtime=None, main_branch="main", session_id="sid",
+                _launch_meta(),
+                kind="resume",
+                backend=spy_backend,
+                runtime=None,
+                main_branch="main",
+                session_id="sid",
             )
 
         call_names = [c[0] for c in spy_backend.calls]
@@ -1774,8 +1792,12 @@ class TestLaunchHooks:
             for p in self._patches():
                 stack.enter_context(p)
             sessions.launch(
-                _launch_meta(), kind="finalize", backend=spy_backend,
-                runtime=None, main_branch="main", session_id="sid",
+                _launch_meta(),
+                kind="finalize",
+                backend=spy_backend,
+                runtime=None,
+                main_branch="main",
+                session_id="sid",
             )
 
         call_names = [c[0] for c in spy_backend.calls]
@@ -1858,8 +1880,11 @@ class TestRunningState:
         ):
             sessions.launch(
                 _launch_meta(name="my-task", branch="hatchery/my-task"),
-                kind="new", backend=spy_backend,
-                runtime=None, main_branch="main", session_id="sid-123",
+                kind="new",
+                backend=spy_backend,
+                runtime=None,
+                main_branch="main",
+                session_id="sid-123",
             )
 
         assert statuses_saved == ["running", "in-progress"]
@@ -1972,8 +1997,11 @@ class TestLaunchNewChat:
                 stack.enter_context(p)
             sessions.launch(
                 _launch_meta(name="chat-1", worktree="/repo", branch="", is_chat=True, no_worktree=True),
-                kind="new", backend=spy_backend,
-                runtime=None, main_branch="main", session_id="sid",
+                kind="new",
+                backend=spy_backend,
+                runtime=None,
+                main_branch="main",
+                session_id="sid",
             )
 
         build_call = [c for c in spy_backend.calls if c[0] == "build_new_command"][0]
@@ -1987,8 +2015,11 @@ class TestLaunchNewChat:
                 stack.enter_context(p)
             sessions.launch(
                 _launch_meta(name="chat-1", worktree="/repo", branch="", is_chat=True, no_worktree=True),
-                kind="new", backend=spy_backend,
-                runtime=None, main_branch="main", session_id="sid",
+                kind="new",
+                backend=spy_backend,
+                runtime=None,
+                main_branch="main",
+                session_id="sid",
             )
 
         build_call = [c for c in spy_backend.calls if c[0] == "build_new_command"][0]
@@ -2014,8 +2045,11 @@ class TestCliLaunchDispatch:
             _, mock_post_exit, mock_chat_post_exit = mocks
             cli_mod._launch(
                 _launch_meta(name="chat-1", worktree="/repo", branch="", is_chat=True, no_worktree=True),
-                kind="new", backend=spy_backend,
-                runtime=None, main_branch="main", session_id="sid",
+                kind="new",
+                backend=spy_backend,
+                runtime=None,
+                main_branch="main",
+                session_id="sid",
             )
 
         assert mock_chat_post_exit.called
@@ -2029,8 +2063,11 @@ class TestCliLaunchDispatch:
             _, mock_post_exit, mock_chat_post_exit = mocks
             cli_mod._launch(
                 _launch_meta(),
-                kind="new", backend=spy_backend,
-                runtime=None, main_branch="main", session_id="sid",
+                kind="new",
+                backend=spy_backend,
+                runtime=None,
+                main_branch="main",
+                session_id="sid",
             )
 
         assert mock_post_exit.called
@@ -2058,8 +2095,11 @@ class TestLaunchResumeChat:
                 stack.enter_context(p)
             sessions.launch(
                 _launch_meta(name="chat-1", worktree="/repo", branch="", is_chat=True, no_worktree=True),
-                kind="resume", backend=spy_backend,
-                runtime=None, main_branch="main", session_id="sid",
+                kind="resume",
+                backend=spy_backend,
+                runtime=None,
+                main_branch="main",
+                session_id="sid",
             )
 
         build_call = [c for c in spy_backend.calls if c[0] == "build_resume_command"][0]
@@ -2191,8 +2231,13 @@ class TestResumeChat:
     def test_resume_passes_is_chat_for_chat(self, tmp_path, fake_tasks_db):
         runner = CliRunner()
         meta = sessions.SessionMeta(
-            name="chat-1", type="chat", branch="", worktree=str(tmp_path),
-            repo=str(tmp_path), session_id="sid-123", no_worktree=True,
+            name="chat-1",
+            type="chat",
+            branch="",
+            worktree=str(tmp_path),
+            repo=str(tmp_path),
+            session_id="sid-123",
+            no_worktree=True,
         )
 
         with (
@@ -2363,7 +2408,7 @@ class TestCliNewInclude:
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-mock_root,
+                mock_root,
                 _,
                 _,
                 _,
@@ -2379,7 +2424,7 @@ mock_root,
                 _,
                 _,
                 _,
-        ) = mocks
+            ) = mocks
             mock_root.return_value = (Path("/repo"), True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
             mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
@@ -2408,7 +2453,7 @@ mock_root,
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-mock_root,
+                mock_root,
                 _,
                 _,
                 _,
@@ -2424,7 +2469,7 @@ mock_root,
                 _,
                 _,
                 _,
-        ) = mocks
+            ) = mocks
             mock_root.return_value = (Path("/repo"), True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
             mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
@@ -2451,7 +2496,7 @@ mock_root,
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-mock_root,
+                mock_root,
                 _,
                 _,
                 _,
@@ -2467,7 +2512,7 @@ mock_root,
                 mock_launch,
                 _,
                 _,
-        ) = mocks
+            ) = mocks
             mock_root.return_value = (Path("/repo"), True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
             mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
@@ -2495,7 +2540,7 @@ mock_root,
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
-mock_root,
+                mock_root,
                 _,
                 _,
                 _,
@@ -2511,7 +2556,7 @@ mock_root,
                 mock_launch,
                 _,
                 _,
-        ) = mocks
+            ) = mocks
             mock_root.return_value = (Path("/repo"), True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
             mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
@@ -3268,10 +3313,19 @@ class TestLaunchFinalizeInclude:
             patch("seekr_hatchery.sessions.subprocess.run"),
         ):
             sessions.launch(
-                _launch_meta(name="my-task", repo=str(repo), worktree=str(worktree),
-                             branch="hatchery/my-task", no_worktree=True, agent_kind=spy_backend.kind),
-                kind="finalize", backend=spy_backend,
-                runtime=None, main_branch="main", session_id="sid-1",
+                _launch_meta(
+                    name="my-task",
+                    repo=str(repo),
+                    worktree=str(worktree),
+                    branch="hatchery/my-task",
+                    no_worktree=True,
+                    agent_kind=spy_backend.kind,
+                ),
+                kind="finalize",
+                backend=spy_backend,
+                runtime=None,
+                main_branch="main",
+                session_id="sid-1",
                 include_repos=[entry_b],
             )
 
@@ -3304,10 +3358,18 @@ class TestLaunchFinalizeInclude:
             ),
         ):
             sessions.launch(
-                _launch_meta(name="my-task", repo=str(repo), worktree=str(worktree),
-                             branch="hatchery/my-task", agent_kind=spy_backend.kind),
-                kind="finalize", backend=spy_backend,
-                runtime=MagicMock(), main_branch="main", session_id="sid-1",
+                _launch_meta(
+                    name="my-task",
+                    repo=str(repo),
+                    worktree=str(worktree),
+                    branch="hatchery/my-task",
+                    agent_kind=spy_backend.kind,
+                ),
+                kind="finalize",
+                backend=spy_backend,
+                runtime=MagicMock(),
+                main_branch="main",
+                session_id="sid-1",
                 include_repos=[entry_b],
             )
 
