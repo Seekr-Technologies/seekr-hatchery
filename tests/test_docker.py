@@ -635,7 +635,7 @@ class TestDockerMountsIncludes:
 
         mounts = docker._docker_mounts_includes([self._entry(plain)], "my-task", session_dir, no_worktree=False)
 
-        assert f"{plain}:/includes/shared-data:rw" in mounts
+        assert agent.Mount(src=str(plain), dst="/includes/shared-data") in mounts
 
     def test_git_repo_without_worktree_gets_rw_mount(self, tmp_path):
         """A git repo in worktree mode with no worktree for the task falls back to rw mount."""
@@ -647,8 +647,8 @@ class TestDockerMountsIncludes:
 
         mounts = docker._docker_mounts_includes([self._entry(repo)], "my-task", session_dir, no_worktree=False)
 
-        assert f"{repo}:/includes/repo-b:rw" in mounts
-        assert not any("git_ptr" in m for m in mounts)
+        assert agent.Mount(src=str(repo), dst="/includes/repo-b") in mounts
+        assert not any("git_ptr" in str(m.src or "") for m in mounts)
 
     def test_git_repo_with_worktree_gets_layered_mounts(self, tmp_path):
         """A git repo in worktree mode with a task worktree gets layered mounts."""
@@ -665,16 +665,16 @@ class TestDockerMountsIncludes:
 
         mounts = docker._docker_mounts_includes([self._entry(repo)], "my-task", session_dir, no_worktree=False)
 
-        assert f"{repo}:/includes/repo-b:ro" in mounts
-        assert f"{git_dir}:/includes/repo-b/.git:rw" in mounts
-        assert f"{git_dir / 'objects'}:/includes/repo-b/.git/objects:rw" in mounts
+        assert agent.Mount(src=str(repo), dst="/includes/repo-b", mode="ro") in mounts
+        assert agent.Mount(src=str(git_dir), dst="/includes/repo-b/.git") in mounts
+        assert agent.Mount(src=str(git_dir / "objects"), dst="/includes/repo-b/.git/objects") in mounts
         container_wt = "/includes/repo-b/.hatchery/worktrees/my-task"
-        assert f"{worktree}:{container_wt}:rw" in mounts
+        assert agent.Mount(src=str(worktree), dst=container_wt) in mounts
         git_ptr_file = session_dir / "git_ptr_include_repo-b"
         assert git_ptr_file.exists()
         assert "gitdir: /includes/repo-b/.git/worktrees/my-task" in git_ptr_file.read_text()
-        assert f"{git_ptr_file}:{container_wt}/.git:rw" in mounts
-        assert f"{repo}:/includes/repo-b:rw" not in mounts
+        assert agent.Mount(src=str(git_ptr_file), dst=f"{container_wt}/.git") in mounts
+        assert agent.Mount(src=str(repo), dst="/includes/repo-b") not in mounts
 
     def test_basename_collision_gets_numeric_suffix(self, tmp_path):
         """Two paths sharing the same basename get distinct container paths."""
@@ -689,8 +689,8 @@ class TestDockerMountsIncludes:
             [self._entry(a), self._entry(b)], "task", session_dir, no_worktree=False
         )
 
-        assert f"{a}:/includes/api:rw" in mounts
-        assert f"{b}:/includes/api-1:rw" in mounts
+        assert agent.Mount(src=str(a), dst="/includes/api") in mounts
+        assert agent.Mount(src=str(b), dst="/includes/api-1") in mounts
 
     def test_no_worktree_skips_layered_mounts(self, tmp_path):
         """In no-worktree mode, worktree-mode git repos get a simple rw mount."""
@@ -705,10 +705,10 @@ class TestDockerMountsIncludes:
 
         mounts = docker._docker_mounts_includes([self._entry(repo)], "my-task", session_dir, no_worktree=True)
 
-        assert f"{repo}:/includes/repo-b:rw" in mounts
+        assert agent.Mount(src=str(repo), dst="/includes/repo-b") in mounts
         git_ptr_file = session_dir / "git_ptr_include_repo-b"
         assert not git_ptr_file.exists()
-        assert not any(str(git_ptr_file) in m for m in mounts)
+        assert not any(str(git_ptr_file) == str(m.src) for m in mounts)
 
     def test_empty_list_returns_empty(self, tmp_path):
         mounts = docker._docker_mounts_includes([], "task", tmp_path, no_worktree=False)
@@ -727,7 +727,7 @@ class TestDockerMountsIncludes:
             [self._entry(plain, mode="rw")], "my-task", session_dir, no_worktree=False
         )
 
-        assert f"{plain}:/includes/shared-data:rw" in mounts
+        assert agent.Mount(src=str(plain), dst="/includes/shared-data") in mounts
 
     def test_reference_ro_plain_dir(self, tmp_path):
         """mode='ro' gives a simple ro mount."""
@@ -740,8 +740,8 @@ class TestDockerMountsIncludes:
             [self._entry(plain, mode="ro")], "my-task", session_dir, no_worktree=False
         )
 
-        assert f"{plain}:/includes/docs:ro" in mounts
-        assert f"{plain}:/includes/docs:rw" not in mounts
+        assert agent.Mount(src=str(plain), dst="/includes/docs", mode="ro") in mounts
+        assert agent.Mount(src=str(plain), dst="/includes/docs") not in mounts
 
     def test_reference_mode_git_repo_no_layered_mounts(self, tmp_path):
         """mode='ro' on a git repo with a worktree still just does a simple ro mount."""
@@ -761,11 +761,11 @@ class TestDockerMountsIncludes:
             [self._entry(repo, mode="ro")], "my-task", session_dir, no_worktree=False
         )
 
-        assert f"{repo}:/includes/repo-b:ro" in mounts
+        assert agent.Mount(src=str(repo), dst="/includes/repo-b", mode="ro") in mounts
         # No layered mounts
-        assert f"{repo}:/includes/repo-b:rw" not in mounts
-        assert not any("git_ptr" in m for m in mounts)
-        assert not any("worktrees" in m for m in mounts)
+        assert agent.Mount(src=str(repo), dst="/includes/repo-b") not in mounts
+        assert not any("git_ptr" in str(m.src or "") for m in mounts)
+        assert not any("worktrees" in str(m.dst or "") for m in mounts)
 
     def test_reference_rw_git_repo_no_layered_mounts(self, tmp_path):
         """mode='rw' on a git repo with a worktree still just does a simple rw reference mount."""
@@ -782,9 +782,9 @@ class TestDockerMountsIncludes:
             [self._entry(repo, mode="rw")], "my-task", session_dir, no_worktree=False
         )
 
-        assert f"{repo}:/includes/repo-c:rw" in mounts
-        assert not any("git_ptr" in m for m in mounts)
-        assert not any("worktrees" in m for m in mounts)
+        assert agent.Mount(src=str(repo), dst="/includes/repo-c") in mounts
+        assert not any("git_ptr" in str(m.src or "") for m in mounts)
+        assert not any("worktrees" in str(m.dst or "") for m in mounts)
 
     def test_mixed_modes(self, tmp_path):
         """Mixed worktree and reference entries produce correct mounts each."""
@@ -806,9 +806,9 @@ class TestDockerMountsIncludes:
         mounts = docker._docker_mounts_includes(entries, "my-task", session_dir, no_worktree=False)
 
         # worktree entry without an actual worktree → rw fallback
-        assert f"{wt_repo}:/includes/wt-repo:rw" in mounts
+        assert agent.Mount(src=str(wt_repo), dst="/includes/wt-repo") in mounts
         # ro reference entry
-        assert f"{ro_dir}:/includes/docs:ro" in mounts
+        assert agent.Mount(src=str(ro_dir), dst="/includes/docs", mode="ro") in mounts
 
 
 # ---------------------------------------------------------------------------
@@ -1016,7 +1016,7 @@ class TestConstructSymlinkMounts:
         mounts = docker._construct_symlink_mounts(scan, [])
 
         target = external.resolve()
-        assert mounts == [f"{target}:{target}:rw"]
+        assert mounts == [agent.Mount(src=str(target), dst=str(target))]
 
     def test_external_dir_symlink_emits_mount(self, tmp_path):
         scan = self._scan_root(tmp_path)
@@ -1028,7 +1028,7 @@ class TestConstructSymlinkMounts:
         mounts = docker._construct_symlink_mounts(scan, [])
 
         target = external.resolve()
-        assert f"{target}:{target}:rw" in mounts
+        assert agent.Mount(src=str(target), dst=str(target)) in mounts
 
     def test_relative_internal_symlink_skipped(self, tmp_path):
         """Relative links staying inside scan_root resolve correctly in the
@@ -1062,7 +1062,7 @@ class TestConstructSymlinkMounts:
         (scan / "link").symlink_to(external_file)
 
         # external_root is already a mount; its child should be skipped
-        existing = [f"{external_root}:/mounted/external:ro"]
+        existing = [agent.Mount(src=str(external_root), dst="/mounted/external", mode="ro")]
         mounts = docker._construct_symlink_mounts(scan, existing)
 
         assert mounts == []
@@ -1122,7 +1122,7 @@ class TestConstructSymlinkMounts:
         mounts = docker._construct_symlink_mounts(scan, [])
 
         target = external.resolve()
-        assert mounts == [f"{target}:{target}:rw"]
+        assert mounts == [agent.Mount(src=str(target), dst=str(target))]
 
     def test_absolute_internal_link_raises(self, tmp_path, capsys):
         """Absolute link pointing inside scan_root fails loudly — the host path
@@ -1193,7 +1193,7 @@ class TestConstructSymlinkMounts:
 class TestNoWorktreeFollowSymlinks:
     def _make_backend(self):
         b = MagicMock()
-        b.home_mounts = MagicMock(return_value=[])
+        b.construct_mounts = MagicMock(return_value=[])
         return b
 
     def test_disabled_skips_symlink_scan(self, tmp_path, monkeypatch):
@@ -1209,7 +1209,7 @@ class TestNoWorktreeFollowSymlinks:
         mounts = docker.build_mounts(_no_wt_meta(cwd), self._make_backend(), tmp_path, cfg)
 
         target = external.resolve()
-        assert not any(f"{target}:{target}:rw" == m for m in mounts)
+        assert agent.Mount(src=str(target), dst=str(target)) not in mounts
 
     def test_enabled_adds_symlink_mounts(self, tmp_path, monkeypatch):
         cwd = tmp_path / "cwd"
@@ -1223,7 +1223,7 @@ class TestNoWorktreeFollowSymlinks:
         mounts = docker.build_mounts(_no_wt_meta(cwd), self._make_backend(), tmp_path, cfg)
 
         target = external.resolve()
-        assert f"{target}:{target}:rw" in mounts
+        assert agent.Mount(src=str(target), dst=str(target)) in mounts
 
 
 # ---------------------------------------------------------------------------
@@ -1242,7 +1242,7 @@ class TestDockerConfigClipboardImages:
 class TestClipboardImageMount:
     def _make_backend(self):
         b = MagicMock()
-        b.home_mounts = MagicMock(return_value=[])
+        b.construct_mounts = MagicMock(return_value=[])
         return b
 
     def test_no_worktree_enabled_adds_identical_mount(self, tmp_path, monkeypatch):
@@ -1256,7 +1256,7 @@ class TestClipboardImageMount:
         mounts = docker.build_mounts(_no_wt_meta(cwd), self._make_backend(), session_dir, cfg)
 
         clip = session_dir / "clipboard"
-        assert f"{clip}:{clip}:rw" in mounts
+        assert agent.Mount(src=str(clip), dst=str(clip)) in mounts
         # And the directory was actually created on the host.
         assert clip.is_dir()
 
@@ -1271,7 +1271,7 @@ class TestClipboardImageMount:
         mounts = docker.build_mounts(_no_wt_meta(cwd), self._make_backend(), session_dir, cfg)
 
         clip = session_dir / "clipboard"
-        assert not any(f"{clip}:" in m for m in mounts)
+        assert not any(str(clip) == str(m.src) for m in mounts)
         # And we did not create the directory.
         assert not clip.exists()
 

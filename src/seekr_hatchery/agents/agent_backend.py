@@ -2,10 +2,48 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 # Home directory of the non-root user inside every sandbox container.
 CONTAINER_HOME = "/home/hatchery"
+
+MountMode = Literal["ro", "rw", "tmpfs"]
+
+
+@dataclass(frozen=True)
+class Mount:
+    """A mount specification for the sandbox container.
+
+    Backends return a list of these from ``construct_mounts()``.  Each is
+    converted into the appropriate Docker CLI flag(s) (``-v`` for bind
+    mounts, ``--tmpfs`` for tmpfs) just before the container starts.
+
+    Attributes:
+        src: Host filesystem path for bind mounts; ``None`` for tmpfs.
+        dst: Container target path.  If ``None`` for a bind mount, the
+            mount mirrors *src* (same path on both sides).  Required for
+            tmpfs.
+        mode: ``"ro"`` or ``"rw"`` for bind mounts; ``"tmpfs"`` for an
+            in-memory tmpfs at *dst*.  Defaults to ``"rw"``.
+    """
+
+    src: str | Path | None
+    dst: str | None = None
+    mode: MountMode = "rw"
+
+
+def mount_to_docker_args(m: Mount) -> list[str]:
+    """Convert a Mount into Docker CLI flag(s) suitable for ``docker run``."""
+    if m.mode == "tmpfs":
+        if m.dst is None:
+            raise ValueError(f"tmpfs Mount requires dst: {m!r}")
+        return ["--tmpfs", m.dst]
+    if m.src is None:
+        raise ValueError(f"bind Mount requires src: {m!r}")
+    dst = m.dst if m.dst is not None else str(m.src)
+    return ["-v", f"{m.src}:{dst}:{m.mode}"]
 
 
 class AgentBackend(ABC):
@@ -97,21 +135,17 @@ class AgentBackend(ABC):
 
     @staticmethod
     @abstractmethod
-    def home_mounts(session_dir: Path) -> list[str]:
-        """Return agent-specific host→container bind-mount strings.
+    def construct_mounts(session_dir: Path) -> list[Mount]:
+        """Return the agent's container mounts.
 
         *session_dir* is ``sessions.task_session_dir(repo, name)`` — the per-task
         directory where ``on_new_task`` may have written config files.
 
-        Common mounts shared by all agents (.gitconfig, uv cache) are added by
+        Return ``Mount`` objects covering both bind mounts (mode ``"ro"`` /
+        ``"rw"``) and any tmpfs paths (mode ``"tmpfs"``, ``src=None``).  Common
+        mounts shared by all agents (.gitconfig, uv cache) are added by
         ``docker._default_home_mounts()`` — do not include them here.
-        Mount strings use the format ``"host_path:container_path:mode"``.
         """
-
-    @staticmethod
-    @abstractmethod
-    def tmpfs_paths() -> list[str]:
-        """Return container paths that should be shadowed with an empty tmpfs."""
 
     @staticmethod
     @abstractmethod

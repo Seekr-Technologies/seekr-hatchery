@@ -288,26 +288,26 @@ class TestOnBeforeContainerStart:
 
 
 # ---------------------------------------------------------------------------
-# home_mounts
+# construct_mounts
 # ---------------------------------------------------------------------------
 
 
-class TestHomeMounts:
+class TestConstructMounts:
     def test_returns_expected_mounts(self, home, tmp_path):
         session_dir = tmp_path / "session"
         session_dir.mkdir()
         fake_auth = session_dir / "codex_auth.json"
         fake_auth.write_text("{}")
-        assert agent.CODEX.home_mounts(session_dir) == [
-            f"{home / '.codex'}:{agent.CONTAINER_HOME}/.codex:rw",
-            f"{fake_auth}:{agent.CONTAINER_HOME}/.codex/auth.json:rw",
+        assert agent.CODEX.construct_mounts(session_dir) == [
+            agent.Mount(src=str(home / ".codex"), dst=f"{agent.CONTAINER_HOME}/.codex"),
+            agent.Mount(src=str(fake_auth), dst=f"{agent.CONTAINER_HOME}/.codex/auth.json"),
         ]
 
     def test_raises_if_fake_auth_missing(self, tmp_path):
         session_dir = tmp_path / "session"
         session_dir.mkdir()
         with pytest.raises(RuntimeError, match="codex_auth.json not found"):
-            agent.CODEX.home_mounts(session_dir)
+            agent.CODEX.construct_mounts(session_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -318,16 +318,6 @@ class TestHomeMounts:
 class TestOnBeforeLaunch:
     def test_is_noop(self, tmp_path):
         agent.CODEX.on_before_launch(tmp_path)  # should not raise
-
-
-# ---------------------------------------------------------------------------
-# tmpfs_paths
-# ---------------------------------------------------------------------------
-
-
-class TestTmpfsPaths:
-    def test_returns_empty_list(self):
-        assert agent.CODEX.tmpfs_paths() == []
 
 
 # ---------------------------------------------------------------------------

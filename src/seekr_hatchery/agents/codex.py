@@ -11,7 +11,7 @@ from typing import Literal
 
 from seekr_hatchery.locks import hatchery_lock
 
-from .agent_backend import CONTAINER_HOME, AgentBackend
+from .agent_backend import CONTAINER_HOME, AgentBackend, Mount
 
 logger = logging.getLogger("hatchery")
 
@@ -134,24 +134,20 @@ class CodexBackend(AgentBackend):
         return CodexBackend._read_codex_creds()[1]
 
     @staticmethod
-    def home_mounts(session_dir: Path) -> list[str]:
+    def construct_mounts(session_dir: Path) -> list[Mount]:
         # Mount all of ~/.codex rw so sessions, state, skills etc. persist.
         # A fake auth.json (proxy token only) is shadow-mounted on top so the
         # real credentials are never visible inside the container.
         fake_auth = session_dir / "codex_auth.json"
         if not fake_auth.exists():
             raise RuntimeError(
-                f"codex_auth.json not found in {session_dir} — on_before_container_start must run before home_mounts"
+                f"codex_auth.json not found in {session_dir} — on_before_container_start must run before construct_mounts"
             )
         codex_dir = Path.home() / ".codex"
         return [
-            f"{codex_dir}:{CONTAINER_HOME}/.codex:rw",
-            f"{fake_auth}:{CONTAINER_HOME}/.codex/auth.json:rw",
+            Mount(src=str(codex_dir), dst=f"{CONTAINER_HOME}/.codex"),
+            Mount(src=str(fake_auth), dst=f"{CONTAINER_HOME}/.codex/auth.json"),
         ]
-
-    @staticmethod
-    def tmpfs_paths() -> list[str]:
-        return []
 
     @staticmethod
     def proxy_kwargs() -> dict:

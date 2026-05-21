@@ -82,10 +82,7 @@ class SpyBackend(agent.AgentBackend):
 
         return _mutate
 
-    def home_mounts(self, session_dir: Path | None) -> list[str]:
-        return []
-
-    def tmpfs_paths(self) -> list[str]:
+    def construct_mounts(self, session_dir: Path | None) -> list[agent.Mount]:
         return []
 
     def proxy_kwargs(self) -> dict:
