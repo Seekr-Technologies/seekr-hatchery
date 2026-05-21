@@ -7,8 +7,10 @@ from unittest.mock import patch
 import pytest
 
 import seekr_hatchery.agents as agent
+import seekr_hatchery.constants as constants
 import seekr_hatchery.docker as docker
-import seekr_hatchery.tasks as tasks
+import seekr_hatchery.sessions as sessions
+import seekr_hatchery.utils as utils
 
 
 def _make_mutator(key: str = "test-key"):
@@ -32,18 +34,18 @@ class TestFindTaskFile:
         task_file = tmp_path / ".hatchery" / "tasks" / "2026-01-15-my-task.md"
         task_file.parent.mkdir(parents=True)
         task_file.write_text("contents")
-        assert tasks.find_task_file(tmp_path, "my-task") == task_file
+        assert sessions.find_task_file(tmp_path, "my-task") == task_file
 
     def test_returns_none_when_no_match(self, tmp_path):
         (tmp_path / ".hatchery" / "tasks").mkdir(parents=True)
-        assert tasks.find_task_file(tmp_path, "nonexistent") is None
+        assert sessions.find_task_file(tmp_path, "nonexistent") is None
 
     def test_returns_latest_when_multiple(self, tmp_path):
         tasks_dir = tmp_path / ".hatchery" / "tasks"
         tasks_dir.mkdir(parents=True)
         (tasks_dir / "2026-01-10-my-task.md").write_text("old")
         (tasks_dir / "2026-03-04-my-task.md").write_text("new")
-        result = tasks.find_task_file(tmp_path, "my-task")
+        result = sessions.find_task_file(tmp_path, "my-task")
         assert result == tasks_dir / "2026-03-04-my-task.md"
 
 
@@ -54,52 +56,52 @@ class TestFindTaskFile:
 
 class TestToName:
     def test_lowercases(self):
-        assert tasks.to_name("MyTask") == "mytask"
+        assert utils.to_name("MyTask") == "mytask"
 
     def test_replaces_spaces_with_hyphens(self):
-        assert tasks.to_name("add auth") == "add-auth"
+        assert utils.to_name("add auth") == "add-auth"
 
     def test_replaces_special_chars_with_hyphens(self):
-        assert tasks.to_name("fix: bug #42") == "fix-bug-42"
+        assert utils.to_name("fix: bug #42") == "fix-bug-42"
 
     def test_collapses_consecutive_separators(self):
-        assert tasks.to_name("a  b   c") == "a-b-c"
+        assert utils.to_name("a  b   c") == "a-b-c"
 
     def test_strips_leading_hyphens(self):
-        assert tasks.to_name("--task") == "task"
+        assert utils.to_name("--task") == "task"
 
     def test_strips_trailing_hyphens(self):
-        assert tasks.to_name("task--") == "task"
+        assert utils.to_name("task--") == "task"
 
     def test_strips_both_ends(self):
-        assert tasks.to_name("  task  ") == "task"
+        assert utils.to_name("  task  ") == "task"
 
     def test_truncates_to_50_chars(self):
         long_name = "a" * 60
-        result = tasks.to_name(long_name)
+        result = utils.to_name(long_name)
         assert len(result) == 50
 
     def test_truncation_at_boundary(self):
         name = "a" * 50
-        assert tasks.to_name(name) == name
+        assert utils.to_name(name) == name
 
     def test_handles_empty_string(self):
-        assert tasks.to_name("") == ""
+        assert utils.to_name("") == ""
 
     def test_handles_all_special_chars(self):
-        assert tasks.to_name("!!!") == ""
+        assert utils.to_name("!!!") == ""
 
     def test_alphanumeric_unchanged(self):
-        assert tasks.to_name("abc123") == "abc123"
+        assert utils.to_name("abc123") == "abc123"
 
     def test_hyphens_in_input_preserved(self):
-        assert tasks.to_name("my-task-name") == "my-task-name"
+        assert utils.to_name("my-task-name") == "my-task-name"
 
     def test_underscores_replaced(self):
-        assert tasks.to_name("my_task") == "my-task"
+        assert utils.to_name("my_task") == "my-task"
 
     def test_mixed_case_with_symbols(self):
-        assert tasks.to_name("Add-Authentication") == "add-authentication"
+        assert utils.to_name("Add-Authentication") == "add-authentication"
 
 
 # ---------------------------------------------------------------------------
@@ -109,14 +111,14 @@ class TestToName:
 
 class TestTaskFileName:
     def test_format(self):
-        with patch("seekr_hatchery.tasks.datetime") as mock_dt:
+        with patch("seekr_hatchery.sessions.datetime") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 1, 15, 10, 30)
-            result = tasks.task_file_name("my-task")
+            result = sessions.task_file_name("my-task")
         assert result == "2026-01-15-my-task.md"
 
     def test_uses_current_date(self):
         # Without mocking — just check format shape
-        result = tasks.task_file_name("test")
+        result = sessions.task_file_name("test")
         parts = result.split("-")
         assert len(parts) >= 4
         assert result.endswith(".md")
@@ -133,27 +135,27 @@ class TestSessionPrompt:
         task_file = tmp_path / ".hatchery" / "tasks" / "2026-01-15-my-task.md"
         task_file.parent.mkdir(parents=True)
         task_file.write_text("task contents")
-        result = tasks.session_prompt("my-task", tmp_path)
+        result = sessions.session_prompt("my-task", tmp_path)
         assert ".hatchery/tasks/2026-01-15-my-task.md" in result
 
     def test_is_string(self, tmp_path):
         task_file = tmp_path / ".hatchery" / "tasks" / "2026-01-15-foo.md"
         task_file.parent.mkdir(parents=True)
         task_file.write_text("contents")
-        result = tasks.session_prompt("foo", tmp_path)
+        result = sessions.session_prompt("foo", tmp_path)
         assert isinstance(result, str)
 
     def test_file_not_found_exits(self, tmp_path):
         (tmp_path / ".hatchery" / "tasks").mkdir(parents=True)
         with pytest.raises(SystemExit, match="1"):
-            tasks.session_prompt("nonexistent", tmp_path)
+            sessions.session_prompt("nonexistent", tmp_path)
 
     def test_finds_file_from_different_date(self, tmp_path):
         """Regression: resuming a task created on a different day must work."""
         task_file = tmp_path / ".hatchery" / "tasks" / "2026-01-01-old-task.md"
         task_file.parent.mkdir(parents=True)
         task_file.write_text("created yesterday")
-        result = tasks.session_prompt("old-task", tmp_path)
+        result = sessions.session_prompt("old-task", tmp_path)
         assert "2026-01-01-old-task.md" in result
         assert "created yesterday" in result
 
@@ -166,33 +168,33 @@ class TestSessionPrompt:
 class TestRepoId:
     def test_contains_repo_basename(self):
         repo = Path("/home/user/my-project")
-        result = tasks.repo_id(repo)
+        result = utils.repo_id(repo)
         assert result.startswith("my-project-")
 
     def test_contains_hash_suffix(self):
         repo = Path("/some/repo")
-        result = tasks.repo_id(repo)
+        result = utils.repo_id(repo)
         parts = result.rsplit("-", 1)
         assert len(parts) == 2
         assert len(parts[1]) == 8
 
     def test_stable_for_same_path(self):
         repo = Path("/some/repo")
-        assert tasks.repo_id(repo) == tasks.repo_id(repo)
+        assert utils.repo_id(repo) == utils.repo_id(repo)
 
     def test_different_for_different_paths(self):
         repo_a = Path("/repos/project-a")
         repo_b = Path("/repos/project-b")
-        assert tasks.repo_id(repo_a) != tasks.repo_id(repo_b)
+        assert utils.repo_id(repo_a) != utils.repo_id(repo_b)
 
     def test_same_basename_different_path_differs(self):
         repo_a = Path("/alice/myapp")
         repo_b = Path("/bob/myapp")
         # Same basename but different full paths → different IDs
-        assert tasks.repo_id(repo_a) != tasks.repo_id(repo_b)
+        assert utils.repo_id(repo_a) != utils.repo_id(repo_b)
 
     def test_returns_string(self):
-        assert isinstance(tasks.repo_id(Path("/some/repo")), str)
+        assert isinstance(utils.repo_id(Path("/some/repo")), str)
 
 
 # ---------------------------------------------------------------------------
@@ -203,23 +205,23 @@ class TestRepoId:
 class TestTaskDbPath:
     def test_returns_unified_dir_path_in_tasks_db_dir(self, fake_tasks_db):
         repo = Path("/some/repo")
-        result = tasks.task_db_path(repo, "my-task")
-        expected = fake_tasks_db / tasks.repo_id(repo) / "my-task" / "meta.json"
+        result = sessions.task_db_path(repo, "my-task")
+        expected = fake_tasks_db / utils.repo_id(repo) / "my-task" / "meta.json"
         assert result == expected
 
     def test_extension_is_json(self, fake_tasks_db):
-        result = tasks.task_db_path(Path("/some/repo"), "foo")
+        result = sessions.task_db_path(Path("/some/repo"), "foo")
         assert result.suffix == ".json"
 
     def test_name_in_parent_dir(self, fake_tasks_db):
-        result = tasks.task_db_path(Path("/some/repo"), "special-task")
+        result = sessions.task_db_path(Path("/some/repo"), "special-task")
         assert "special-task" in result.parent.name
 
     def test_different_repos_different_dirs(self, fake_tasks_db):
         repo_a = Path("/repos/alpha")
         repo_b = Path("/repos/beta")
-        path_a = tasks.task_db_path(repo_a, "my-task")
-        path_b = tasks.task_db_path(repo_b, "my-task")
+        path_a = sessions.task_db_path(repo_a, "my-task")
+        path_b = sessions.task_db_path(repo_b, "my-task")
         assert path_a.parent != path_b.parent
 
 
@@ -231,37 +233,37 @@ class TestTaskDbPath:
 class TestDockerImageName:
     def test_format(self):
         repo = Path("/home/user/my-project")
-        result = docker.docker_image_name(repo, "my-task")
+        result = sessions.image_name(repo, "my-task")
         assert result == "hatchery/my-project:my-task"
 
     def test_lowercases_repo_name(self):
         repo = Path("/home/user/MyProject")
-        result = docker.docker_image_name(repo, "task")
+        result = sessions.image_name(repo, "task")
         assert "myproject" in result.lower()
 
     def test_includes_task_name(self):
         repo = Path("/some/repo")
-        result = docker.docker_image_name(repo, "fix-bug")
+        result = sessions.image_name(repo, "fix-bug")
         assert "fix-bug" in result
 
     def test_normalizes_dots(self):
         repo = Path("/home/user/my.project")
-        result = docker.docker_image_name(repo, "task")
+        result = sessions.image_name(repo, "task")
         assert result == "hatchery/my-project:task"
 
     def test_normalizes_plus(self):
         repo = Path("/home/user/foo+bar")
-        result = docker.docker_image_name(repo, "task")
+        result = sessions.image_name(repo, "task")
         assert result == "hatchery/foo-bar:task"
 
     def test_normalizes_spaces(self):
         repo = Path("/home/user/my project")
-        result = docker.docker_image_name(repo, "task")
+        result = sessions.image_name(repo, "task")
         assert result == "hatchery/my-project:task"
 
     def test_normalizes_leading_trailing_special(self):
         repo = Path("/home/user/.hidden-repo")
-        result = docker.docker_image_name(repo, "task")
+        result = sessions.image_name(repo, "task")
         assert result == "hatchery/hidden-repo:task"
 
 
@@ -284,12 +286,12 @@ class TestDockerfilePath:
 class TestWorktreesDir:
     def test_returns_path_inside_repo(self):
         repo = Path("/some/repo")
-        result = tasks.worktrees_dir(repo)
+        result = sessions.worktrees_dir(repo)
         assert result == Path("/some/repo/.hatchery/worktrees")
 
     def test_is_under_hatchery(self):
         repo = Path("/my/repo")
-        result = tasks.worktrees_dir(repo)
+        result = sessions.worktrees_dir(repo)
         assert ".hatchery" in str(result)
         assert "worktrees" in str(result)
 
@@ -302,22 +304,22 @@ class TestWorktreesDir:
 class TestMigrate:
     def test_v0_migrates_to_v1(self):
         meta = {"name": "test"}
-        result = tasks.migrate(meta)
+        result = sessions._migrate(meta)
         assert result["schema_version"] == 1
 
     def test_v1_idempotent(self):
         meta = {"name": "test", "schema_version": 1}
-        result = tasks.migrate(meta)
+        result = sessions._migrate(meta)
         assert result["schema_version"] == 1
 
     def test_v0_does_not_add_agent_field(self):
         meta = {"name": "test"}
-        result = tasks.migrate(meta)
+        result = sessions._migrate(meta)
         assert "agent" not in result
 
     def test_other_fields_preserved(self):
         meta = {"name": "test", "status": "in-progress", "branch": "hatchery/test"}
-        result = tasks.migrate(meta)
+        result = sessions._migrate(meta)
         assert result["name"] == "test"
         assert result["status"] == "in-progress"
         assert result["branch"] == "hatchery/test"
@@ -325,11 +327,11 @@ class TestMigrate:
     def test_v0_without_schema_version_key(self):
         meta = {"name": "test", "status": "in-progress"}
         assert "schema_version" not in meta
-        result = tasks.migrate(meta)
+        result = sessions._migrate(meta)
         assert result["schema_version"] == 1
 
     def test_current_schema_version_is_1(self):
-        assert tasks.SCHEMA_VERSION == 1
+        assert sessions.SCHEMA_VERSION == 1
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +350,7 @@ class TestSandboxContext:
             use_docker=False,
         )
         defaults.update(kwargs)
-        return tasks.sandbox_context(**defaults)
+        return sessions.sandbox_context(**defaults)
 
     def _docker(self, **kwargs):
         defaults = dict(
@@ -360,7 +362,7 @@ class TestSandboxContext:
             use_docker=True,
         )
         defaults.update(kwargs)
-        return tasks.sandbox_context(**defaults)
+        return sessions.sandbox_context(**defaults)
 
     # --- return type ---
 
@@ -414,7 +416,7 @@ class TestSandboxContext:
 
     def test_docker_contains_repo_root(self):
         result = self._docker()
-        assert tasks.CONTAINER_REPO_ROOT in result
+        assert constants.CONTAINER_REPO_ROOT in result
 
     def test_docker_mentions_read_write(self):
         result = self._docker()
@@ -455,7 +457,7 @@ class TestSandboxContextNoWorktree:
             no_worktree=True,
         )
         defaults.update(kwargs)
-        return tasks.sandbox_context(**defaults)
+        return sessions.sandbox_context(**defaults)
 
     def _no_worktree_docker(self, branch: str = "", **kwargs) -> str:
         defaults = dict(
@@ -468,7 +470,7 @@ class TestSandboxContextNoWorktree:
             no_worktree=True,
         )
         defaults.update(kwargs)
-        return tasks.sandbox_context(**defaults)
+        return sessions.sandbox_context(**defaults)
 
     # --- native no-worktree ---
 
@@ -851,15 +853,15 @@ class TestTaskContainerName:
     def test_format(self, tmp_path):
         repo = tmp_path / "my-project"
         repo.mkdir()
-        expected = f"hatchery-{tasks.repo_id(repo)}-my-task"
-        assert docker.task_container_name(repo, "my-task") == expected
+        expected = f"hatchery-{utils.repo_id(repo)}-my-task"
+        assert sessions.container_name(repo, "my-task") == expected
 
     def test_different_paths_same_name_differ(self, tmp_path):
         repo_a = tmp_path / "a" / "myrepo"
         repo_b = tmp_path / "b" / "myrepo"
         repo_a.mkdir(parents=True)
         repo_b.mkdir(parents=True)
-        assert docker.task_container_name(repo_a, "t") != docker.task_container_name(repo_b, "t")
+        assert sessions.container_name(repo_a, "t") != sessions.container_name(repo_b, "t")
 
 
 # ---------------------------------------------------------------------------
@@ -884,7 +886,7 @@ class TestSandboxContextIncludePaths:
     )
 
     def _ctx(self, use_docker: bool, no_worktree: bool, include_paths=None) -> str:
-        return tasks.sandbox_context(
+        return sessions.sandbox_context(
             **self._BASE,
             use_docker=use_docker,
             no_worktree=no_worktree,
@@ -915,9 +917,8 @@ class TestSandboxContextIncludePaths:
         repo_b = tmp_path / "repo-b"
         repo_b.mkdir()
         (repo_b / ".git").mkdir()
-        import seekr_hatchery.tasks as tasks_mod
 
-        wt = repo_b / tasks_mod.WORKTREES_SUBDIR / "my-task"
+        wt = repo_b / constants.WORKTREES_SUBDIR / "my-task"
         wt.mkdir(parents=True)
         result = self._ctx(use_docker=True, no_worktree=False, include_paths=[self._entry(repo_b)])
         assert "/includes/repo-b/" in result
@@ -943,9 +944,8 @@ class TestSandboxContextIncludePaths:
         repo_b = tmp_path / "repo-b"
         repo_b.mkdir()
         (repo_b / ".git").mkdir()
-        import seekr_hatchery.tasks as tasks_mod
 
-        wt = repo_b / tasks_mod.WORKTREES_SUBDIR / "my-task"
+        wt = repo_b / constants.WORKTREES_SUBDIR / "my-task"
         wt.mkdir(parents=True)
         result = self._ctx(use_docker=False, no_worktree=False, include_paths=[self._entry(repo_b)])
         assert str(wt) in result
@@ -972,28 +972,21 @@ class TestSandboxContextIncludePaths:
 class TestExecTaskShell:
     """Verify exec_task_shell execs directly into the named container."""
 
-    def test_calls_docker_exec_with_container_name(self, tmp_path):
-        repo = tmp_path / "myrepo"
-        repo.mkdir()
+    def test_calls_docker_exec_with_container_name(self):
         with patch("seekr_hatchery.docker.subprocess.run") as mock_run:
-            docker.exec_task_shell("my-task", docker.Runtime.DOCKER, repo)
+            docker.exec_task_shell("hatchery-myrepo-deadbeef-my-task", docker.Runtime.DOCKER)
         cmd = mock_run.call_args[0][0]
-        expected_name = docker.task_container_name(repo, "my-task")
-        assert cmd == ["docker", "exec", "-it", expected_name, "/bin/bash"]
+        assert cmd == ["docker", "exec", "-it", "hatchery-myrepo-deadbeef-my-task", "/bin/bash"]
 
-    def test_custom_shell_passed_to_exec(self, tmp_path):
-        repo = tmp_path / "myrepo"
-        repo.mkdir()
+    def test_custom_shell_passed_to_exec(self):
         with patch("seekr_hatchery.docker.subprocess.run") as mock_run:
-            docker.exec_task_shell("my-task", docker.Runtime.DOCKER, repo, shell="/bin/sh")
+            docker.exec_task_shell("hatchery-myrepo-deadbeef-my-task", docker.Runtime.DOCKER, shell="/bin/sh")
         cmd = mock_run.call_args[0][0]
         assert cmd[-1] == "/bin/sh"
 
-    def test_uses_podman_binary_for_podman_runtime(self, tmp_path):
-        repo = tmp_path / "myrepo"
-        repo.mkdir()
+    def test_uses_podman_binary_for_podman_runtime(self):
         with patch("seekr_hatchery.docker.subprocess.run") as mock_run:
-            docker.exec_task_shell("my-task", docker.Runtime.PODMAN, repo)
+            docker.exec_task_shell("hatchery-myrepo-deadbeef-my-task", docker.Runtime.PODMAN)
         cmd = mock_run.call_args[0][0]
         assert cmd[0] == "podman"
 
@@ -1036,7 +1029,7 @@ class TestIncludeEntry:
         assert entries == [IncludeEntry(Path("/a/b"), "worktree"), IncludeEntry(Path("/c/d"), "worktree")]
 
     def test_load_missing_key_returns_empty(self):
-        from seekr_hatchery.tasks import load_include_entries
+        from seekr_hatchery.sessions import load_include_entries
 
         assert load_include_entries({}) == []
 

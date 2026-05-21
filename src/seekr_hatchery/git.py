@@ -6,9 +6,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-import seekr_hatchery.tasks as tasks
 import seekr_hatchery.ui as ui
+from seekr_hatchery.constants import WORKTREES_SUBDIR
 from seekr_hatchery.includes import IncludeEntry
+from seekr_hatchery.utils import run
 
 logger = logging.getLogger("hatchery")
 
@@ -27,7 +28,7 @@ def _resolve_main_repo(repo: Path) -> Path:
     if not git_path.is_file():
         return repo  # normal checkout — nothing to resolve
     # Linked worktree: find the common git dir (main repo's .git).
-    result = tasks.run(["git", "rev-parse", "--git-common-dir"], cwd=repo, check=False)
+    result = run(["git", "rev-parse", "--git-common-dir"], cwd=repo, check=False)
     if result.returncode != 0:
         ui.error("could not resolve git common directory for linked worktree.")
         sys.exit(1)
@@ -40,7 +41,7 @@ def _resolve_main_repo(repo: Path) -> Path:
 
 def git_root() -> Path:
     """Return the root of the current git repository, or exit with an error."""
-    result = tasks.run(["git", "rev-parse", "--show-toplevel"], check=False)
+    result = run(["git", "rev-parse", "--show-toplevel"], check=False)
     if result.returncode != 0:
         ui.error("not inside a git repository.")
         sys.exit(1)
@@ -49,7 +50,7 @@ def git_root() -> Path:
 
 def git_root_or_cwd() -> tuple[Path, bool]:
     """Return (root, True) if in a git repo, else (Path.cwd(), False)."""
-    result = tasks.run(["git", "rev-parse", "--show-toplevel"], check=False)
+    result = run(["git", "rev-parse", "--show-toplevel"], check=False)
     if result.returncode == 0:
         return _resolve_main_repo(Path(result.stdout.strip())), True
     return Path.cwd(), False
@@ -63,9 +64,9 @@ def create_worktree(repo: Path, branch: str, worktree: Path, base: str) -> None:
     informative message if *base* does not exist in *repo*.
     """
     worktree.parent.mkdir(parents=True, exist_ok=True)
-    tasks.run(["git", "worktree", "remove", "--force", str(worktree)], cwd=repo, check=False)
+    run(["git", "worktree", "remove", "--force", str(worktree)], cwd=repo, check=False)
     try:
-        tasks.run(["git", "worktree", "add", "-B", branch, str(worktree), base], cwd=repo)
+        run(["git", "worktree", "add", "-B", branch, str(worktree), base], cwd=repo)
     except subprocess.CalledProcessError as e:
         if "invalid reference" in e.stderr:
             ui.error(f"base ref {base!r} does not exist in {repo}. Use --from <branch> to specify a valid ref.")
@@ -79,7 +80,7 @@ def remove_worktree(repo: Path, worktree: Path, force: bool = False) -> None:
     flags = ["git", "worktree", "remove"]
     if force:
         flags.append("--force")
-    result = tasks.run(flags + [str(worktree)], cwd=repo, check=False)
+    result = run(flags + [str(worktree)], cwd=repo, check=False)
     if result.returncode == 0:
         return
     # git couldn't remove it (directory gone or not registered as a worktree).
@@ -91,21 +92,21 @@ def remove_worktree(repo: Path, worktree: Path, force: bool = False) -> None:
         except PermissionError:
             # macOS ACLs (set by Docker's filesystem layer) can block rmdir even for
             # the owner. Strip ACLs and extended attributes, then retry.
-            tasks.run(["chmod", "-RN", str(worktree)], check=False)
+            run(["chmod", "-RN", str(worktree)], check=False)
             shutil.rmtree(worktree, ignore_errors=True)
-    tasks.run(["git", "worktree", "prune"], cwd=repo, check=False)
+    run(["git", "worktree", "prune"], cwd=repo, check=False)
 
 
 def has_uncommitted_changes(cwd: Path) -> bool:
     """Return True if the working tree has any uncommitted changes."""
-    result = tasks.run(["git", "status", "--porcelain"], cwd=cwd, check=False)
+    result = run(["git", "status", "--porcelain"], cwd=cwd, check=False)
     return bool(result.stdout.strip())
 
 
 def uncommitted_changes_summary(cwd: Path) -> str:
     """Return a short display of uncommitted changes: file list + diff-stat summary."""
-    status = tasks.run(["git", "status", "--short"], cwd=cwd, check=False).stdout.strip()
-    diff = tasks.run(["git", "diff", "HEAD", "--stat"], cwd=cwd, check=False).stdout.strip()
+    status = run(["git", "status", "--short"], cwd=cwd, check=False).stdout.strip()
+    diff = run(["git", "diff", "HEAD", "--stat"], cwd=cwd, check=False).stdout.strip()
     parts: list[str] = []
     if status:
         parts.append(status)
@@ -118,7 +119,7 @@ def uncommitted_changes_summary(cwd: Path) -> str:
 
 def delete_branch(repo: Path, branch: str) -> bool:
     """Delete a local branch. Returns True if deleted, False if it didn't exist."""
-    result = tasks.run(["git", "branch", "-D", branch], cwd=repo, check=False)
+    result = run(["git", "branch", "-D", branch], cwd=repo, check=False)
     return result.returncode == 0
 
 
@@ -133,7 +134,7 @@ def _fetch_if_remote(ref: str, cwd: Path) -> None:
 
     Non-remote refs (local branches, HEAD, bare SHAs) are silently skipped.
     """
-    result = tasks.run(["git", "rev-parse", "--symbolic-full-name", ref], cwd=cwd, check=False)
+    result = run(["git", "rev-parse", "--symbolic-full-name", ref], cwd=cwd, check=False)
     if result.returncode == 0:
         full_name = result.stdout.strip()
         if not full_name.startswith("refs/remotes/"):
@@ -144,10 +145,10 @@ def _fetch_if_remote(ref: str, cwd: Path) -> None:
         if "/" not in ref:
             return
         remote = ref.split("/", 1)[0]
-        r = tasks.run(["git", "remote", "get-url", remote], cwd=cwd, check=False)
+        r = run(["git", "remote", "get-url", remote], cwd=cwd, check=False)
         if r.returncode != 0:
             return
-    fetch_result = tasks.run(["git", "fetch", remote], cwd=cwd, check=False)
+    fetch_result = run(["git", "fetch", remote], cwd=cwd, check=False)
     if fetch_result.returncode != 0:
         logger.warning("git fetch %s failed for %s", remote, cwd)
 
@@ -168,14 +169,14 @@ def create_include_worktrees(includes: list[IncludeEntry], name: str, base: str 
             continue
         path = entry.path
         if (path / ".git").exists():
-            worktree = path / tasks.WORKTREES_SUBDIR / name
+            worktree = path / WORKTREES_SUBDIR / name
             if base is not None:
                 repo_base = base
                 _fetch_if_remote(repo_base, path)
             else:
                 default = get_default_branch(path)
                 # Fetch so the worktree starts from the latest upstream commit.
-                fetch_result = tasks.run(["git", "fetch", "origin"], cwd=path, check=False)
+                fetch_result = run(["git", "fetch", "origin"], cwd=path, check=False)
                 if fetch_result.returncode != 0:
                     logger.warning("git fetch origin failed for %s; using local %s", path, default)
                     repo_base = default
@@ -196,7 +197,7 @@ def remove_include_worktrees(includes: list[IncludeEntry], name: str) -> None:
             continue
         path = entry.path
         if (path / ".git").exists():
-            worktree = path / tasks.WORKTREES_SUBDIR / name
+            worktree = path / WORKTREES_SUBDIR / name
             remove_worktree(path, worktree, force=True)
 
 
@@ -217,14 +218,47 @@ def delete_include_branches(includes: list[IncludeEntry], name: str) -> None:
 def get_default_branch(repo: Path) -> str:
     """Return the repo's default branch name (main / master / etc.)."""
     # Prefer the remote's HEAD pointer — reliable on repos with a remote.
-    result = tasks.run(["git", "symbolic-ref", "refs/remotes/origin/HEAD"], cwd=repo, check=False)
+    result = run(["git", "symbolic-ref", "refs/remotes/origin/HEAD"], cwd=repo, check=False)
     if result.returncode == 0:
         ref = result.stdout.strip()
         if "/" in ref:
             return ref.rsplit("/", 1)[-1]
     # Fallback: check whether common names exist as local branches.
     for candidate in ("main", "master", "develop"):
-        r = tasks.run(["git", "rev-parse", "--verify", candidate], cwd=repo, check=False)
+        r = run(["git", "rev-parse", "--verify", candidate], cwd=repo, check=False)
         if r.returncode == 0:
             return candidate
     return "main"  # safe last-resort default
+
+
+# ---------------------------------------------------------------------------
+# Commit helpers
+# ---------------------------------------------------------------------------
+
+
+def add(repo: Path, paths: list[str] | None = None) -> None:
+    """Stage files in *repo*. Defaults to ``git add -A`` (all changes).
+
+    Pass an explicit *paths* list (relative to *repo*) to stage only specific
+    files — this matters when the working tree has unrelated dirty files that
+    must not be swept into an auto-commit.
+    """
+    if paths is None:
+        run(["git", "add", "-A"], cwd=repo)
+    else:
+        run(["git", "add", *paths], cwd=repo)
+
+
+def commit(repo: Path, message: str) -> None:
+    """Create a commit in *repo* with *message*."""
+    run(["git", "commit", "-m", message], cwd=repo)
+
+
+def add_and_commit(repo: Path, message: str, *, paths: list[str] | None = None) -> None:
+    """Stage and commit in one step (convenience over ``add`` + ``commit``).
+
+    With *paths*=None, stages everything (``git add -A``); otherwise stages
+    only the listed paths.
+    """
+    add(repo, paths)
+    commit(repo, message)

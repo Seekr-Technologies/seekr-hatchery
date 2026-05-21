@@ -7,8 +7,15 @@ from unittest.mock import MagicMock
 import pytest
 
 import seekr_hatchery.agents as agent
+import seekr_hatchery.constants as constants
 import seekr_hatchery.docker as docker
-import seekr_hatchery.tasks as tasks
+from seekr_hatchery.models import SessionMeta
+
+
+def _no_wt_meta(cwd):
+    """Synthetic SessionMeta for no-worktree mount tests."""
+    return SessionMeta(name="-", repo=str(cwd), worktree=str(cwd), no_worktree=True)
+
 
 # ---------------------------------------------------------------------------
 # docker_available()
@@ -19,20 +26,20 @@ class TestDockerAvailable:
     def test_returns_true_when_rc_zero(self, monkeypatch):
         mock_result = MagicMock()
         mock_result.returncode = 0
-        monkeypatch.setattr(tasks, "run", lambda *a, **kw: mock_result)
+        monkeypatch.setattr(docker, "run", lambda *a, **kw: mock_result)
         assert docker.docker_available() is True
 
     def test_returns_false_when_rc_nonzero(self, monkeypatch):
         mock_result = MagicMock()
         mock_result.returncode = 1
-        monkeypatch.setattr(tasks, "run", lambda *a, **kw: mock_result)
+        monkeypatch.setattr(docker, "run", lambda *a, **kw: mock_result)
         assert docker.docker_available() is False
 
     def test_returns_false_when_binary_not_found(self, monkeypatch):
         def _raise(*a, **kw):
             raise FileNotFoundError("No such file or directory: 'docker'")
 
-        monkeypatch.setattr(tasks, "run", _raise)
+        monkeypatch.setattr(docker, "run", _raise)
         assert docker.docker_available() is False
 
 
@@ -45,20 +52,20 @@ class TestPodmanAvailable:
     def test_returns_true_when_rc_zero(self, monkeypatch):
         mock_result = MagicMock()
         mock_result.returncode = 0
-        monkeypatch.setattr(tasks, "run", lambda *a, **kw: mock_result)
+        monkeypatch.setattr(docker, "run", lambda *a, **kw: mock_result)
         assert docker.podman_available() is True
 
     def test_returns_false_when_rc_nonzero(self, monkeypatch):
         mock_result = MagicMock()
         mock_result.returncode = 1
-        monkeypatch.setattr(tasks, "run", lambda *a, **kw: mock_result)
+        monkeypatch.setattr(docker, "run", lambda *a, **kw: mock_result)
         assert docker.podman_available() is False
 
     def test_returns_false_when_binary_not_found(self, monkeypatch):
         def _raise(*a, **kw):
             raise FileNotFoundError("No such file or directory: 'podman'")
 
-        monkeypatch.setattr(tasks, "run", _raise)
+        monkeypatch.setattr(docker, "run", _raise)
         assert docker.podman_available() is False
 
 
@@ -645,14 +652,13 @@ class TestDockerMountsIncludes:
 
     def test_git_repo_with_worktree_gets_layered_mounts(self, tmp_path):
         """A git repo in worktree mode with a task worktree gets layered mounts."""
-        import seekr_hatchery.tasks as tasks_mod
 
         repo = tmp_path / "repo-b"
         repo.mkdir()
         git_dir = repo / ".git"
         git_dir.mkdir()
         (git_dir / "objects").mkdir()
-        worktree = repo / tasks_mod.WORKTREES_SUBDIR / "my-task"
+        worktree = repo / constants.WORKTREES_SUBDIR / "my-task"
         worktree.mkdir(parents=True)
         session_dir = tmp_path / "session"
         session_dir.mkdir()
@@ -691,9 +697,8 @@ class TestDockerMountsIncludes:
         repo = tmp_path / "repo-b"
         repo.mkdir()
         (repo / ".git").mkdir()
-        import seekr_hatchery.tasks as tasks_mod
 
-        worktree = repo / tasks_mod.WORKTREES_SUBDIR / "my-task"
+        worktree = repo / constants.WORKTREES_SUBDIR / "my-task"
         worktree.mkdir(parents=True)
         session_dir = tmp_path / "session"
         session_dir.mkdir()
@@ -740,7 +745,6 @@ class TestDockerMountsIncludes:
 
     def test_reference_mode_git_repo_no_layered_mounts(self, tmp_path):
         """mode='ro' on a git repo with a worktree still just does a simple ro mount."""
-        import seekr_hatchery.tasks as tasks_mod
 
         repo = tmp_path / "repo-b"
         repo.mkdir()
@@ -748,7 +752,7 @@ class TestDockerMountsIncludes:
         git_dir.mkdir()
         (git_dir / "objects").mkdir()
         # Create a worktree — it should be ignored in reference mode
-        worktree = repo / tasks_mod.WORKTREES_SUBDIR / "my-task"
+        worktree = repo / constants.WORKTREES_SUBDIR / "my-task"
         worktree.mkdir(parents=True)
         session_dir = tmp_path / "session"
         session_dir.mkdir()
@@ -765,12 +769,11 @@ class TestDockerMountsIncludes:
 
     def test_reference_rw_git_repo_no_layered_mounts(self, tmp_path):
         """mode='rw' on a git repo with a worktree still just does a simple rw reference mount."""
-        import seekr_hatchery.tasks as tasks_mod
 
         repo = tmp_path / "repo-c"
         repo.mkdir()
         (repo / ".git").mkdir()
-        worktree = repo / tasks_mod.WORKTREES_SUBDIR / "my-task"
+        worktree = repo / constants.WORKTREES_SUBDIR / "my-task"
         worktree.mkdir(parents=True)
         session_dir = tmp_path / "session"
         session_dir.mkdir()
@@ -874,7 +877,7 @@ class TestEnsureDockerFilesUncommitted:
 
         # Place files only in repo root
         (repo / ".hatchery" / "Dockerfile.codex").write_text("FROM debian\n")
-        (repo / tasks.DOCKER_CONFIG).write_text("schema_version: '1'\n")
+        (repo / constants.DOCKER_CONFIG).write_text("schema_version: '1'\n")
 
         # suppress interactive prompts (shouldn't be hit, but be safe)
         monkeypatch.setattr("builtins.input", lambda _: "n")
@@ -882,7 +885,31 @@ class TestEnsureDockerFilesUncommitted:
         docker.ensure_docker_files_uncommitted(repo, worktree, agent.CODEX)
 
         assert (worktree / ".hatchery" / "Dockerfile.codex").exists()
-        assert (worktree / tasks.DOCKER_CONFIG).exists()
+        assert (worktree / constants.DOCKER_CONFIG).exists()
+
+    def test_copies_from_source_when_target_parent_dir_missing(self, tmp_path, monkeypatch):
+        """``ensure_dockerfile(target, source=...)`` must create target/.hatchery/
+        before shutil.copy2 lands. Regression for the bug where the mkdir ran
+        only on the generate-from-template path and the source-copy path failed
+        with FileNotFoundError if .hatchery/ didn't exist in the target.
+        """
+        source = tmp_path / "source"
+        target = tmp_path / "target"
+        (source / ".hatchery").mkdir(parents=True)
+        target.mkdir()  # target exists but has NO .hatchery/ subdir
+        (source / ".hatchery" / "Dockerfile.codex").write_text("FROM debian\n")
+        (source / constants.DOCKER_CONFIG).write_text("schema_version: '1'\n")
+
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+
+        # Should not raise FileNotFoundError; should copy both files.
+        docker.ensure_dockerfile(target, agent.CODEX, source=source)
+        docker.ensure_docker_config(target, source=source)
+
+        assert (target / ".hatchery" / "Dockerfile.codex").exists()
+        assert (target / constants.DOCKER_CONFIG).exists()
+        # Content matches the source (we copied, not generated from template).
+        assert (target / ".hatchery" / "Dockerfile.codex").read_text() == "FROM debian\n"
 
     def test_generates_when_repo_root_also_missing(self, tmp_path, monkeypatch):
         """When neither repo root nor worktree has files, generates from template."""
@@ -897,8 +924,8 @@ class TestEnsureDockerFilesUncommitted:
 
         assert (repo / ".hatchery" / "Dockerfile.codex").exists()
         assert (worktree / ".hatchery" / "Dockerfile.codex").exists()
-        assert (repo / tasks.DOCKER_CONFIG).exists()
-        assert (worktree / tasks.DOCKER_CONFIG).exists()
+        assert (repo / constants.DOCKER_CONFIG).exists()
+        assert (worktree / constants.DOCKER_CONFIG).exists()
 
     def test_worktree_files_unchanged_when_already_present(self, tmp_path, monkeypatch):
         """When worktree already has files, they are not overwritten."""
@@ -910,7 +937,7 @@ class TestEnsureDockerFilesUncommitted:
         original_df = "FROM custom-image\n"
         original_cfg = "schema_version: '1'\nmounts: []\n"
         (worktree / ".hatchery" / "Dockerfile.codex").write_text(original_df)
-        (worktree / tasks.DOCKER_CONFIG).write_text(original_cfg)
+        (worktree / constants.DOCKER_CONFIG).write_text(original_cfg)
 
         monkeypatch.setattr("builtins.input", lambda _: "n")
 
@@ -918,7 +945,7 @@ class TestEnsureDockerFilesUncommitted:
 
         # Worktree files should be untouched
         assert (worktree / ".hatchery" / "Dockerfile.codex").read_text() == original_df
-        assert (worktree / tasks.DOCKER_CONFIG).read_text() == original_cfg
+        assert (worktree / constants.DOCKER_CONFIG).read_text() == original_cfg
 
 
 # ---------------------------------------------------------------------------
@@ -1179,7 +1206,7 @@ class TestNoWorktreeFollowSymlinks:
         monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
 
         cfg = docker.DockerConfig(follow_symlinks=False)
-        mounts = docker.docker_mounts_no_worktree(cwd, self._make_backend(), tmp_path, cfg)
+        mounts = docker.build_mounts(_no_wt_meta(cwd), self._make_backend(), tmp_path, cfg)
 
         target = external.resolve()
         assert not any(f"{target}:{target}:rw" == m for m in mounts)
@@ -1193,7 +1220,7 @@ class TestNoWorktreeFollowSymlinks:
         monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
 
         cfg = docker.DockerConfig(follow_symlinks=True)
-        mounts = docker.docker_mounts_no_worktree(cwd, self._make_backend(), tmp_path, cfg)
+        mounts = docker.build_mounts(_no_wt_meta(cwd), self._make_backend(), tmp_path, cfg)
 
         target = external.resolve()
         assert f"{target}:{target}:rw" in mounts
@@ -1226,7 +1253,7 @@ class TestClipboardImageMount:
         monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
 
         cfg = docker.DockerConfig(clipboard_images=True)
-        mounts = docker.docker_mounts_no_worktree(cwd, self._make_backend(), session_dir, cfg)
+        mounts = docker.build_mounts(_no_wt_meta(cwd), self._make_backend(), session_dir, cfg)
 
         clip = session_dir / "clipboard"
         assert f"{clip}:{clip}:rw" in mounts
@@ -1241,7 +1268,7 @@ class TestClipboardImageMount:
         monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
 
         cfg = docker.DockerConfig(clipboard_images=False)
-        mounts = docker.docker_mounts_no_worktree(cwd, self._make_backend(), session_dir, cfg)
+        mounts = docker.build_mounts(_no_wt_meta(cwd), self._make_backend(), session_dir, cfg)
 
         clip = session_dir / "clipboard"
         assert not any(f"{clip}:" in m for m in mounts)

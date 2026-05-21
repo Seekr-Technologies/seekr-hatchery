@@ -14,16 +14,17 @@ from pathlib import Path
 import pytest
 
 import seekr_hatchery.agents as agent
+import seekr_hatchery.constants as constants
 import seekr_hatchery.docker as docker
 import seekr_hatchery.proxy as proxy_mod
-import seekr_hatchery.tasks as tasks
+import seekr_hatchery.sessions as sessions
 
 pytestmark = pytest.mark.integration
 
 # Captured at import time, before any fixture patches HOME.
 _REAL_HOME = os.environ.get("HOME", "")
 
-CONTAINER_WORKTREE = f"{tasks.CONTAINER_REPO_ROOT}/.hatchery/worktrees/test-wt"
+CONTAINER_WORKTREE = f"{constants.CONTAINER_REPO_ROOT}/.hatchery/worktrees/test-wt"
 
 
 @pytest.fixture(autouse=True)
@@ -93,7 +94,7 @@ def no_wt_cwd(tmp_path_factory: pytest.TempPathFactory) -> Path:
 def no_wt_image(no_wt_cwd: Path, runtime: docker.Runtime) -> str:
     """Build the no-worktree sandbox image once; remove it after the module."""
     docker.build_docker_image(no_wt_cwd, no_wt_cwd, "test-no-wt", agent.CODEX, runtime=runtime)
-    image = docker.docker_image_name(no_wt_cwd, "test-no-wt")
+    image = sessions.image_name(no_wt_cwd, "test-no-wt")
     yield image
     subprocess.run([runtime.binary, "rmi", "-f", image], capture_output=True)
 
@@ -114,14 +115,17 @@ def no_wt_run(
     # --userns=keep-id fails in nested Podman (DinD); drop it for all sandbox tests.
     monkeypatch.setattr(docker, "_userns_flags", lambda _r: [])
 
-    session_dir = tasks.task_session_dir(no_wt_cwd, "test-no-wt")
+    session_dir = sessions.task_session_dir(no_wt_cwd, "test-no-wt")
     session_dir.mkdir(parents=True, exist_ok=True)
     agent.CODEX.on_new_task(session_dir)
     # Codex's home_mounts requires codex_auth.json (created by on_before_container_start)
     # and ~/.codex to exist.
     agent.CODEX.on_before_container_start(session_dir, "test-proxy-token", "/workspace")
     (Path.home() / ".codex").mkdir(parents=True, exist_ok=True)
-    mounts = docker.docker_mounts_no_worktree(no_wt_cwd, agent.CODEX, session_dir, docker.DockerConfig())
+    from seekr_hatchery.models import SessionMeta
+
+    no_wt_meta = SessionMeta(name="test-no-wt", repo=str(no_wt_cwd), worktree=str(no_wt_cwd), no_worktree=True)
+    mounts = docker.build_mounts(no_wt_meta, agent.CODEX, session_dir, docker.DockerConfig())
 
     def run(
         command: list[str],
@@ -196,7 +200,7 @@ def wt_worktree(wt_repo: Path) -> Path:
 def wt_image(wt_repo: Path, wt_worktree: Path, runtime: docker.Runtime) -> str:
     """Build the worktree sandbox image (alpine+git) once; remove it after the module."""
     docker.build_docker_image(wt_repo, wt_worktree, "test-wt", agent.CODEX, runtime=runtime)
-    image = docker.docker_image_name(wt_repo, "test-wt")
+    image = sessions.image_name(wt_repo, "test-wt")
     yield image
     subprocess.run([runtime.binary, "rmi", "-f", image], capture_output=True)
 
@@ -223,7 +227,7 @@ def wt_run(
     monkeypatch.setattr(docker, "_userns_flags", lambda _r: [])
 
     task_name = "test-wt"
-    session_dir = tasks.task_session_dir(wt_repo, task_name)
+    session_dir = sessions.task_session_dir(wt_repo, task_name)
     session_dir.mkdir(parents=True, exist_ok=True)
     agent.CODEX.on_new_task(session_dir)
     agent.CODEX.on_before_container_start(session_dir, "test-proxy-token", CONTAINER_WORKTREE)
@@ -241,16 +245,17 @@ def wt_run(
 
     # Rewrite the worktree .git pointer to use the container-relative path.
     git_ptr = session_dir / "git_ptr"
-    git_ptr.write_text(f"gitdir: {tasks.CONTAINER_REPO_ROOT}/.git/worktrees/{task_name}\n")
+    git_ptr.write_text(f"gitdir: {constants.CONTAINER_REPO_ROOT}/.git/worktrees/{task_name}\n")
 
-    mounts = docker.docker_mounts(
-        wt_repo,
-        wt_worktree,
-        task_name,
+    from seekr_hatchery.models import SessionMeta
+
+    wt_meta = SessionMeta(name=task_name, repo=str(wt_repo), worktree=str(wt_worktree), no_worktree=False)
+    mounts = docker.build_mounts(
+        wt_meta,
         agent.CODEX,
         session_dir,
         docker.DockerConfig(),
-        git_sentinels,
+        git_sentinel_files=git_sentinels,
         worktree_git_ptr=git_ptr,
     )
 
@@ -259,7 +264,7 @@ def wt_run(
             image=wt_image,
             mounts=mounts,
             workdir=CONTAINER_WORKTREE,
-            hatchery_repo=tasks.CONTAINER_REPO_ROOT,
+            hatchery_repo=constants.CONTAINER_REPO_ROOT,
             name=task_name,
             mutator=None,
             proxy_token=None,

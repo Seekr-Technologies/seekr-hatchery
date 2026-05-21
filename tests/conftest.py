@@ -6,8 +6,10 @@ from pathlib import Path
 import pytest
 
 import seekr_hatchery.agents as agent
-import seekr_hatchery.tasks as tasks
+import seekr_hatchery.constants as constants
+import seekr_hatchery.sessions as sessions
 import seekr_hatchery.user_config as user_config
+import seekr_hatchery.utils as utils
 
 # ---------------------------------------------------------------------------
 # SpyBackend — records every lifecycle call for assertion in test_cli.py
@@ -131,15 +133,15 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     Patches:
       - pathlib.Path.home()       — Python's canonical home lookup
       - HOME env var              — covers os.path.expanduser, git, subprocesses
-      - tasks.HATCHERY_DIR / TASKS_DB_DIR  — module-level constants (import-time)
+      - constants.HATCHERY_DIR / TASKS_DB_DIR  — module-level constants (import-time)
       - user_config.UserConfig.CONFIG_PATH — class-level constant (import-time)
     """
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: fake_home))
     monkeypatch.setenv("HOME", str(fake_home))
-    monkeypatch.setattr(tasks, "HATCHERY_DIR", fake_home / ".hatchery")
-    monkeypatch.setattr(tasks, "TASKS_DB_DIR", fake_home / ".hatchery" / "tasks")
+    monkeypatch.setattr(constants, "HATCHERY_DIR", fake_home / ".hatchery")
+    monkeypatch.setattr(sessions, "_TASKS_DB_DIR", fake_home / ".hatchery" / "tasks")
     monkeypatch.setattr(user_config.UserConfig, "CONFIG_PATH", fake_home / ".hatchery" / "config.json")
     return fake_home
 
@@ -176,7 +178,7 @@ def sample_meta(fake_tasks_db: Path) -> dict:
         "schema_version": 1,
     }
     # Write to the unified dir path matching repo="/some/repo"
-    task_dir = fake_tasks_db / tasks.repo_id(Path("/some/repo")) / "my-task"
+    task_dir = fake_tasks_db / utils.repo_id(Path("/some/repo")) / "my-task"
     task_dir.mkdir(parents=True, exist_ok=True)
     (task_dir / "meta.json").write_text(json.dumps(meta))
     return meta
@@ -188,4 +190,40 @@ def fake_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / ".git").mkdir()
+    return repo
+
+
+@pytest.fixture()
+def no_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every ``input()`` call return ``"n"``.
+
+    Production code prompts during routine operations (edit Dockerfile?, commit
+    checkpoint?, etc.). Real-fs tests want those prompts to default cleanly so
+    the test doesn't hang on stdin. Using this fixture is the lightweight
+    alternative to patching every individual interactive helper.
+    """
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: "n")
+
+
+@pytest.fixture()
+def git_repo(tmp_path: Path) -> Path:
+    """A real git repo with an initial commit on ``main``.
+
+    Use this when a test exercises code that calls real git (worktree creation,
+    branch operations, log/status), instead of patching every git call.
+
+    Author identity is configured *locally* on the repo so subsequent commits
+    (including ones made by hatchery into worktrees of this repo) succeed
+    without needing the real user's ~/.gitconfig.
+    """
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--initial-branch=main", str(repo)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t.com"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "T"], check=True, capture_output=True)
+    (repo / "README").write_text("test\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "init"], check=True, capture_output=True)
     return repo
