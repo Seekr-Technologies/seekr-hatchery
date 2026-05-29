@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from pathlib import Path
 
-from ..mount import Mount
+from seekr_hatchery.mount import Mount
 
 # Home directory of the non-root user inside every sandbox container.
 CONTAINER_HOME = "/home/hatchery"

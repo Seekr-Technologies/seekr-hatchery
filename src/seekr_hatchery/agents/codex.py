@@ -9,10 +9,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
+from seekr_hatchery.agents.agent_backend import CONTAINER_HOME, AgentBackend
 from seekr_hatchery.locks import hatchery_lock
 from seekr_hatchery.mount import Mount
-
-from .agent_backend import CONTAINER_HOME, AgentBackend
 
 logger = logging.getLogger("hatchery")
 

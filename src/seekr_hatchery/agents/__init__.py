@@ -11,8 +11,8 @@ Module-level singleton ``CODEX`` is the only instance callers should use.
 the appropriate singleton.
 """
 
-from .agent_backend import CONTAINER_HOME, AgentBackend
-from .codex import CodexBackend
+from seekr_hatchery.agents.agent_backend import CONTAINER_HOME, AgentBackend
+from seekr_hatchery.agents.codex import CodexBackend
 
 __all__ = [
     "AgentBackend",
