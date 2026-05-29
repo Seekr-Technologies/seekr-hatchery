@@ -18,6 +18,7 @@ import seekr_hatchery.constants as constants
 import seekr_hatchery.docker as docker
 import seekr_hatchery.proxy as proxy_mod
 import seekr_hatchery.sessions as sessions
+from seekr_hatchery.mount import Mount
 
 pytestmark = pytest.mark.integration
 
@@ -93,8 +94,8 @@ def no_wt_cwd(tmp_path_factory: pytest.TempPathFactory) -> Path:
 @pytest.fixture(scope="module")
 def no_wt_image(no_wt_cwd: Path, runtime: docker.Runtime) -> str:
     """Build the no-worktree sandbox image once; remove it after the module."""
-    docker.build_docker_image(no_wt_cwd, no_wt_cwd, "test-no-wt", agent.CODEX, runtime=runtime)
     image = sessions.image_name(no_wt_cwd, "test-no-wt")
+    docker.build_docker_image(no_wt_cwd, no_wt_cwd, image, agent.CODEX, runtime=runtime)
     yield image
     subprocess.run([runtime.binary, "rmi", "-f", image], capture_output=True)
 
@@ -105,7 +106,7 @@ def no_wt_run(
     no_wt_image: str,
     runtime: docker.Runtime,
     monkeypatch: pytest.MonkeyPatch,
-) -> tuple[Callable[..., subprocess.CompletedProcess[str]], list[str]]:
+) -> tuple[Callable[..., subprocess.CompletedProcess[str]], list[Mount]]:
     """No-worktree container runner.  Mirrors launch_docker_no_worktree without
     requiring a real API key.
 
@@ -199,8 +200,8 @@ def wt_worktree(wt_repo: Path) -> Path:
 @pytest.fixture(scope="module")
 def wt_image(wt_repo: Path, wt_worktree: Path, runtime: docker.Runtime) -> str:
     """Build the worktree sandbox image (alpine+git) once; remove it after the module."""
-    docker.build_docker_image(wt_repo, wt_worktree, "test-wt", agent.CODEX, runtime=runtime)
     image = sessions.image_name(wt_repo, "test-wt")
+    docker.build_docker_image(wt_repo, wt_worktree, image, agent.CODEX, runtime=runtime)
     yield image
     subprocess.run([runtime.binary, "rmi", "-f", image], capture_output=True)
 
@@ -212,7 +213,7 @@ def wt_run(
     wt_image: str,
     runtime: docker.Runtime,
     monkeypatch: pytest.MonkeyPatch,
-) -> tuple[Callable[[list[str]], subprocess.CompletedProcess[str]], list[str]]:
+) -> tuple[Callable[[list[str]], subprocess.CompletedProcess[str]], list[Mount]]:
     """Worktree container runner.  Mirrors the pre-flight setup in launch_docker
     (sentinel files, git_ptr rewrite, mount construction) without requiring a
     real API key.
@@ -283,7 +284,15 @@ def wt_run(
 # ---------------------------------------------------------------------------
 
 
-def _mount_access_script(mounts: list[str]) -> str:
+def _mount_container_path(m: Mount) -> str:
+    """Container-side path for *m* — explicit dst, or src when dst is None (bind)."""
+    if m.dst is not None:
+        return m.dst
+    assert m.src is not None, f"Mount has neither src nor dst: {m!r}"
+    return str(m.src)
+
+
+def _mount_access_script(mounts: list[Mount]) -> str:
     """Build a sh script that probes each container mount path for actual RW/RO access.
 
     For directory mounts: attempts to create (then delete) a probe file.
@@ -292,8 +301,7 @@ def _mount_access_script(mounts: list[str]) -> str:
     """
     checks = []
     for m in mounts:
-        parts = m.split(":")
-        path = parts[1]
+        path = _mount_container_path(m)
         checks.append(
             f'if [ -d "{path}" ]; then '
             f'  if touch "{path}/.rw_probe" 2>/dev/null; then '
@@ -307,21 +315,16 @@ def _mount_access_script(mounts: list[str]) -> str:
     return "; ".join(checks)
 
 
-def _assert_mounts(result: subprocess.CompletedProcess[str], mounts: list[str]) -> None:
+def _assert_mounts(result: subprocess.CompletedProcess[str], mounts: list[Mount]) -> None:
     """Assert every mount in *mounts* reports the declared RW/RO access."""
     assert result.returncode == 0, f"Mount probe script failed:\n{result.stderr}"
     for m in mounts:
-        parts = m.split(":")
-        container_path = parts[1]
-        declared_mode = parts[2] if len(parts) > 2 else "rw"
-        if declared_mode == "rw":
-            assert f"rw:{container_path}" in result.stdout, (
-                f"{container_path}: declared RW but container reports RO\n{result.stdout}"
-            )
-        else:
-            assert f"ro:{container_path}" in result.stdout, (
-                f"{container_path}: declared RO but container reports RW\n{result.stdout}"
-            )
+        container_path = _mount_container_path(m)
+        # tmpfs mounts are always writable inside the container.
+        expected = "ro" if m.mode == "ro" else "rw"
+        assert f"{expected}:{container_path}" in result.stdout, (
+            f"{container_path}: declared {expected.upper()} but container reports otherwise\n{result.stdout}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -335,7 +338,7 @@ class TestNoWorktreeMounts:
 
     def test_mount_access(
         self,
-        no_wt_run: tuple[Callable[..., subprocess.CompletedProcess[str]], list[str]],
+        no_wt_run: tuple[Callable[..., subprocess.CompletedProcess[str]], list[Mount]],
     ) -> None:
         run, mounts = no_wt_run
         _assert_mounts(run(["sh", "-c", _mount_access_script(mounts)]), mounts)
@@ -380,7 +383,7 @@ class TestContainerEnv:
 
     def test_env_and_workdir(
         self,
-        no_wt_run: tuple[Callable[..., subprocess.CompletedProcess[str]], list[str]],
+        no_wt_run: tuple[Callable[..., subprocess.CompletedProcess[str]], list[Mount]],
     ) -> None:
         run, _ = no_wt_run
         script = (
@@ -438,7 +441,7 @@ class TestContainerProxy:
 
     def test_request_is_proxied(
         self,
-        no_wt_run: tuple[Callable[..., subprocess.CompletedProcess[str]], list[str]],
+        no_wt_run: tuple[Callable[..., subprocess.CompletedProcess[str]], list[Mount]],
     ) -> None:
         """_run_container routes container requests through the proxy to the upstream API.
 
@@ -479,7 +482,7 @@ class TestWorktreeMounts:
 
     def test_mount_access(
         self,
-        wt_run: tuple[Callable[[list[str]], subprocess.CompletedProcess[str]], list[str]],
+        wt_run: tuple[Callable[[list[str]], subprocess.CompletedProcess[str]], list[Mount]],
     ) -> None:
         run, mounts = wt_run
         _assert_mounts(run(["sh", "-c", _mount_access_script(mounts)]), mounts)
@@ -495,7 +498,7 @@ class TestGitInWorktree:
 
     def test_git_log_reads_history(
         self,
-        wt_run: tuple[Callable[[list[str]], subprocess.CompletedProcess[str]], list[str]],
+        wt_run: tuple[Callable[[list[str]], subprocess.CompletedProcess[str]], list[Mount]],
     ) -> None:
         """git log can read the repo's history from inside the container."""
         run, _ = wt_run
@@ -507,7 +510,7 @@ class TestGitInWorktree:
 
     def test_git_commit_visible_on_host(
         self,
-        wt_run: tuple[Callable[[list[str]], subprocess.CompletedProcess[str]], list[str]],
+        wt_run: tuple[Callable[[list[str]], subprocess.CompletedProcess[str]], list[Mount]],
         wt_repo: Path,
     ) -> None:
         """A commit written inside the container is visible in git log on the host.

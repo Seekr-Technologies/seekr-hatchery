@@ -4,6 +4,8 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from pathlib import Path
 
+from seekr_hatchery.mount import Mount
+
 # Home directory of the non-root user inside every sandbox container.
 CONTAINER_HOME = "/home/hatchery"
 
@@ -97,21 +99,17 @@ class AgentBackend(ABC):
 
     @staticmethod
     @abstractmethod
-    def home_mounts(session_dir: Path) -> list[str]:
-        """Return agent-specific host→container bind-mount strings.
+    def construct_mounts(session_dir: Path) -> list[Mount]:
+        """Return the agent's container mounts.
 
         *session_dir* is ``sessions.task_session_dir(repo, name)`` — the per-task
         directory where ``on_new_task`` may have written config files.
 
-        Common mounts shared by all agents (.gitconfig, uv cache) are added by
+        Return ``Mount`` objects covering both bind mounts (mode ``"ro"`` /
+        ``"rw"``) and any tmpfs paths (mode ``"tmpfs"``, ``src=None``).  Common
+        mounts shared by all agents (.gitconfig, uv cache) are added by
         ``docker._default_home_mounts()`` — do not include them here.
-        Mount strings use the format ``"host_path:container_path:mode"``.
         """
-
-    @staticmethod
-    @abstractmethod
-    def tmpfs_paths() -> list[str]:
-        """Return container paths that should be shadowed with an empty tmpfs."""
 
     @staticmethod
     @abstractmethod

@@ -10,6 +10,7 @@ import seekr_hatchery.agents as agent
 import seekr_hatchery.constants as constants
 import seekr_hatchery.docker as docker
 import seekr_hatchery.git as git
+import seekr_hatchery.mount as mount
 import seekr_hatchery.sessions as sessions
 
 # ---------------------------------------------------------------------------
@@ -355,7 +356,7 @@ class TestConstructDockerMounts:
         host_dir.mkdir()
         config = docker.DockerConfig(mounts=[f"{host_dir}:/container:ro"])
         result = docker._construct_docker_mounts(config)
-        assert result == [f"{host_dir}:/container:ro"]
+        assert result == [mount.Mount(src=str(host_dir), dst="/container", mode="ro")]
 
     def test_skips_nonexistent_host_path(self):
         config = docker.DockerConfig(mounts=["/no/such/path:/container:ro"])
@@ -366,20 +367,20 @@ class TestConstructDockerMounts:
         host_dir.mkdir()
         config = docker.DockerConfig(mounts=[f"{host_dir}:/container"])
         result = docker._construct_docker_mounts(config)
-        assert result == [f"{host_dir}:/container:ro"]
+        assert result == [mount.Mount(src=str(host_dir), dst="/container", mode="ro")]
 
     def test_expands_tilde_in_host_path(self, home):
         (home / "mydir").mkdir()
         config = docker.DockerConfig(mounts=["~/mydir:/container:ro"])
         result = docker._construct_docker_mounts(config)
-        assert result == [f"{home}/mydir:/container:ro"]
+        assert result == [mount.Mount(src=f"{home}/mydir", dst="/container", mode="ro")]
 
     def test_rw_mode_preserved(self, tmp_path):
         host_dir = tmp_path / "mydir"
         host_dir.mkdir()
         config = docker.DockerConfig(mounts=[f"{host_dir}:/container:rw"])
         result = docker._construct_docker_mounts(config)
-        assert result == [f"{host_dir}:/container:rw"]
+        assert result == [mount.Mount(src=str(host_dir), dst="/container", mode="rw")]
 
 
 # ---------------------------------------------------------------------------

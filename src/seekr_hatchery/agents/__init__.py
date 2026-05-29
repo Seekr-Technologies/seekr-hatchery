@@ -2,7 +2,7 @@
 
 Each concrete ``AgentBackend`` encodes everything hatchery needs to know about
 one AI coding agent: how to invoke it (command construction), what it needs
-mounted in the sandbox (home mounts, tmpfs), how to authenticate (API key
+mounted in the sandbox (via ``construct_mounts``), how to authenticate (API key
 retrieval, proxy configuration, container env vars), and how to prepare
 per-task state before the container starts.
 
@@ -11,8 +11,8 @@ Module-level singleton ``CODEX`` is the only instance callers should use.
 the appropriate singleton.
 """
 
-from .agent_backend import CONTAINER_HOME, AgentBackend
-from .codex import CodexBackend
+from seekr_hatchery.agents.agent_backend import CONTAINER_HOME, AgentBackend
+from seekr_hatchery.agents.codex import CodexBackend
 
 __all__ = [
     "AgentBackend",
