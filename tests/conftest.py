@@ -7,6 +7,7 @@ import pytest
 
 import seekr_hatchery.agents as agent
 import seekr_hatchery.constants as constants
+import seekr_hatchery.mount as mount
 import seekr_hatchery.sessions as sessions
 import seekr_hatchery.user_config as user_config
 import seekr_hatchery.utils as utils
@@ -82,7 +83,7 @@ class SpyBackend(agent.AgentBackend):
 
         return _mutate
 
-    def construct_mounts(self, session_dir: Path | None) -> list[agent.Mount]:
+    def construct_mounts(self, session_dir: Path | None) -> list[mount.Mount]:
         return []
 
     def proxy_kwargs(self) -> dict:

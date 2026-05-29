@@ -11,7 +11,7 @@ Module-level singleton ``CODEX`` is the only instance callers should use.
 the appropriate singleton.
 """
 
-from .agent_backend import CONTAINER_HOME, AgentBackend, Mount, MountMode, mount_to_docker_args
+from .agent_backend import CONTAINER_HOME, AgentBackend
 from .codex import CodexBackend
 
 __all__ = [
@@ -19,9 +19,6 @@ __all__ = [
     "CONTAINER_HOME",
     "CodexBackend",
     "CODEX",
-    "Mount",
-    "MountMode",
-    "mount_to_docker_args",
     "from_kind",
 ]
 

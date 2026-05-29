@@ -10,8 +10,9 @@ from pathlib import Path
 from typing import Literal
 
 from seekr_hatchery.locks import hatchery_lock
+from seekr_hatchery.mount import Mount
 
-from .agent_backend import CONTAINER_HOME, AgentBackend, Mount
+from .agent_backend import CONTAINER_HOME, AgentBackend
 
 logger = logging.getLogger("hatchery")
 
@@ -145,8 +146,8 @@ class CodexBackend(AgentBackend):
             )
         codex_dir = Path.home() / ".codex"
         return [
-            Mount(src=str(codex_dir), dst=f"{CONTAINER_HOME}/.codex"),
-            Mount(src=str(fake_auth), dst=f"{CONTAINER_HOME}/.codex/auth.json"),
+            Mount(src=str(codex_dir), dst=f"{CONTAINER_HOME}/.codex", mode="rw"),
+            Mount(src=str(fake_auth), dst=f"{CONTAINER_HOME}/.codex/auth.json", mode="rw"),
         ]
 
     @staticmethod

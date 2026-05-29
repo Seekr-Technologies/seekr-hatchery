@@ -2,48 +2,12 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+
+from ..mount import Mount
 
 # Home directory of the non-root user inside every sandbox container.
 CONTAINER_HOME = "/home/hatchery"
-
-MountMode = Literal["ro", "rw", "tmpfs"]
-
-
-@dataclass(frozen=True)
-class Mount:
-    """A mount specification for the sandbox container.
-
-    Backends return a list of these from ``construct_mounts()``.  Each is
-    converted into the appropriate Docker CLI flag(s) (``-v`` for bind
-    mounts, ``--tmpfs`` for tmpfs) just before the container starts.
-
-    Attributes:
-        src: Host filesystem path for bind mounts; ``None`` for tmpfs.
-        dst: Container target path.  If ``None`` for a bind mount, the
-            mount mirrors *src* (same path on both sides).  Required for
-            tmpfs.
-        mode: ``"ro"`` or ``"rw"`` for bind mounts; ``"tmpfs"`` for an
-            in-memory tmpfs at *dst*.  Defaults to ``"rw"``.
-    """
-
-    src: str | Path | None
-    dst: str | None = None
-    mode: MountMode = "rw"
-
-
-def mount_to_docker_args(m: Mount) -> list[str]:
-    """Convert a Mount into Docker CLI flag(s) suitable for ``docker run``."""
-    if m.mode == "tmpfs":
-        if m.dst is None:
-            raise ValueError(f"tmpfs Mount requires dst: {m!r}")
-        return ["--tmpfs", m.dst]
-    if m.src is None:
-        raise ValueError(f"bind Mount requires src: {m!r}")
-    dst = m.dst if m.dst is not None else str(m.src)
-    return ["-v", f"{m.src}:{dst}:{m.mode}"]
 
 
 class AgentBackend(ABC):

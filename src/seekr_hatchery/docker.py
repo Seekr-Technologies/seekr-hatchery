@@ -36,6 +36,7 @@ from seekr_hatchery.constants import (
 from seekr_hatchery.includes import IncludeEntry, IncludeItem
 from seekr_hatchery.kubectl_proxy import KubectlConfig
 from seekr_hatchery.models import SessionMeta
+from seekr_hatchery.mount import Mount, mount_to_docker_args
 from seekr_hatchery.utils import open_for_editing, run, unique_basename
 
 logger = logging.getLogger("hatchery")
@@ -243,7 +244,7 @@ def _kubectl_context(
     config: DockerConfig,
     session_dir: Path,
     kubectl_proxy_token: str,
-) -> Generator[list[agent.Mount], None, None]:
+) -> Generator[list[Mount], None, None]:
     """Context manager that starts the kubectl proxy chain and yields extra mounts.
 
     Yields an empty list when ``config.kubernetes`` is ``None``.  On exit
@@ -271,7 +272,7 @@ def _kubectl_context(
     kubeconfig_path.chmod(0o600)
 
     try:
-        yield [agent.Mount(src=str(kubeconfig_path), dst=f"{agent.CONTAINER_HOME}/.kube/config", mode="ro")]
+        yield [Mount(src=str(kubeconfig_path), dst=f"{agent.CONTAINER_HOME}/.kube/config", mode="ro")]
     finally:
         _kubectl_proxy.stop_rbac_proxy(rbac_server)
         _kubectl_proxy.stop_kubectl_proxy_proc(kubectl_proc)
@@ -529,14 +530,14 @@ def launch_context(
     return config, features, container_workdir
 
 
-def _construct_docker_mounts(config: DockerConfig) -> list[agent.Mount]:
+def _construct_docker_mounts(config: DockerConfig) -> list[Mount]:
     """Resolve a DockerConfig into Mount objects.
 
     Expands ~ in host paths and silently skips entries whose host path does
     not exist on this machine (allows a shared config to list paths that are
     only present on some developers' machines).
     """
-    result: list[agent.Mount] = []
+    result: list[Mount] = []
     for entry in config.mounts:
         parts = entry.split(":", 2)
         host = Path(parts[0]).expanduser()
@@ -545,7 +546,7 @@ def _construct_docker_mounts(config: DockerConfig) -> list[agent.Mount]:
         if not host.exists():
             logger.debug("Custom mount host path does not exist, skipping: %s", host)
             continue
-        result.append(agent.Mount(src=str(host), dst=container, mode=mode))
+        result.append(Mount(src=str(host), dst=container, mode=mode))
     return result
 
 
@@ -583,7 +584,7 @@ _SYMLINK_SKIP_DIRS: frozenset[str] = frozenset(
 )
 
 
-def _construct_symlink_mounts(scan_root: Path, existing_mounts: list[agent.Mount]) -> list[agent.Mount]:
+def _construct_symlink_mounts(scan_root: Path, existing_mounts: list[Mount]) -> list[Mount]:
     """Walk *scan_root* for symlinks; return Mounts for external targets.
 
     For each symlink whose fully-resolved target lives outside the already-mounted
@@ -618,7 +619,7 @@ def _construct_symlink_mounts(scan_root: Path, existing_mounts: list[agent.Mount
         logger.debug("follow_symlinks: walk error: %s", exc)
 
     seen: set[Path] = set()
-    mounts: list[agent.Mount] = []
+    mounts: list[Mount] = []
     bad_abs_internal: list[tuple[Path, str]] = []
     bad_rel_external: list[tuple[Path, str]] = []
 
@@ -662,7 +663,7 @@ def _construct_symlink_mounts(scan_root: Path, existing_mounts: list[agent.Mount
                 logger.debug("follow_symlinks: skipping parent-of-existing target %s", target)
                 continue
             seen.add(target)
-            mounts.append(agent.Mount(src=str(target), dst=str(target)))
+            mounts.append(Mount(src=str(target), dst=str(target), mode="rw"))
 
     if bad_abs_internal or bad_rel_external:
         lines = ["follow_symlinks: found symlinks that won't resolve inside the container:"]
@@ -692,7 +693,7 @@ def _construct_symlink_mounts(scan_root: Path, existing_mounts: list[agent.Mount
     return mounts
 
 
-def _git_worktree_mounts(repo: Path, name: str, container_root: str) -> list[agent.Mount]:
+def _git_worktree_mounts(repo: Path, name: str, container_root: str) -> list[Mount]:
     """Return the layered Mounts for one repo + worktree pair (pre-worktree portion).
 
     Produces the read-only repo root + targeted read-write .git sub-mounts that
@@ -705,24 +706,24 @@ def _git_worktree_mounts(repo: Path, name: str, container_root: str) -> list[age
     for the primary repo or ``/includes/<basename>`` for an included secondary repo.
     """
     git_dir = repo / ".git"
-    mounts: list[agent.Mount] = [
-        agent.Mount(src=str(repo), dst=container_root, mode="ro"),
-        agent.Mount(src=str(git_dir), dst=f"{container_root}/.git"),
-        agent.Mount(src=str(git_dir / "objects"), dst=f"{container_root}/.git/objects"),
+    mounts: list[Mount] = [
+        Mount(src=str(repo), dst=container_root, mode="ro"),
+        Mount(src=str(git_dir), dst=f"{container_root}/.git", mode="rw"),
+        Mount(src=str(git_dir / "objects"), dst=f"{container_root}/.git/objects", mode="rw"),
     ]
     # Mount the entire hatchery/ ref directory rw so git can create .lock sidecar
     # files alongside the branch ref during commits.
     hatchery_refs = git_dir / "refs" / "heads" / "hatchery"
     if hatchery_refs.exists():
-        mounts.append(agent.Mount(src=str(hatchery_refs), dst=f"{container_root}/.git/refs/heads/hatchery"))
+        mounts.append(Mount(src=str(hatchery_refs), dst=f"{container_root}/.git/refs/heads/hatchery", mode="rw"))
     logs_dir = git_dir / "logs"
     if logs_dir.exists():
-        mounts.append(agent.Mount(src=str(logs_dir), dst=f"{container_root}/.git/logs"))
+        mounts.append(Mount(src=str(logs_dir), dst=f"{container_root}/.git/logs", mode="rw"))
     # Only this task's worktree git metadata is writable; other worktrees' metadata
     # is protected by the ro parent mount (prevents `git worktree prune` damage).
     worktree_meta = git_dir / "worktrees" / name
     if worktree_meta.exists():
-        mounts.append(agent.Mount(src=str(worktree_meta), dst=f"{container_root}/.git/worktrees/{name}"))
+        mounts.append(Mount(src=str(worktree_meta), dst=f"{container_root}/.git/worktrees/{name}", mode="rw"))
     return mounts
 
 
@@ -735,7 +736,7 @@ def build_mounts(
     git_sentinel_files: list[tuple[Path, str]] | None = None,
     worktree_git_ptr: Path | None = None,
     include_entries: list[IncludeEntry] | None = None,
-) -> list[agent.Mount]:
+) -> list[Mount]:
     """Return the Mounts for a session's container.
 
     Branches on ``meta.no_worktree``:
@@ -757,10 +758,10 @@ def build_mounts(
         can corrupt git history. Fixing requires staging+copy-back, which
         kills real-time host visibility of commits.
     """
-    mounts: list[agent.Mount]
+    mounts: list[Mount]
     if meta.no_worktree:
         cwd = meta.worktree_path
-        mounts = [agent.Mount(src=str(meta.worktree), dst="/workspace")]
+        mounts = [Mount(src=str(meta.worktree), dst="/workspace", mode="rw")]
         mounts.extend(_default_home_mounts())
         mounts.extend(backend.construct_mounts(session_dir))
         mounts.extend(_construct_docker_mounts(config))
@@ -777,15 +778,15 @@ def build_mounts(
         # git writes these into .git/ root during normal commits; use per-task
         # sentinel files so .git/ root stays ro.
         for host_file, git_filename in git_sentinel_files or []:
-            mounts.append(agent.Mount(src=str(host_file), dst=f"{CONTAINER_REPO_ROOT}/.git/{git_filename}"))
+            mounts.append(Mount(src=str(host_file), dst=f"{CONTAINER_REPO_ROOT}/.git/{git_filename}", mode="rw"))
 
-        mounts.append(agent.Mount(src=str(meta.worktree), dst=container_worktree))
+        mounts.append(Mount(src=str(meta.worktree), dst=container_worktree, mode="rw"))
 
         # Shadow the worktree's .git pointer file with a container-path-aware
         # copy. Must come after the worktree:rw mount so Linux VFS lets the
         # file mount win.
         if worktree_git_ptr is not None:
-            mounts.append(agent.Mount(src=str(worktree_git_ptr), dst=f"{container_worktree}/.git"))
+            mounts.append(Mount(src=str(worktree_git_ptr), dst=f"{container_worktree}/.git", mode="rw"))
         mounts.extend(_default_home_mounts())
         mounts.extend(backend.construct_mounts(session_dir))
         mounts.extend(_construct_docker_mounts(config))
@@ -804,7 +805,7 @@ def _docker_mounts_includes(
     name: str,
     session_dir: Path,
     no_worktree: bool,
-) -> list[agent.Mount]:
+) -> list[Mount]:
     """Return Mounts for paths included via --include / --include-rw / --include-ro.
 
     Each path is mounted at /includes/<basename>/.  If two included paths share
@@ -821,7 +822,7 @@ def _docker_mounts_includes(
     In no-worktree mode all entries fall back to a simple mount using their
     access mode (worktree entries are treated as rw).
     """
-    mounts: list[agent.Mount] = []
+    mounts: list[Mount] = []
     used_basenames: set[str] = set()
 
     for entry in include_entries:
@@ -838,11 +839,11 @@ def _docker_mounts_includes(
                     # Layered mounts: root ro + targeted .git rw (same as primary repo)
                     mounts.extend(_git_worktree_mounts(path, name, container_path))
                     container_worktree = f"{container_path}/.hatchery/worktrees/{name}"
-                    mounts.append(agent.Mount(src=str(worktree), dst=container_worktree))
+                    mounts.append(Mount(src=str(worktree), dst=container_worktree, mode="rw"))
                     # Rewrite .git pointer to use container-relative path
                     git_ptr_file = session_dir / f"git_ptr_include_{basename}"
                     git_ptr_file.write_text(f"gitdir: {container_path}/.git/worktrees/{name}\n")
-                    mounts.append(agent.Mount(src=str(git_ptr_file), dst=f"{container_worktree}/.git"))
+                    mounts.append(Mount(src=str(git_ptr_file), dst=f"{container_worktree}/.git", mode="rw"))
                     continue
                 logger.warning(
                     "include worktree not found for %s (expected %s); "
@@ -851,24 +852,24 @@ def _docker_mounts_includes(
                     worktree,
                 )
             # Git repo without worktree, or plain dir in worktree mode → rw
-            mounts.append(agent.Mount(src=str(path), dst=container_path))
+            mounts.append(Mount(src=str(path), dst=container_path, mode="rw"))
         else:
             # reference mode (ro/rw), or no_worktree fallback
             access = entry.mode if entry.is_reference() else "rw"
-            mounts.append(agent.Mount(src=str(path), dst=container_path, mode=access))
+            mounts.append(Mount(src=str(path), dst=container_path, mode=access))
 
     return mounts
 
 
-def _default_home_mounts() -> list[agent.Mount]:
+def _default_home_mounts() -> list[Mount]:
     """Mounts applied to every container regardless of agent: .gitconfig and uv cache."""
-    mounts: list[agent.Mount] = []
+    mounts: list[Mount] = []
     gitconfig = Path.home() / ".gitconfig"
     if gitconfig.exists():
-        mounts.append(agent.Mount(src=str(gitconfig), dst=f"{agent.CONTAINER_HOME}/.gitconfig", mode="ro"))
+        mounts.append(Mount(src=str(gitconfig), dst=f"{agent.CONTAINER_HOME}/.gitconfig", mode="ro"))
     uv_cache = Path.home() / ".cache" / "uv"
     if uv_cache.exists():
-        mounts.append(agent.Mount(src=str(uv_cache), dst=f"{agent.CONTAINER_HOME}/.cache/uv"))
+        mounts.append(Mount(src=str(uv_cache), dst=f"{agent.CONTAINER_HOME}/.cache/uv", mode="rw"))
     return mounts
 
 
@@ -882,7 +883,7 @@ def clipboard_image_dir(session_dir: Path) -> Path:
     return session_dir / "clipboard"
 
 
-def _clipboard_image_mount(session_dir: Path) -> agent.Mount:
+def _clipboard_image_mount(session_dir: Path) -> Mount:
     """Return the Mount for the per-task clipboard images directory.
 
     Mounts at the identical host path inside the container so the file path
@@ -890,7 +891,7 @@ def _clipboard_image_mount(session_dir: Path) -> agent.Mount:
     """
     d = clipboard_image_dir(session_dir)
     d.mkdir(parents=True, exist_ok=True)
-    return agent.Mount(src=str(d), dst=str(d))
+    return Mount(src=str(d), dst=str(d), mode="rw")
 
 
 def remove_clipboard_dir(session_dir: Path) -> None:
@@ -1017,7 +1018,7 @@ def _userns_flags(runtime: Runtime) -> list[str]:
 
 def _run_container(
     image: str,
-    mounts: list[agent.Mount],
+    mounts: list[Mount],
     workdir: str,
     hatchery_repo: str,
     name: str,
@@ -1060,7 +1061,7 @@ def _run_container(
     if _command_override is None or _interactive:
         cmd += ["-it"]
     for m in mounts:
-        cmd += agent.mount_to_docker_args(m)
+        cmd += mount_to_docker_args(m)
 
     if mutator is not None and proxy_port is not None:
         for key, val in backend.container_env(proxy_token, proxy_port).items():
@@ -1299,7 +1300,7 @@ def launch_sandbox_shell(
     Caller resolves *image_name* — typically ``sessions.image_name(repo, "sandbox")``.
     """
     build_docker_image(repo, repo, image_name, backend, runtime=runtime, no_cache=no_cache)
-    mounts: list[agent.Mount] = [agent.Mount(src=str(repo), dst=CONTAINER_REPO_ROOT)]
+    mounts: list[Mount] = [Mount(src=str(repo), dst=CONTAINER_REPO_ROOT, mode="rw")]
     mounts.extend(_default_home_mounts())
     mounts.extend(_construct_docker_mounts(config))
 

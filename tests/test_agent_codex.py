@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 import seekr_hatchery.agents as agent
+import seekr_hatchery.mount as mount
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -299,8 +300,8 @@ class TestConstructMounts:
         fake_auth = session_dir / "codex_auth.json"
         fake_auth.write_text("{}")
         assert agent.CODEX.construct_mounts(session_dir) == [
-            agent.Mount(src=str(home / ".codex"), dst=f"{agent.CONTAINER_HOME}/.codex"),
-            agent.Mount(src=str(fake_auth), dst=f"{agent.CONTAINER_HOME}/.codex/auth.json"),
+            mount.Mount(src=str(home / ".codex"), dst=f"{agent.CONTAINER_HOME}/.codex", mode="rw"),
+            mount.Mount(src=str(fake_auth), dst=f"{agent.CONTAINER_HOME}/.codex/auth.json", mode="rw"),
         ]
 
     def test_raises_if_fake_auth_missing(self, tmp_path):
