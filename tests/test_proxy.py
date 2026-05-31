@@ -59,8 +59,11 @@ class _MockPoolResp:
             self.headers = _Headers(_h)
         self._body = body
 
-    def read(self, n: int) -> bytes:
-        chunk, self._body = self._body[:n], self._body[n:]
+    def read(self, n: int | None = None) -> bytes:
+        if n is None:
+            chunk, self._body = self._body, b""
+        else:
+            chunk, self._body = self._body[:n], self._body[n:]
         return chunk
 
     def drain_conn(self) -> None:
@@ -95,8 +98,11 @@ class _MockHTTPSResp:
     def getheaders(self) -> list[tuple[str, str]]:
         return [("content-type", "application/json"), ("content-length", str(len(self._data)))]
 
-    def read(self, n: int) -> bytes:
-        chunk, self._data = self._data[:n], self._data[n:]
+    def read(self, n: int | None = None) -> bytes:
+        if n is None:
+            chunk, self._data = self._data, b""
+        else:
+            chunk, self._data = self._data[:n], self._data[n:]
         return chunk
 
 

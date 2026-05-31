@@ -94,13 +94,21 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
         Accepts either ``x-api-key: <token>`` (Anthropic style) or
         ``Authorization: Bearer <token>`` (OpenAI style).
         """
+        logger.debug(
+            "proxy: validating token. self.headers: %s",
+            {k: v for k, v in self.headers.items() if k.lower() != "authorization"},
+        )
+        logger.debug("proxy: expected proxy_token: %r", self.proxy_token)
         # x-api-key style
         if self.headers.get("x-api-key", "") == self.proxy_token:
+            logger.debug("proxy: token matched via x-api-key")
             return True
         # Authorization: Bearer <token> style
         auth = self.headers.get("authorization", "")
         if auth.startswith("Bearer ") and auth[len("Bearer ") :] == self.proxy_token:
+            logger.debug("proxy: token matched via Authorization Bearer")
             return True
+        logger.debug("proxy: token validation failed. Received auth header style: %r", auth[:20] if auth else None)
         return False
 
     # Headers that are normally hop-by-hop but are REQUIRED for a WebSocket
@@ -148,6 +156,8 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
         # relay sets this implicitly by returning after the relay completes.
         self.close_connection = True
 
+        logger.debug("proxy: handling request: %s %s", self.command, self.path)
+
         # ── 0. Validate proxy token ───────────────────────────────────────────
         # Reject requests whose token doesn't match the stable per-task proxy
         # token.  This prevents other containers (which share the host gateway
@@ -161,11 +171,20 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
         # the backend mutator.
         pre_auth_headers: dict[str, str] = {k: v for k, v in self.headers.items() if k.lower() not in _HOP_BY_HOP}
 
+        # Resolve target host dynamically based on the client's Host header,
+        # unless it is a local address.
+        target_host = self.target_host
+        client_host = self.headers.get("Host") or self.headers.get("host")
+        if client_host:
+            clean_host = client_host.split(":")[0]
+            if clean_host not in ("localhost", "127.0.0.1", "host.docker.internal"):
+                target_host = clean_host
+
         # Backend owns all auth header logic.
         out_headers = self.header_mutator(pre_auth_headers)
 
         # Always set host (routing concern owned by proxy).
-        out_headers["host"] = self.target_host
+        out_headers["host"] = target_host
 
         # Preserve Connection/Upgrade on the outbound leg for WebSocket
         # handshakes so the upstream actually performs the upgrade.
@@ -181,12 +200,12 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
         # WebSocket upgrades need raw socket access for bidirectional relay;
         # urllib3 does not support 101, so keep http.client for that path only.
         if self.headers.get("upgrade", "").lower() == "websocket":
-            conn = http.client.HTTPSConnection(self.target_host, timeout=60)
+            conn = http.client.HTTPSConnection(target_host, timeout=60)
             try:
                 conn.request(self.command, self.path_prefix + self.path, body=body, headers=out_headers)
                 resp = conn.getresponse()
                 if resp.status == 101:
-                    logger.debug("proxy: WebSocket upgrade to %s, starting relay", self.target_host)
+                    logger.debug("proxy: WebSocket upgrade to %s, starting relay", target_host)
                     self.send_response(101)
                     for key, value in resp.getheaders():
                         if key.lower() in _HOP_BY_HOP and key.lower() not in self._WS_KEEP:
@@ -221,7 +240,14 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
             return
 
         # Normal request — use the shared connection pool.
-        url = f"https://{self.target_host}{self.path_prefix}{self.path}"
+        url = f"https://{target_host}{self.path_prefix}{self.path}"
+        if "GenerateContent" in self.path:
+            logger.debug("proxy: GenerateContent request body: %s", body.decode('utf-8', errors='ignore') if body else None)
+        logger.debug(
+            "proxy: forwarding normal request to %s with headers %s",
+            url,
+            {k: v for k, v in out_headers.items() if k.lower() != "authorization"},
+        )
         try:
             resp = self.pool.urlopen(
                 self.command,
@@ -233,6 +259,7 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
                 redirect=False,
                 timeout=_UPSTREAM_TIMEOUT,
             )
+            logger.debug("proxy: upstream returned status %d for %s", resp.status, url)
         except Exception as exc:
             logger.debug("proxy: upstream error: %s", exc)
             try:
@@ -248,7 +275,7 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 pass
             refreshed_headers = self.header_mutator(pre_auth_headers, refresh=True)
-            refreshed_headers["host"] = self.target_host
+            refreshed_headers["host"] = target_host
             try:
                 resp = self.pool.urlopen(
                     self.command,
@@ -266,7 +293,17 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
                     self._send_simple(502, f"Bad Gateway: {exc}")
                 except Exception:
                     pass
-                return
+        if resp.status >= 400:
+            err_body = resp.read()
+            logger.debug("proxy: upstream returned error status %d body: %s", resp.status, err_body.decode('utf-8', errors='ignore'))
+            self.send_response(resp.status)
+            for key, value in resp.headers.items():
+                if key.lower() in _HOP_BY_HOP:
+                    continue
+                self.send_header(_sanitize_header(key), _sanitize_header(value))
+            self.end_headers()
+            self.wfile.write(err_body)
+            return
 
         # Forward status + headers (strip hop-by-hop).
         self.send_response(resp.status)

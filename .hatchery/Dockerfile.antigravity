@@ -22,7 +22,15 @@ ENV HOME=/home/hatchery
 ENV PATH="/home/hatchery/.npm-global/bin:/home/hatchery/.local/bin:$PATH"
 
 # ── Agent install ─────────────────────────────────────────────────────────────
-
+# ── Google Antigravity CLI ────────────────────────────────────────────────────
+COPY agy /home/hatchery/.local/bin/agy
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends socat libcap2-bin && rm -rf /var/lib/apt/lists/*
+RUN setcap 'cap_net_bind_service=+ep' $(readlink -f /usr/bin/socat)
+RUN chmod +x /home/hatchery/.local/bin/agy \
+    && mkdir -p /home/hatchery/.gemini/antigravity-cli \
+    && chown -R hatchery:hatchery /home/hatchery/.gemini
+USER hatchery
 
 # =============================================================================
 # Optional extras — uncomment what you need

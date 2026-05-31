@@ -24,6 +24,7 @@ class AgentBackend(ABC):
     kind: str  # serialisation key stored in task metadata (e.g. "CODEX")
     binary: str  # executable name on $PATH
     supports_sessions: bool
+    needs_tls_proxy: bool = False
 
     # ── Command construction ───────────────────────────────────────────────────
 
@@ -124,6 +125,14 @@ class AgentBackend(ABC):
     @abstractmethod
     def container_env(proxy_token: str, proxy_port: int) -> dict[str, str]:
         """Return environment variables to inject into the container."""
+
+    @staticmethod
+    def extra_hosts(proxy_port: int) -> dict[str, str]:
+        """Return extra hosts to inject via --add-host.
+
+        Only used for agents that need custom DNS redirection (like Antigravity).
+        """
+        return {}
 
     # ── Lifecycle hooks ───────────────────────────────────────────────────────
     #
