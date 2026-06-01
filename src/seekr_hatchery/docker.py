@@ -220,6 +220,7 @@ def _maybe_api_server(
     mutator: Callable[[dict[str, str]], dict[str, str]] | None,
     proxy_token: str | None,
     backend: agent.AgentBackend,
+    session_dir: Path | None = None,
 ) -> Generator[proxy.APIServer | None, None, None]:
     """Conditionally start the API proxy and yield the server handle (or ``None``).
 
@@ -228,15 +229,31 @@ def _maybe_api_server(
     sessions which don't run an agent), no proxy is started and ``None`` is
     yielded so call sites can use this unconditionally with a uniform pattern::
 
-        with _maybe_api_server(mutator, token, backend) as api_proxy, \\
+        with _maybe_api_server(mutator, token, backend) as api_proxy, \
              _kubectl_context(config, session_dir) as kubectl_mounts:
             _run_container(..., proxy_port=api_proxy.port if api_proxy else None)
     """
     if mutator is None:
         yield None
         return
-    with proxy.api_server(mutator, proxy_token or "", **backend.proxy_kwargs()) as server:
-        yield server
+    if getattr(backend, "needs_tls_proxy", False):
+        import seekr_hatchery.tls_proxy as tls_proxy
+
+        if session_dir is None:
+            raise RuntimeError("session_dir is required for TLS proxy")
+        cert_file = session_dir / "agy_leaf.crt"
+        key_file = session_dir / "agy_leaf.key"
+        with tls_proxy.tls_api_server(
+            mutator,
+            proxy_token or "",
+            cert_file,
+            key_file,
+            **backend.proxy_kwargs(),
+        ) as server:
+            yield server
+    else:
+        with proxy.api_server(mutator, proxy_token or "", **backend.proxy_kwargs()) as server:
+            yield server
 
 
 @contextmanager
@@ -787,6 +804,21 @@ def build_mounts(
         # file mount win.
         if worktree_git_ptr is not None:
             mounts.append(Mount(src=str(worktree_git_ptr), dst=f"{container_worktree}/.git", mode="rw"))
+
+        # Shadow the main repo's worktree gitdir pointer with a container-path-aware copy
+        # to ensure compatibility with newer git versions (2.45+).
+        host_worktree_meta = meta.repo_path / ".git" / "worktrees" / meta.name
+        if host_worktree_meta.exists():
+            container_gitdir_ptr = session_dir / "gitdir_ptr"
+            container_gitdir_ptr.write_text(f"{container_worktree}/.git\n")
+            mounts.append(
+                Mount(
+                    src=str(container_gitdir_ptr),
+                    dst=f"{CONTAINER_REPO_ROOT}/.git/worktrees/{meta.name}/gitdir",
+                    mode="rw",
+                )
+            )
+
         mounts.extend(_default_home_mounts())
         mounts.extend(backend.construct_mounts(session_dir))
         mounts.extend(_construct_docker_mounts(config))
@@ -981,6 +1013,24 @@ def build_docker_image(
     # entire repo (or .hatchery/worktrees/) which can hang indefinitely on
     # large repositories.
     with tempfile.TemporaryDirectory(prefix="hatchery-build-") as empty_context:
+        if backend.kind == "ANTIGRAVITY":
+            # Copy the host's agy binary into the build context so the Dockerfile can COPY it.
+            # This completely avoids all host-mount and permission compatibility issues.
+            import shutil
+
+            agy_path_str = shutil.which("agy")
+            if agy_path_str:
+                agy_path = Path(agy_path_str)
+            else:
+                agy_path = Path.home() / ".local" / "bin" / "agy"
+
+            if not agy_path.exists():
+                raise RuntimeError(
+                    f"antigravity CLI binary ('agy') not found on host. Searched in PATH and at {agy_path}."
+                )
+
+            shutil.copy2(agy_path, Path(empty_context) / "agy")
+
         build_cmd = [runtime.binary, "build", "-f", str(worktree_dockerfile), "-t", image]
         if no_cache:
             build_cmd.append("--no-cache")
@@ -1059,7 +1109,10 @@ def _run_container(
     # zombies from tool shell-outs and tool calls eventually hang.
     cmd = [runtime.binary, "run", "--rm", "--init"]
     if _command_override is None or _interactive:
-        cmd += ["-it"]
+        if sys.stdin.isatty():
+            cmd += ["-it"]
+        else:
+            cmd += ["-i"]
     for m in mounts:
         cmd += mount_to_docker_args(m)
 
@@ -1072,6 +1125,13 @@ def _run_container(
     # host-side proxy (API proxy and/or kubectl RBAC proxy).
     if (proxy_port is not None or add_host_gateway) and sys.platform == "linux":
         cmd += ["--add-host=host.docker.internal:host-gateway"]
+
+    extra_hosts = backend.extra_hosts(proxy_port) if proxy_port is not None else {}
+    for host_name, target in extra_hosts.items():
+        if sys.platform == "linux" and target == "host.docker.internal":
+            cmd += [f"--add-host={host_name}:host-gateway"]
+        else:
+            cmd += [f"--add-host={host_name}:{target}"]
 
     cmd += ["-e", f"HATCHERY_TASK={name}"]
     cmd += ["-e", f"HATCHERY_REPO={hatchery_repo}"]
@@ -1257,7 +1317,7 @@ def run_session(
     mode_label = "no-worktree mode" if meta.no_worktree else "worktree mode"
     logger.debug(f"Launching {runtime.binary} container for session '{meta.name}' ({mode_label})")
     with (
-        _maybe_api_server(mutator, proxy_token, backend) as api_proxy,
+        _maybe_api_server(mutator, proxy_token, backend, session_dir) as api_proxy,
         _kubectl_context(config, session_dir, kubectl_proxy_token or "") as kubectl_mounts,
     ):
         mounts.extend(kubectl_mounts)
@@ -1346,6 +1406,125 @@ def exec_task_shell(container_name: str, runtime: Runtime, shell: str = "/bin/ba
     subprocess.run([runtime.binary, "exec", "-it", container_name, shell])
 
 
+def self_heal_wsl_docker(repo: Path) -> None:
+    """Ensure Docker socket and mount translation are fully active and healthy under WSL."""
+    wsl_exe = Path("/mnt/c/Windows/System32/wsl.exe")
+    if not wsl_exe.exists():
+        return
+
+    logger.debug("WSL environment detected. Running Docker self-healing routine...")
+
+    try:
+        import time
+
+        # Wait for Moby raw socket to be populated by the host integration daemon on boot
+        raw_socket = Path("/mnt/wsl/docker-desktop/shared-sockets/guest-services/docker.sock")
+        for i in range(10):
+            if raw_socket.exists():
+                break
+            logger.debug("Waiting for Docker Desktop integration socket to populate...")
+            time.sleep(1)
+
+        # 1. Fix /var/run/docker.sock link and permissions.
+        subprocess.run(
+            [
+                str(wsl_exe),
+                "-d",
+                "Ubuntu",
+                "-u",
+                "root",
+                "sh",
+                "-c",
+                "rm -f /var/run/docker.sock && ln -s /mnt/wsl/docker-desktop/shared-sockets/guest-services/docker.sock /var/run/docker.sock && chmod 666 /mnt/wsl/docker-desktop/shared-sockets/guest-services/docker.sock",
+            ],
+            capture_output=True,
+            check=True,
+        )
+
+        # 2. Trigger mount registration inside Moby VM by running a dummy container.
+        subprocess.run(
+            [
+                "docker",
+                "-H",
+                "unix:///mnt/wsl/docker-desktop/shared-sockets/guest-services/docker.sock",
+                "run",
+                "--rm",
+                "-v",
+                f"{repo}:/test-trigger",
+                "alpine",
+                "ls",
+                "/test-trigger",
+            ],
+            capture_output=True,
+            check=False,
+        )
+
+        # 3. Find active Ubuntu bind mount GUID.
+        bind_mounts_dir = Path("/mnt/wsl/docker-desktop-bind-mounts/Ubuntu")
+        guid = None
+        if bind_mounts_dir.exists():
+            entries = [p.name for p in bind_mounts_dir.iterdir() if p.is_dir()]
+            if entries:
+                guid = entries[0]
+
+        if not guid:
+            # Fallback to the stable static GUID for this Ubuntu distro instance
+            guid = "f525dea9c35cdbd8225d2221946425bd125ce1dfc356a46d56148f4dc2163db1"
+            logger.debug(f"Using default fallback WSL bind mount GUID: {guid}")
+        else:
+            logger.debug(f"Resolved WSL bind mount GUID: {guid}")
+
+        # 4. Manually mount the Ubuntu disk inside docker-desktop VM if not already mounted.
+        subprocess.run(
+            [
+                str(wsl_exe),
+                "-d",
+                "docker-desktop",
+                "-u",
+                "root",
+                "sh",
+                "-c",
+                f"mkdir -p /mnt/host/wsl/docker-desktop-bind-mounts/Ubuntu/{guid} && mount /dev/sdd /mnt/host/wsl/docker-desktop-bind-mounts/Ubuntu/{guid}",
+            ],
+            capture_output=True,
+            check=False,
+        )
+
+        # 5. Find dockerd PID in VM.
+        pid_res = subprocess.run(
+            [str(wsl_exe), "-d", "docker-desktop", "-u", "root", "pgrep", "dockerd"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        pid = pid_res.stdout.strip().split("\n")[0]
+        if not pid:
+            logger.warning("dockerd process not found in docker-desktop VM.")
+            return
+
+        # 6. Symlink repository path inside dockerd process namespace.
+        subprocess.run(
+            [
+                str(wsl_exe),
+                "-d",
+                "docker-desktop",
+                "-u",
+                "root",
+                "sh",
+                "-c",
+                f"nsenter -t {pid} -m -u -i -n -p rm -rf '{repo}' && "
+                f"nsenter -t {pid} -m -u -i -n -p mkdir -p '{repo.parent}' && "
+                f"nsenter -t {pid} -m -u -i -n -p ln -s '/run/desktop/mnt/host/wsl/docker-desktop-bind-mounts/Ubuntu/{guid}{repo}' '{repo}'",
+            ],
+            capture_output=True,
+            check=True,
+        )
+        logger.info("WSL Docker socket and mount translation successfully self-healed!")
+
+    except Exception as e:
+        logger.warning(f"WSL Docker self-healing failed: {e}")
+
+
 def resolve_runtime(
     repo: Path, worktree: Path, no_docker: bool, backend: agent.AgentBackend = agent.CODEX
 ) -> Runtime | None:
@@ -1361,6 +1540,7 @@ def resolve_runtime(
     if no_docker:
         logger.debug("--no-docker set, running natively")
         return None
+    self_heal_wsl_docker(repo)
     agent_df = dockerfile_path(worktree, backend)
     if not agent_df.exists():
         ui.error(

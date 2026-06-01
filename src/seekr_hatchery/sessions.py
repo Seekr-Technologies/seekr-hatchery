@@ -240,7 +240,7 @@ def task_db_path(repo: Path, name: str) -> Path:
 
 def task_session_dir(repo: Path, name: str) -> Path:
     """Session state lives in the same unified task directory."""
-    return _task_dir(repo, name)
+    return repo / ".hatchery" / "sessions" / name
 
 
 def worktrees_dir(repo: Path) -> Path:

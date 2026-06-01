@@ -68,7 +68,7 @@ def create_worktree(repo: Path, branch: str, worktree: Path, base: str) -> None:
     try:
         run(["git", "worktree", "add", "-B", branch, str(worktree), base], cwd=repo)
     except subprocess.CalledProcessError as e:
-        if "invalid reference" in e.stderr:
+        if "invalid reference" in e.stderr or "Not a valid object name" in e.stderr:
             ui.error(f"base ref {base!r} does not exist in {repo}. Use --from <branch> to specify a valid ref.")
             sys.exit(1)
         raise

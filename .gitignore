@@ -29,3 +29,5 @@ Thumbs.db
 
 # Hatchery runtime (worktrees and local state)
 .hatchery/worktrees/
+.hatchery/sessions/
+.hatchery/bin/

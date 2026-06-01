@@ -12,22 +12,27 @@ the appropriate singleton.
 """
 
 from seekr_hatchery.agents.agent_backend import CONTAINER_HOME, AgentBackend
+from seekr_hatchery.agents.antigravity import AntigravityBackend
 from seekr_hatchery.agents.codex import CodexBackend
 
 __all__ = [
     "AgentBackend",
     "CONTAINER_HOME",
     "CodexBackend",
+    "AntigravityBackend",
     "CODEX",
+    "ANTIGRAVITY",
     "from_kind",
 ]
 
 # ── Module-level singletons ────────────────────────────────────────────────────
 
 CODEX: AgentBackend = CodexBackend()
+ANTIGRAVITY: AgentBackend = AntigravityBackend()
 
 ALL_BACKENDS = [
     CODEX,
+    ANTIGRAVITY,
 ]
 
 _REGISTRY: dict[str, AgentBackend] = {b.kind: b for b in ALL_BACKENDS}

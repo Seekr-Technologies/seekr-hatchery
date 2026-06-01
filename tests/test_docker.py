@@ -425,6 +425,7 @@ class TestRunContainerInteractive:
             return subprocess.CompletedProcess(cmd, 0)
 
         monkeypatch.setattr(docker.subprocess, "run", _mock_run)
+        monkeypatch.setattr(docker.sys.stdin, "isatty", lambda: True)
         docker._run_container(
             image="test-image",
             mounts=[],
