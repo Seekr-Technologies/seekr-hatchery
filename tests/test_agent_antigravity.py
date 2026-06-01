@@ -52,7 +52,7 @@ class TestBuildNewCommand:
         # not log "unexpected end of JSON input" on startup.
         cmd = agent.ANTIGRAVITY.build_new_command("sid", "sys", "initial", docker=True)
         assert "mcp_config.json" in cmd[2]
-        assert 'mcpServers' in cmd[2]
+        assert "mcpServers" in cmd[2]
 
 
 # ---------------------------------------------------------------------------

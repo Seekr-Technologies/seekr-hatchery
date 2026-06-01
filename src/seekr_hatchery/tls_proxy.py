@@ -89,7 +89,7 @@ def generate_leaf_cert(hostname: str, ca_cert_pem: bytes, ca_key_pem: bytes) -> 
     now = datetime.datetime.now(datetime.timezone.utc)
 
     dns_names = [x509.DNSName(hostname)]
-    if hostname.endswith("googleapis.com"):
+    if hostname == "googleapis.com" or hostname.endswith(".googleapis.com"):
         if "*.googleapis.com" not in hostname:
             dns_names.append(x509.DNSName("*.googleapis.com"))
         if hostname != "googleapis.com":

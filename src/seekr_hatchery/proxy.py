@@ -193,8 +193,36 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
             out_headers["Upgrade"] = "websocket"
 
         # ── 2. Read request body ──────────────────────────────────────────────
-        content_length = int(self.headers.get("content-length", 0) or 0)
-        body = self.rfile.read(content_length) if content_length else None
+        transfer_encoding = (
+            self.headers.get("transfer-encoding", "").lower() or self.headers.get("Transfer-Encoding", "").lower()
+        )
+        if "chunked" in transfer_encoding:
+            body_parts = []
+            while True:
+                line = self.rfile.readline()
+                if not line:
+                    break
+                chunk_size_str = line.split(b";")[0].strip()
+                if not chunk_size_str:
+                    break
+                try:
+                    chunk_size = int(chunk_size_str, 16)
+                except ValueError:
+                    break
+                if chunk_size == 0:
+                    self.rfile.readline()  # consume trailing \r\n
+                    break
+                data = self.rfile.read(chunk_size)
+                body_parts.append(data)
+                self.rfile.readline()  # consume trailing \r\n
+            body = b"".join(body_parts)
+            for k in list(out_headers.keys()):
+                if k.lower() in ("content-length", "transfer-encoding"):
+                    out_headers.pop(k)
+            out_headers["Content-Length"] = str(len(body))
+        else:
+            content_length = int(self.headers.get("content-length", 0) or 0)
+            body = self.rfile.read(content_length) if content_length else None
 
         # ── 3. Forward to target host ─────────────────────────────────────────
         # WebSocket upgrades need raw socket access for bidirectional relay;
@@ -242,7 +270,9 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
         # Normal request — use the shared connection pool.
         url = f"https://{target_host}{self.path_prefix}{self.path}"
         if "GenerateContent" in self.path:
-            logger.debug("proxy: GenerateContent request body: %s", body.decode('utf-8', errors='ignore') if body else None)
+            logger.debug(
+                "proxy: GenerateContent request body: %s", body.decode("utf-8", errors="ignore") if body else None
+            )
         logger.debug(
             "proxy: forwarding normal request to %s with headers %s",
             url,
@@ -295,7 +325,11 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
                     pass
         if resp.status >= 400:
             err_body = resp.read()
-            logger.debug("proxy: upstream returned error status %d body: %s", resp.status, err_body.decode('utf-8', errors='ignore'))
+            logger.debug(
+                "proxy: upstream returned error status %d body: %s",
+                resp.status,
+                err_body.decode("utf-8", errors="ignore"),
+            )
             self.send_response(resp.status)
             for key, value in resp.headers.items():
                 if key.lower() in _HOP_BY_HOP:
