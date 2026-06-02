@@ -53,3 +53,12 @@ class TestMountToDockerArgs:
         m = mount.Mount(src=None, dst="/cont/x", mode="rw")
         with pytest.raises(ValueError, match="bind Mount requires src"):
             mount.mount_to_docker_args(m)
+
+    def test_named_volume(self):
+        m = mount.Mount(src="hatchery-uv-cache", dst="/home/hatchery/.cache/uv", mode="rw", volume=True)
+        assert mount.mount_to_docker_args(m) == ["-v", "hatchery-uv-cache:/home/hatchery/.cache/uv:rw"]
+
+    def test_named_volume_without_dst_raises(self):
+        m = mount.Mount(src="hatchery-x", dst=None, mode="rw", volume=True)
+        with pytest.raises(ValueError, match="volume Mount requires dst"):
+            mount.mount_to_docker_args(m)
