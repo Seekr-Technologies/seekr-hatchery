@@ -135,12 +135,45 @@ _VALID_CAPS: frozenset[str] = frozenset(
 )
 
 
+class CacheVolume(BaseModel):
+    """A persistent named docker/podman volume mounted into every sandbox.
+
+    Lives in the container engine's storage (not on the host filesystem), so
+    it avoids virtiofs traffic and survives across ``--rm`` containers.
+    The actual volume name on the host runtime is ``hatchery-<name>``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    path: str
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, v: str) -> str:
+        if not v:
+            raise ValueError("volume name must not be empty")
+        # docker/podman volume names allow [a-zA-Z0-9][a-zA-Z0-9_.-]*; we
+        # reject ':' and '/' explicitly because they'd corrupt the -v
+        # syntax or get mistaken for a bind-mount source.
+        if ":" in v or "/" in v:
+            raise ValueError(f"volume name {v!r} must not contain ':' or '/'")
+        return v
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, v: str) -> str:
+        if not v.startswith("/"):
+            raise ValueError(f"volume path {v!r} must be an absolute container path")
+        return v
+
+
 class DockerConfig(BaseModel):
     """Schema for .hatchery/docker.yaml."""
 
     model_config = ConfigDict(extra="forbid")
     schema_version: Literal["1"] = "1"
     mounts: list[str] = []
+    volumes: list[CacheVolume] = []
     include: list[str | IncludeItem] = []
     dind: bool = False
     follow_symlinks: bool = False
@@ -162,6 +195,15 @@ class DockerConfig(BaseModel):
                 raise ValueError(f"cap_add[{i}]: unknown capability {entry!r}")
             result.append(cap)
         return result
+
+    @field_validator("volumes", mode="before")
+    @classmethod
+    def validate_volumes(cls, v: list | None) -> list:
+        # YAML parses an empty `volumes:` section (e.g. all-commented entries
+        # in the template) as None — coerce to [] to match `mounts` semantics.
+        if v is None:
+            return []
+        return v
 
     @field_validator("mounts", mode="before")
     @classmethod
@@ -550,6 +592,24 @@ def _construct_docker_mounts(config: DockerConfig) -> list[Mount]:
     return result
 
 
+# Prefix applied to user-declared volume names when forming the actual
+# docker/podman volume name. Mirrors the namespacing already used elsewhere
+# (e.g. hatchery/<task> branch refs) and keeps these volumes visually distinct
+# from any unrelated volumes the user may have on the host runtime.
+_VOLUME_NAME_PREFIX = "hatchery-"
+
+
+def _construct_volume_mounts(config: DockerConfig) -> list[Mount]:
+    """Resolve declared cache volumes into named-volume Mount objects.
+
+    Each entry produces a Mount with ``volume=True`` so the runtime treats
+    *src* as a named docker/podman volume rather than a host path. The
+    actual volume is named ``hatchery-<name>``; ``_ensure_volumes`` creates
+    it on the runtime before the container starts.
+    """
+    return [Mount(src=f"{_VOLUME_NAME_PREFIX}{v.name}", dst=v.path, mode="rw", volume=True) for v in config.volumes]
+
+
 # Host directories whose contents are provided by the container image or kernel.
 # Mounting host equivalents over them would shadow critical binaries/libraries
 # or replace special filesystems (/proc, /sys, /dev). /tmp, /var, /home, /opt
@@ -765,6 +825,7 @@ def build_mounts(
         mounts.extend(_default_home_mounts())
         mounts.extend(backend.construct_mounts(session_dir))
         mounts.extend(_construct_docker_mounts(config))
+        mounts.extend(_construct_volume_mounts(config))
         if config.clipboard_images:
             mounts.append(_clipboard_image_mount(session_dir))
         if config.follow_symlinks:
@@ -790,6 +851,7 @@ def build_mounts(
         mounts.extend(_default_home_mounts())
         mounts.extend(backend.construct_mounts(session_dir))
         mounts.extend(_construct_docker_mounts(config))
+        mounts.extend(_construct_volume_mounts(config))
         if config.clipboard_images:
             mounts.append(_clipboard_image_mount(session_dir))
         if config.follow_symlinks:
@@ -862,14 +924,11 @@ def _docker_mounts_includes(
 
 
 def _default_home_mounts() -> list[Mount]:
-    """Mounts applied to every container regardless of agent: .gitconfig and uv cache."""
+    """Mounts applied to every container regardless of agent: .gitconfig."""
     mounts: list[Mount] = []
     gitconfig = Path.home() / ".gitconfig"
     if gitconfig.exists():
         mounts.append(Mount(src=str(gitconfig), dst=f"{agent.CONTAINER_HOME}/.gitconfig", mode="ro"))
-    uv_cache = Path.home() / ".cache" / "uv"
-    if uv_cache.exists():
-        mounts.append(Mount(src=str(uv_cache), dst=f"{agent.CONTAINER_HOME}/.cache/uv", mode="rw"))
     return mounts
 
 
@@ -1005,6 +1064,27 @@ def build_docker_image(
             ui.success("  Image built.")
 
 
+def _ensure_volumes(runtime: Runtime, mounts: list[Mount]) -> None:
+    """Create any named volumes referenced by *mounts* if they don't exist.
+
+    Both Docker and Podman auto-create missing volumes when ``run -v
+    name:/path`` is invoked, but doing it explicitly here surfaces creation
+    in the debug logs and lets future tooling (e.g. ``hatchery volume
+    prune``) recognise volumes hatchery owns.  ``volume inspect`` returns
+    non-zero when the volume is missing, which is the cheapest cross-runtime
+    existence check.
+    """
+    seen: set[str] = set()
+    for m in mounts:
+        if not m.volume or not isinstance(m.src, str) or m.src in seen:
+            continue
+        seen.add(m.src)
+        if run([runtime.binary, "volume", "inspect", m.src], check=False).returncode == 0:
+            continue
+        logger.debug("creating %s volume: %s", runtime.binary, m.src)
+        run([runtime.binary, "volume", "create", m.src])
+
+
 def _userns_flags(runtime: Runtime) -> list[str]:
     """Return ``--userns=keep-id`` for Podman on Linux; empty list otherwise.
 
@@ -1057,6 +1137,7 @@ def _run_container(
     # podman) as PID 1 so SIGCHLD is handled and zombie children of the agent
     # process get reaped. Without it, long-running containers accumulate
     # zombies from tool shell-outs and tool calls eventually hang.
+    _ensure_volumes(runtime, mounts)
     cmd = [runtime.binary, "run", "--rm", "--init"]
     if _command_override is None or _interactive:
         cmd += ["-it"]
@@ -1303,6 +1384,7 @@ def launch_sandbox_shell(
     mounts: list[Mount] = [Mount(src=str(repo), dst=CONTAINER_REPO_ROOT, mode="rw")]
     mounts.extend(_default_home_mounts())
     mounts.extend(_construct_docker_mounts(config))
+    mounts.extend(_construct_volume_mounts(config))
 
     # Use a short-lived session dir under ~/.hatchery/ for the kubeconfig mount.
     # tempfile.TemporaryDirectory() is not reliable on macOS because Python

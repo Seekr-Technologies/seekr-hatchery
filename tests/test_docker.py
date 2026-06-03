@@ -864,6 +864,151 @@ class TestDockerConfigInclude:
             docker.DockerConfig(unknown_field="oops")
 
 
+# ---------------------------------------------------------------------------
+# DockerConfig.volumes field
+# ---------------------------------------------------------------------------
+
+
+class TestDockerConfigVolumes:
+    def test_parses_volume_entry(self):
+        config = docker.DockerConfig(volumes=[{"name": "uv-cache", "path": "/home/hatchery/.cache/uv"}])
+        assert config.volumes == [docker.CacheVolume(name="uv-cache", path="/home/hatchery/.cache/uv")]
+
+    def test_name_with_colon_is_invalid(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            docker.DockerConfig(volumes=[{"name": "bad:name", "path": "/cache"}])
+
+    def test_name_with_slash_is_invalid(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            docker.DockerConfig(volumes=[{"name": "bad/name", "path": "/cache"}])
+
+    def test_relative_path_is_invalid(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            docker.DockerConfig(volumes=[{"name": "uv-cache", "path": "relative/cache"}])
+
+    def test_none_coerced_to_empty(self):
+        # `volumes:` in YAML with all-commented entries parses to None;
+        # match the `mounts:` behavior and treat that as an empty list.
+        assert docker.DockerConfig(volumes=None).volumes == []
+
+
+class TestConstructVolumeMounts:
+    def test_empty(self):
+        assert docker._construct_volume_mounts(docker.DockerConfig()) == []
+
+    def test_prefixes_name_and_emits_volume_mount(self):
+        cfg = docker.DockerConfig(
+            volumes=[
+                {"name": "uv-cache", "path": "/home/hatchery/.cache/uv"},
+                {"name": "pip-cache", "path": "/home/hatchery/.cache/pip"},
+            ]
+        )
+        assert docker._construct_volume_mounts(cfg) == [
+            mount.Mount(src="hatchery-uv-cache", dst="/home/hatchery/.cache/uv", mode="rw", volume=True),
+            mount.Mount(src="hatchery-pip-cache", dst="/home/hatchery/.cache/pip", mode="rw", volume=True),
+        ]
+
+
+class TestEnsureVolumes:
+    def _record_run(self, returncodes_by_cmd):
+        """Build a fake `run` that records calls and returns rc per arg-tuple key.
+
+        *returncodes_by_cmd* maps a tuple like ("volume", "inspect", "name") to
+        the returncode that `run` should report.  Unknown calls default to 0.
+        """
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, *args, **kwargs):
+            calls.append(list(cmd))
+            key = tuple(cmd[1:])  # strip runtime binary
+            rc = returncodes_by_cmd.get(key, 0)
+            result = MagicMock()
+            result.returncode = rc
+            return result
+
+        return calls, fake_run
+
+    def test_skips_non_volume_mounts(self, monkeypatch):
+        calls, fake_run = self._record_run({})
+        monkeypatch.setattr(docker, "run", fake_run)
+
+        mounts = [mount.Mount(src="/host/x", dst="/cont/x", mode="rw")]
+        docker._ensure_volumes(docker.Runtime.DOCKER, mounts)
+
+        assert calls == []
+
+    def test_creates_when_inspect_fails(self, monkeypatch):
+        calls, fake_run = self._record_run({("volume", "inspect", "hatchery-uv"): 1})
+        monkeypatch.setattr(docker, "run", fake_run)
+
+        mounts = [mount.Mount(src="hatchery-uv", dst="/cache", mode="rw", volume=True)]
+        docker._ensure_volumes(docker.Runtime.DOCKER, mounts)
+
+        assert calls == [
+            ["docker", "volume", "inspect", "hatchery-uv"],
+            ["docker", "volume", "create", "hatchery-uv"],
+        ]
+
+    def test_skips_create_when_inspect_succeeds(self, monkeypatch):
+        calls, fake_run = self._record_run({("volume", "inspect", "hatchery-uv"): 0})
+        monkeypatch.setattr(docker, "run", fake_run)
+
+        mounts = [mount.Mount(src="hatchery-uv", dst="/cache", mode="rw", volume=True)]
+        docker._ensure_volumes(docker.Runtime.PODMAN, mounts)
+
+        assert calls == [["podman", "volume", "inspect", "hatchery-uv"]]
+
+    def test_dedupes_repeated_names(self, monkeypatch):
+        calls, fake_run = self._record_run({("volume", "inspect", "hatchery-uv"): 0})
+        monkeypatch.setattr(docker, "run", fake_run)
+
+        mounts = [
+            mount.Mount(src="hatchery-uv", dst="/cache/a", mode="rw", volume=True),
+            mount.Mount(src="hatchery-uv", dst="/cache/b", mode="rw", volume=True),
+        ]
+        docker._ensure_volumes(docker.Runtime.DOCKER, mounts)
+
+        assert calls == [["docker", "volume", "inspect", "hatchery-uv"]]
+
+
+class TestDefaultHomeMounts:
+    def test_default_home_mounts(self, tmp_path, monkeypatch):
+        # Canary: assert the exact set of default home mounts so any
+        # accidental change to the defaults shows up loudly in tests.
+        home = tmp_path / "home"
+        (home / ".cache" / "uv").mkdir(parents=True)
+        (home / ".gitconfig").write_text("[user]\n")
+        monkeypatch.setattr(docker.Path, "home", lambda: home)
+
+        assert docker._default_home_mounts() == [
+            mount.Mount(src=str(home / ".gitconfig"), dst=f"{agent.CONTAINER_HOME}/.gitconfig", mode="ro"),
+        ]
+
+
+class TestBuildMountsIncludesVolumes:
+    def _make_backend(self):
+        b = MagicMock()
+        b.construct_mounts = MagicMock(return_value=[])
+        return b
+
+    def test_no_worktree_appends_volume_mount(self, tmp_path, monkeypatch):
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
+
+        cfg = docker.DockerConfig(volumes=[{"name": "uv-cache", "path": "/home/hatchery/.cache/uv"}])
+        mounts = docker.build_mounts(_no_wt_meta(cwd), self._make_backend(), tmp_path, cfg)
+
+        expected = mount.Mount(src="hatchery-uv-cache", dst="/home/hatchery/.cache/uv", mode="rw", volume=True)
+        assert expected in mounts
+
+
 # ensure_docker_files_uncommitted
 # ---------------------------------------------------------------------------
 

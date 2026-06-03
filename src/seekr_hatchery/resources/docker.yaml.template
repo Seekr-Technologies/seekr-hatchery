@@ -8,8 +8,6 @@ schema_version: "1"
 #   mode is optional and defaults to "ro" (read-only).
 #   Invalid entries are a hard error. Paths that do not exist are silently skipped.
 mounts:
-  # Uncomment to share the UV cache (speed up installs)
-  - ~/.cache/uv:/home/hatchery/.cache/uv:rw
   # Uncomment for k8s access (oci required)
   # - "~/.kube:/home/hatchery/.kube:ro"
   # - "~/.oci:/home/hatchery/.oci:ro"
@@ -17,6 +15,19 @@ mounts:
   # - "~/.aws:/home/hatchery/.aws:ro"
   # DANGEROUS: Uncomment for ssh access
   # - "~/.ssh:/home/hatchery/.ssh:ro"
+
+# volumes: persistent docker/podman named volumes mounted into every sandbox.
+# Named volumes live in the container engine's storage (not on the host
+# filesystem), so they avoid virtiofs traffic on macOS and survive across
+# `--rm` containers — ideal for package-manager caches.
+# Each entry's actual volume name is `hatchery-<name>`; it's created on first
+# launch and re-used by every sandbox that mounts it.
+# A bare name like `uv-cache` is shared across tasks and repos. To scope a
+# cache to a single repo or task, suffix the name (e.g. `uv-cache-myrepo`).
+volumes:
+  # Uncomment to share the uv cache across sandboxes (speeds up installs).
+  # - name: uv-cache
+  #   path: /home/hatchery/.cache/uv
 
 # include: additional repos or directories to mount inside the container.
 # Paths are mounted at /includes/<basename>/. Paths are relative to this

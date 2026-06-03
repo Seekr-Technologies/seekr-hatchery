@@ -112,7 +112,6 @@ The container receives:
 - The task worktree read-write (the only place edits land)
 - `~/.codex` and a per-task auth config — Codex only
 - `~/.gitconfig` read-only (commit identity)
-- `~/.cache/uv` and `~/.ssh` if present
 
 A `.hatchery/docker.yaml` config file is also created alongside the Dockerfile.
 
@@ -136,6 +135,18 @@ Mount format: `"host_path:container_path[:mode]"` — identical to Docker's own 
 - Invalid entries are a hard error. Paths that do not exist on the host are silently skipped.
 
 The file is tracked in git so every developer on the project gets the same mount configuration. Changes take effect on the next `new` or `resume`.
+
+### Persistent cache volumes (`docker.yaml`)
+
+For package-manager caches (uv, pip, npm, …) a host bind-mount routes every cache read/write through virtiofs on macOS, which is slow for many-small-files patterns. Use a named docker/podman volume instead — it lives inside the container engine's storage, persists across `--rm` containers, and is shared by every sandbox that mounts it:
+
+```yaml
+volumes:
+  - name: uv-cache
+    path: /home/hatchery/.cache/uv
+```
+
+The volume is auto-created on first launch as `hatchery-<name>` and re-used afterwards. A bare name like `uv-cache` is shared across tasks and repos; suffix it (e.g. `uv-cache-myrepo`) to scope a cache to one repo. To free disk space later: `docker volume rm hatchery-uv-cache` (or `podman volume rm`).
 
 ### Clipboard image paste
 
