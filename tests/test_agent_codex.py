@@ -249,43 +249,15 @@ class TestOnNewTask:
 
 
 class TestOnBeforeContainerStart:
-    def test_writes_fake_auth_json(self, tmp_path):
+    """No longer does anything — auth.json synthesis moved into the
+    VolumeMount.seed callable. Method stays as a required abstract
+    method on the base."""
+
+    def test_is_noop(self, tmp_path):
         session_dir = tmp_path / "session"
         session_dir.mkdir()
         agent.CODEX.on_before_container_start(session_dir, "proxy-tok", "/workdir")
-        data = json.loads((session_dir / "codex_auth.json").read_text())
-        assert data == {"auth_mode": "apikey", "OPENAI_API_KEY": "proxy-tok", "tokens": None}
-
-    def test_overwrites_on_subsequent_calls(self, tmp_path):
-        session_dir = tmp_path / "session"
-        session_dir.mkdir()
-        agent.CODEX.on_before_container_start(session_dir, "token-1", "/workdir")
-        agent.CODEX.on_before_container_start(session_dir, "token-2", "/workdir")
-        data = json.loads((session_dir / "codex_auth.json").read_text())
-        assert data["OPENAI_API_KEY"] == "token-2"
-
-    def test_always_writes_apikey_mode_even_when_oauth_host(self, home, tmp_path, monkeypatch):
-        # Even when the host uses OAuth/chatgpt auth, the fake auth.json inside the
-        # container must use auth_mode="apikey".  In chatgpt mode, codex bypasses
-        # OPENAI_BASE_URL entirely and goes directly to chatgpt.com — so the proxy
-        # would never see the request.  In apikey mode, codex respects OPENAI_BASE_URL
-        # and routes through the proxy as intended.
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        (home / ".codex").mkdir()
-        (home / ".codex" / "auth.json").write_text(
-            json.dumps(
-                {
-                    "auth_mode": "chatgpt",
-                    "OPENAI_API_KEY": None,
-                    "tokens": {"access_token": "real-oauth-tok", "refresh_token": "rt_real"},
-                }
-            )
-        )
-        session_dir = tmp_path / "session"
-        session_dir.mkdir()
-        agent.CODEX.on_before_container_start(session_dir, "proxy-tok", "/workdir")
-        data = json.loads((session_dir / "codex_auth.json").read_text())
-        assert data == {"auth_mode": "apikey", "OPENAI_API_KEY": "proxy-tok", "tokens": None}
+        assert list(session_dir.iterdir()) == []
 
 
 # ---------------------------------------------------------------------------
@@ -293,22 +265,93 @@ class TestOnBeforeContainerStart:
 # ---------------------------------------------------------------------------
 
 
-class TestConstructMounts:
-    def test_returns_expected_mounts(self, home, tmp_path):
-        session_dir = tmp_path / "session"
-        session_dir.mkdir()
-        fake_auth = session_dir / "codex_auth.json"
-        fake_auth.write_text("{}")
-        assert agent.CODEX.construct_mounts(session_dir) == [
-            mount.Mount(src=str(home / ".codex"), dst=f"{agent.CONTAINER_HOME}/.codex", mode="rw"),
-            mount.Mount(src=str(fake_auth), dst=f"{agent.CONTAINER_HOME}/.codex/auth.json", mode="rw"),
-        ]
+def _kinds_by_dst(mounts):
+    return {m.dst: m for m in mounts}
 
-    def test_raises_if_fake_auth_missing(self, tmp_path):
-        session_dir = tmp_path / "session"
-        session_dir.mkdir()
-        with pytest.raises(RuntimeError, match="codex_auth.json not found"):
-            agent.CODEX.construct_mounts(session_dir)
+
+class TestConstructMounts:
+    def test_volume_always_present(self, home, tmp_path):
+        """The ~/.codex/ seeded volume is always returned — independent
+        of host file existence."""
+        mounts = agent.CODEX.construct_mounts(tmp_path)
+        by_dst = _kinds_by_dst(mounts)
+        v = by_dst[f"{agent.CONTAINER_HOME}/.codex"]
+        assert isinstance(v, mount.VolumeMount)
+        assert v.name == "codex-dir"
+        assert v.is_file is False
+        assert v.seed is agent.CodexBackend._seed_codex_dir
+
+    def test_no_binds_when_host_missing(self, home, tmp_path):
+        mounts = agent.CODEX.construct_mounts(tmp_path)
+        assert all(isinstance(m, mount.VolumeMount) for m in mounts)
+
+    def test_memories_and_skills_bind_rw_when_present(self, home, tmp_path):
+        """memories/ and skills/ are user-owned state that persists
+        across tasks — RW so in-container edits propagate to the host."""
+        (home / ".codex" / "memories").mkdir(parents=True)
+        (home / ".codex" / "skills").mkdir(parents=True)
+        mounts = agent.CODEX.construct_mounts(tmp_path)
+        by_dst = _kinds_by_dst(mounts)
+        for name in ("memories", "skills"):
+            m = by_dst[f"{agent.CONTAINER_HOME}/.codex/{name}"]
+            assert isinstance(m, mount.BindMount)
+            assert m.mode == "RW"
+            assert m.src == home / ".codex" / name
+
+    def test_cross_task_files_bind_when_present(self, home, tmp_path):
+        (home / ".codex").mkdir()
+        (home / ".codex" / "config.toml").write_text("")
+        (home / ".codex" / "models_cache.json").write_text("{}")
+        mounts = agent.CODEX.construct_mounts(tmp_path)
+        by_dst = _kinds_by_dst(mounts)
+        for name in ("config.toml", "models_cache.json"):
+            m = by_dst[f"{agent.CONTAINER_HOME}/.codex/{name}"]
+            assert isinstance(m, mount.BindMount)
+            assert m.mode == "RW"
+            assert m.src == home / ".codex" / name
+
+
+# ---------------------------------------------------------------------------
+# _seed_codex_dir — only auth.json is synthesised
+# ---------------------------------------------------------------------------
+
+
+class TestSeedCodexDir:
+    def _ctx(self, token="proxy-tok"):
+        return mount.SeedContext(
+            session_dir=Path("/tmp/session"),
+            proxy_token=token,
+            container_workdir="/workspace",
+        )
+
+    def test_returns_only_auth_json(self, home):
+        out = agent.CodexBackend._seed_codex_dir(self._ctx())
+        assert set(out.keys()) == {"auth.json"}
+
+    def test_auth_json_uses_proxy_token(self, home):
+        out = agent.CodexBackend._seed_codex_dir(self._ctx(token="my-proxy-123"))
+        data = json.loads(out["auth.json"])
+        assert data == {"auth_mode": "apikey", "OPENAI_API_KEY": "my-proxy-123", "tokens": None}
+
+    def test_apikey_mode_even_when_host_uses_oauth(self, home, monkeypatch):
+        """In chatgpt mode, codex bypasses OPENAI_BASE_URL and goes
+        directly to chatgpt.com — the proxy would never see the request.
+        The in-container auth.json must always be ``apikey`` so codex
+        routes through the proxy regardless of host config."""
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        (home / ".codex").mkdir()
+        (home / ".codex" / "auth.json").write_text(
+            json.dumps({
+                "auth_mode": "chatgpt",
+                "OPENAI_API_KEY": None,
+                "tokens": {"access_token": "real-oauth-tok"},
+            })
+        )
+        out = agent.CodexBackend._seed_codex_dir(self._ctx(token="proxy-tok"))
+        data = json.loads(out["auth.json"])
+        assert data["auth_mode"] == "apikey"
+        assert data["OPENAI_API_KEY"] == "proxy-tok"
+        assert data["tokens"] is None
 
 
 # ---------------------------------------------------------------------------

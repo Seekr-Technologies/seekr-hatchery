@@ -636,7 +636,7 @@ class TestDockerMountsIncludes:
 
         mounts = docker._docker_mounts_includes([self._entry(plain)], "my-task", session_dir, no_worktree=False)
 
-        assert mount.Mount(src=str(plain), dst="/includes/shared-data", mode="rw") in mounts
+        assert mount.BindMount(src=str(plain), dst="/includes/shared-data", mode="RW") in mounts
 
     def test_git_repo_without_worktree_gets_rw_mount(self, tmp_path):
         """A git repo in worktree mode with no worktree for the task falls back to rw mount."""
@@ -648,7 +648,7 @@ class TestDockerMountsIncludes:
 
         mounts = docker._docker_mounts_includes([self._entry(repo)], "my-task", session_dir, no_worktree=False)
 
-        assert mount.Mount(src=str(repo), dst="/includes/repo-b", mode="rw") in mounts
+        assert mount.BindMount(src=str(repo), dst="/includes/repo-b", mode="RW") in mounts
         assert not any("git_ptr" in str(m.src or "") for m in mounts)
 
     def test_git_repo_with_worktree_gets_layered_mounts(self, tmp_path):
@@ -666,16 +666,16 @@ class TestDockerMountsIncludes:
 
         mounts = docker._docker_mounts_includes([self._entry(repo)], "my-task", session_dir, no_worktree=False)
 
-        assert mount.Mount(src=str(repo), dst="/includes/repo-b", mode="ro") in mounts
-        assert mount.Mount(src=str(git_dir), dst="/includes/repo-b/.git", mode="rw") in mounts
-        assert mount.Mount(src=str(git_dir / "objects"), dst="/includes/repo-b/.git/objects", mode="rw") in mounts
+        assert mount.BindMount(src=str(repo), dst="/includes/repo-b", mode="RO") in mounts
+        assert mount.BindMount(src=str(git_dir), dst="/includes/repo-b/.git", mode="RW") in mounts
+        assert mount.BindMount(src=str(git_dir / "objects"), dst="/includes/repo-b/.git/objects", mode="RW") in mounts
         container_wt = "/includes/repo-b/.hatchery/worktrees/my-task"
-        assert mount.Mount(src=str(worktree), dst=container_wt, mode="rw") in mounts
+        assert mount.BindMount(src=str(worktree), dst=container_wt, mode="RW") in mounts
         git_ptr_file = session_dir / "git_ptr_include_repo-b"
         assert git_ptr_file.exists()
         assert "gitdir: /includes/repo-b/.git/worktrees/my-task" in git_ptr_file.read_text()
-        assert mount.Mount(src=str(git_ptr_file), dst=f"{container_wt}/.git", mode="rw") in mounts
-        assert mount.Mount(src=str(repo), dst="/includes/repo-b", mode="rw") not in mounts
+        assert mount.BindMount(src=str(git_ptr_file), dst=f"{container_wt}/.git", mode="RW") in mounts
+        assert mount.BindMount(src=str(repo), dst="/includes/repo-b", mode="RW") not in mounts
 
     def test_basename_collision_gets_numeric_suffix(self, tmp_path):
         """Two paths sharing the same basename get distinct container paths."""
@@ -690,8 +690,8 @@ class TestDockerMountsIncludes:
             [self._entry(a), self._entry(b)], "task", session_dir, no_worktree=False
         )
 
-        assert mount.Mount(src=str(a), dst="/includes/api", mode="rw") in mounts
-        assert mount.Mount(src=str(b), dst="/includes/api-1", mode="rw") in mounts
+        assert mount.BindMount(src=str(a), dst="/includes/api", mode="RW") in mounts
+        assert mount.BindMount(src=str(b), dst="/includes/api-1", mode="RW") in mounts
 
     def test_no_worktree_skips_layered_mounts(self, tmp_path):
         """In no-worktree mode, worktree-mode git repos get a simple rw mount."""
@@ -706,7 +706,7 @@ class TestDockerMountsIncludes:
 
         mounts = docker._docker_mounts_includes([self._entry(repo)], "my-task", session_dir, no_worktree=True)
 
-        assert mount.Mount(src=str(repo), dst="/includes/repo-b", mode="rw") in mounts
+        assert mount.BindMount(src=str(repo), dst="/includes/repo-b", mode="RW") in mounts
         git_ptr_file = session_dir / "git_ptr_include_repo-b"
         assert not git_ptr_file.exists()
         assert not any(str(git_ptr_file) == str(m.src) for m in mounts)
@@ -728,7 +728,7 @@ class TestDockerMountsIncludes:
             [self._entry(plain, mode="rw")], "my-task", session_dir, no_worktree=False
         )
 
-        assert mount.Mount(src=str(plain), dst="/includes/shared-data", mode="rw") in mounts
+        assert mount.BindMount(src=str(plain), dst="/includes/shared-data", mode="RW") in mounts
 
     def test_reference_ro_plain_dir(self, tmp_path):
         """mode='ro' gives a simple ro mount."""
@@ -741,8 +741,8 @@ class TestDockerMountsIncludes:
             [self._entry(plain, mode="ro")], "my-task", session_dir, no_worktree=False
         )
 
-        assert mount.Mount(src=str(plain), dst="/includes/docs", mode="ro") in mounts
-        assert mount.Mount(src=str(plain), dst="/includes/docs", mode="rw") not in mounts
+        assert mount.BindMount(src=str(plain), dst="/includes/docs", mode="RO") in mounts
+        assert mount.BindMount(src=str(plain), dst="/includes/docs", mode="RW") not in mounts
 
     def test_reference_mode_git_repo_no_layered_mounts(self, tmp_path):
         """mode='ro' on a git repo with a worktree still just does a simple ro mount."""
@@ -762,9 +762,9 @@ class TestDockerMountsIncludes:
             [self._entry(repo, mode="ro")], "my-task", session_dir, no_worktree=False
         )
 
-        assert mount.Mount(src=str(repo), dst="/includes/repo-b", mode="ro") in mounts
+        assert mount.BindMount(src=str(repo), dst="/includes/repo-b", mode="RO") in mounts
         # No layered mounts
-        assert mount.Mount(src=str(repo), dst="/includes/repo-b", mode="rw") not in mounts
+        assert mount.BindMount(src=str(repo), dst="/includes/repo-b", mode="RW") not in mounts
         assert not any("git_ptr" in str(m.src or "") for m in mounts)
         assert not any("worktrees" in str(m.dst or "") for m in mounts)
 
@@ -783,7 +783,7 @@ class TestDockerMountsIncludes:
             [self._entry(repo, mode="rw")], "my-task", session_dir, no_worktree=False
         )
 
-        assert mount.Mount(src=str(repo), dst="/includes/repo-c", mode="rw") in mounts
+        assert mount.BindMount(src=str(repo), dst="/includes/repo-c", mode="RW") in mounts
         assert not any("git_ptr" in str(m.src or "") for m in mounts)
         assert not any("worktrees" in str(m.dst or "") for m in mounts)
 
@@ -807,9 +807,9 @@ class TestDockerMountsIncludes:
         mounts = docker._docker_mounts_includes(entries, "my-task", session_dir, no_worktree=False)
 
         # worktree entry without an actual worktree → rw fallback
-        assert mount.Mount(src=str(wt_repo), dst="/includes/wt-repo", mode="rw") in mounts
+        assert mount.BindMount(src=str(wt_repo), dst="/includes/wt-repo", mode="RW") in mounts
         # ro reference entry
-        assert mount.Mount(src=str(ro_dir), dst="/includes/docs", mode="ro") in mounts
+        assert mount.BindMount(src=str(ro_dir), dst="/includes/docs", mode="RO") in mounts
 
 
 # ---------------------------------------------------------------------------
@@ -910,8 +910,8 @@ class TestConstructVolumeMounts:
             ]
         )
         assert docker._construct_volume_mounts(cfg) == [
-            mount.Mount(src="hatchery-uv-cache", dst="/home/hatchery/.cache/uv", mode="rw", volume=True),
-            mount.Mount(src="hatchery-pip-cache", dst="/home/hatchery/.cache/pip", mode="rw", volume=True),
+            mount.VolumeMount(name="hatchery-uv-cache", dst="/home/hatchery/.cache/uv", mode="RW", task_scoped=False),
+            mount.VolumeMount(name="hatchery-pip-cache", dst="/home/hatchery/.cache/pip", mode="RW", task_scoped=False),
         ]
 
 
@@ -938,7 +938,7 @@ class TestEnsureVolumes:
         calls, fake_run = self._record_run({})
         monkeypatch.setattr(docker, "run", fake_run)
 
-        mounts = [mount.Mount(src="/host/x", dst="/cont/x", mode="rw")]
+        mounts = [mount.BindMount(src="/host/x", dst="/cont/x", mode="RW")]
         docker._ensure_volumes(docker.Runtime.DOCKER, mounts)
 
         assert calls == []
@@ -947,7 +947,7 @@ class TestEnsureVolumes:
         calls, fake_run = self._record_run({("volume", "inspect", "hatchery-uv"): 1})
         monkeypatch.setattr(docker, "run", fake_run)
 
-        mounts = [mount.Mount(src="hatchery-uv", dst="/cache", mode="rw", volume=True)]
+        mounts = [mount.VolumeMount(name="hatchery-uv", dst="/cache", mode="RW", task_scoped=False)]
         docker._ensure_volumes(docker.Runtime.DOCKER, mounts)
 
         assert calls == [
@@ -959,7 +959,7 @@ class TestEnsureVolumes:
         calls, fake_run = self._record_run({("volume", "inspect", "hatchery-uv"): 0})
         monkeypatch.setattr(docker, "run", fake_run)
 
-        mounts = [mount.Mount(src="hatchery-uv", dst="/cache", mode="rw", volume=True)]
+        mounts = [mount.VolumeMount(name="hatchery-uv", dst="/cache", mode="RW", task_scoped=False)]
         docker._ensure_volumes(docker.Runtime.PODMAN, mounts)
 
         assert calls == [["podman", "volume", "inspect", "hatchery-uv"]]
@@ -969,8 +969,8 @@ class TestEnsureVolumes:
         monkeypatch.setattr(docker, "run", fake_run)
 
         mounts = [
-            mount.Mount(src="hatchery-uv", dst="/cache/a", mode="rw", volume=True),
-            mount.Mount(src="hatchery-uv", dst="/cache/b", mode="rw", volume=True),
+            mount.VolumeMount(name="hatchery-uv", dst="/cache/a", mode="RW", task_scoped=False),
+            mount.VolumeMount(name="hatchery-uv", dst="/cache/b", mode="RW", task_scoped=False),
         ]
         docker._ensure_volumes(docker.Runtime.DOCKER, mounts)
 
@@ -987,7 +987,7 @@ class TestDefaultHomeMounts:
         monkeypatch.setattr(docker.Path, "home", lambda: home)
 
         assert docker._default_home_mounts() == [
-            mount.Mount(src=str(home / ".gitconfig"), dst=f"{agent.CONTAINER_HOME}/.gitconfig", mode="ro"),
+            mount.BindMount(src=str(home / ".gitconfig"), dst=f"{agent.CONTAINER_HOME}/.gitconfig", mode="RO"),
         ]
 
 
@@ -1005,7 +1005,7 @@ class TestBuildMountsIncludesVolumes:
         cfg = docker.DockerConfig(volumes=[{"name": "uv-cache", "path": "/home/hatchery/.cache/uv"}])
         mounts = docker.build_mounts(_no_wt_meta(cwd), self._make_backend(), tmp_path, cfg)
 
-        expected = mount.Mount(src="hatchery-uv-cache", dst="/home/hatchery/.cache/uv", mode="rw", volume=True)
+        expected = mount.VolumeMount(name="hatchery-uv-cache", dst="/home/hatchery/.cache/uv", mode="RW", task_scoped=False)
         assert expected in mounts
 
 
@@ -1162,7 +1162,7 @@ class TestConstructSymlinkMounts:
         mounts = docker._construct_symlink_mounts(scan, [])
 
         target = external.resolve()
-        assert mounts == [mount.Mount(src=str(target), dst=str(target), mode="rw")]
+        assert mounts == [mount.BindMount(src=str(target), dst=str(target), mode="RW")]
 
     def test_external_dir_symlink_emits_mount(self, tmp_path):
         scan = self._scan_root(tmp_path)
@@ -1174,7 +1174,7 @@ class TestConstructSymlinkMounts:
         mounts = docker._construct_symlink_mounts(scan, [])
 
         target = external.resolve()
-        assert mount.Mount(src=str(target), dst=str(target), mode="rw") in mounts
+        assert mount.BindMount(src=str(target), dst=str(target), mode="RW") in mounts
 
     def test_relative_internal_symlink_skipped(self, tmp_path):
         """Relative links staying inside scan_root resolve correctly in the
@@ -1208,7 +1208,7 @@ class TestConstructSymlinkMounts:
         (scan / "link").symlink_to(external_file)
 
         # external_root is already a mount; its child should be skipped
-        existing = [mount.Mount(src=str(external_root), dst="/mounted/external", mode="ro")]
+        existing = [mount.BindMount(src=str(external_root), dst="/mounted/external", mode="RO")]
         mounts = docker._construct_symlink_mounts(scan, existing)
 
         assert mounts == []
@@ -1268,7 +1268,7 @@ class TestConstructSymlinkMounts:
         mounts = docker._construct_symlink_mounts(scan, [])
 
         target = external.resolve()
-        assert mounts == [mount.Mount(src=str(target), dst=str(target), mode="rw")]
+        assert mounts == [mount.BindMount(src=str(target), dst=str(target), mode="RW")]
 
     def test_absolute_internal_link_raises(self, tmp_path, capsys):
         """Absolute link pointing inside scan_root fails loudly — the host path
@@ -1355,7 +1355,7 @@ class TestNoWorktreeFollowSymlinks:
         mounts = docker.build_mounts(_no_wt_meta(cwd), self._make_backend(), tmp_path, cfg)
 
         target = external.resolve()
-        assert mount.Mount(src=str(target), dst=str(target), mode="rw") not in mounts
+        assert mount.BindMount(src=str(target), dst=str(target), mode="RW") not in mounts
 
     def test_enabled_adds_symlink_mounts(self, tmp_path, monkeypatch):
         cwd = tmp_path / "cwd"
@@ -1369,7 +1369,7 @@ class TestNoWorktreeFollowSymlinks:
         mounts = docker.build_mounts(_no_wt_meta(cwd), self._make_backend(), tmp_path, cfg)
 
         target = external.resolve()
-        assert mount.Mount(src=str(target), dst=str(target), mode="rw") in mounts
+        assert mount.BindMount(src=str(target), dst=str(target), mode="RW") in mounts
 
 
 # ---------------------------------------------------------------------------
@@ -1402,7 +1402,7 @@ class TestClipboardImageMount:
         mounts = docker.build_mounts(_no_wt_meta(cwd), self._make_backend(), session_dir, cfg)
 
         clip = session_dir / "clipboard"
-        assert mount.Mount(src=str(clip), dst=str(clip), mode="rw") in mounts
+        assert mount.BindMount(src=str(clip), dst=str(clip), mode="RW") in mounts
         # And the directory was actually created on the host.
         assert clip.is_dir()
 

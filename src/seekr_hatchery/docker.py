@@ -36,7 +36,8 @@ from seekr_hatchery.constants import (
 from seekr_hatchery.includes import IncludeEntry, IncludeItem
 from seekr_hatchery.kubectl_proxy import KubectlConfig
 from seekr_hatchery.models import SessionMeta
-from seekr_hatchery.mount import Mount, mount_to_docker_args
+from seekr_hatchery.mount import BindMount, Mount, VolumeMount, mount_to_docker_args
+from seekr_hatchery.seeded_volumes import prepare_volume_mounts
 from seekr_hatchery.utils import open_for_editing, run, unique_basename
 
 logger = logging.getLogger("hatchery")
@@ -314,7 +315,7 @@ def _kubectl_context(
     kubeconfig_path.chmod(0o600)
 
     try:
-        yield [Mount(src=str(kubeconfig_path), dst=f"{agent.CONTAINER_HOME}/.kube/config", mode="ro")]
+        yield [BindMount(src=str(kubeconfig_path), dst=f"{agent.CONTAINER_HOME}/.kube/config", mode="RO")]
     finally:
         _kubectl_proxy.stop_rbac_proxy(rbac_server)
         _kubectl_proxy.stop_kubectl_proxy_proc(kubectl_proc)
@@ -588,7 +589,7 @@ def _construct_docker_mounts(config: DockerConfig) -> list[Mount]:
         if not host.exists():
             logger.debug("Custom mount host path does not exist, skipping: %s", host)
             continue
-        result.append(Mount(src=str(host), dst=container, mode=mode))
+        result.append(BindMount(src=str(host), dst=container, mode=mode.upper()))
     return result
 
 
@@ -607,7 +608,10 @@ def _construct_volume_mounts(config: DockerConfig) -> list[Mount]:
     actual volume is named ``hatchery-<name>``; ``_ensure_volumes`` creates
     it on the runtime before the container starts.
     """
-    return [Mount(src=f"{_VOLUME_NAME_PREFIX}{v.name}", dst=v.path, mode="rw", volume=True) for v in config.volumes]
+    return [
+        VolumeMount(name=f"{_VOLUME_NAME_PREFIX}{v.name}", dst=v.path, mode="RW", task_scoped=False)
+        for v in config.volumes
+    ]
 
 
 # Host directories whose contents are provided by the container image or kernel.
@@ -723,7 +727,7 @@ def _construct_symlink_mounts(scan_root: Path, existing_mounts: list[Mount]) -> 
                 logger.debug("follow_symlinks: skipping parent-of-existing target %s", target)
                 continue
             seen.add(target)
-            mounts.append(Mount(src=str(target), dst=str(target), mode="rw"))
+            mounts.append(BindMount(src=str(target), dst=str(target), mode="RW"))
 
     if bad_abs_internal or bad_rel_external:
         lines = ["follow_symlinks: found symlinks that won't resolve inside the container:"]
@@ -767,23 +771,23 @@ def _git_worktree_mounts(repo: Path, name: str, container_root: str) -> list[Mou
     """
     git_dir = repo / ".git"
     mounts: list[Mount] = [
-        Mount(src=str(repo), dst=container_root, mode="ro"),
-        Mount(src=str(git_dir), dst=f"{container_root}/.git", mode="rw"),
-        Mount(src=str(git_dir / "objects"), dst=f"{container_root}/.git/objects", mode="rw"),
+        BindMount(src=str(repo), dst=container_root, mode="RO"),
+        BindMount(src=str(git_dir), dst=f"{container_root}/.git", mode="RW"),
+        BindMount(src=str(git_dir / "objects"), dst=f"{container_root}/.git/objects", mode="RW"),
     ]
     # Mount the entire hatchery/ ref directory rw so git can create .lock sidecar
     # files alongside the branch ref during commits.
     hatchery_refs = git_dir / "refs" / "heads" / "hatchery"
     if hatchery_refs.exists():
-        mounts.append(Mount(src=str(hatchery_refs), dst=f"{container_root}/.git/refs/heads/hatchery", mode="rw"))
+        mounts.append(BindMount(src=str(hatchery_refs), dst=f"{container_root}/.git/refs/heads/hatchery", mode="RW"))
     logs_dir = git_dir / "logs"
     if logs_dir.exists():
-        mounts.append(Mount(src=str(logs_dir), dst=f"{container_root}/.git/logs", mode="rw"))
+        mounts.append(BindMount(src=str(logs_dir), dst=f"{container_root}/.git/logs", mode="RW"))
     # Only this task's worktree git metadata is writable; other worktrees' metadata
     # is protected by the ro parent mount (prevents `git worktree prune` damage).
     worktree_meta = git_dir / "worktrees" / name
     if worktree_meta.exists():
-        mounts.append(Mount(src=str(worktree_meta), dst=f"{container_root}/.git/worktrees/{name}", mode="rw"))
+        mounts.append(BindMount(src=str(worktree_meta), dst=f"{container_root}/.git/worktrees/{name}", mode="RW"))
     return mounts
 
 
@@ -821,7 +825,7 @@ def build_mounts(
     mounts: list[Mount]
     if meta.no_worktree:
         cwd = meta.worktree_path
-        mounts = [Mount(src=str(meta.worktree), dst="/workspace", mode="rw")]
+        mounts = [BindMount(src=str(meta.worktree), dst="/workspace", mode="RW")]
         mounts.extend(_default_home_mounts())
         mounts.extend(backend.construct_mounts(session_dir))
         mounts.extend(_construct_docker_mounts(config))
@@ -839,15 +843,15 @@ def build_mounts(
         # git writes these into .git/ root during normal commits; use per-task
         # sentinel files so .git/ root stays ro.
         for host_file, git_filename in git_sentinel_files or []:
-            mounts.append(Mount(src=str(host_file), dst=f"{CONTAINER_REPO_ROOT}/.git/{git_filename}", mode="rw"))
+            mounts.append(BindMount(src=str(host_file), dst=f"{CONTAINER_REPO_ROOT}/.git/{git_filename}", mode="RW"))
 
-        mounts.append(Mount(src=str(meta.worktree), dst=container_worktree, mode="rw"))
+        mounts.append(BindMount(src=str(meta.worktree), dst=container_worktree, mode="RW"))
 
         # Shadow the worktree's .git pointer file with a container-path-aware
         # copy. Must come after the worktree:rw mount so Linux VFS lets the
         # file mount win.
         if worktree_git_ptr is not None:
-            mounts.append(Mount(src=str(worktree_git_ptr), dst=f"{container_worktree}/.git", mode="rw"))
+            mounts.append(BindMount(src=str(worktree_git_ptr), dst=f"{container_worktree}/.git", mode="RW"))
         mounts.extend(_default_home_mounts())
         mounts.extend(backend.construct_mounts(session_dir))
         mounts.extend(_construct_docker_mounts(config))
@@ -901,11 +905,11 @@ def _docker_mounts_includes(
                     # Layered mounts: root ro + targeted .git rw (same as primary repo)
                     mounts.extend(_git_worktree_mounts(path, name, container_path))
                     container_worktree = f"{container_path}/.hatchery/worktrees/{name}"
-                    mounts.append(Mount(src=str(worktree), dst=container_worktree, mode="rw"))
+                    mounts.append(BindMount(src=str(worktree), dst=container_worktree, mode="RW"))
                     # Rewrite .git pointer to use container-relative path
                     git_ptr_file = session_dir / f"git_ptr_include_{basename}"
                     git_ptr_file.write_text(f"gitdir: {container_path}/.git/worktrees/{name}\n")
-                    mounts.append(Mount(src=str(git_ptr_file), dst=f"{container_worktree}/.git", mode="rw"))
+                    mounts.append(BindMount(src=str(git_ptr_file), dst=f"{container_worktree}/.git", mode="RW"))
                     continue
                 logger.warning(
                     "include worktree not found for %s (expected %s); "
@@ -914,11 +918,11 @@ def _docker_mounts_includes(
                     worktree,
                 )
             # Git repo without worktree, or plain dir in worktree mode → rw
-            mounts.append(Mount(src=str(path), dst=container_path, mode="rw"))
+            mounts.append(BindMount(src=str(path), dst=container_path, mode="RW"))
         else:
             # reference mode (ro/rw), or no_worktree fallback
             access = entry.mode if entry.is_reference() else "rw"
-            mounts.append(Mount(src=str(path), dst=container_path, mode=access))
+            mounts.append(BindMount(src=str(path), dst=container_path, mode=access.upper()))
 
     return mounts
 
@@ -928,7 +932,7 @@ def _default_home_mounts() -> list[Mount]:
     mounts: list[Mount] = []
     gitconfig = Path.home() / ".gitconfig"
     if gitconfig.exists():
-        mounts.append(Mount(src=str(gitconfig), dst=f"{agent.CONTAINER_HOME}/.gitconfig", mode="ro"))
+        mounts.append(BindMount(src=str(gitconfig), dst=f"{agent.CONTAINER_HOME}/.gitconfig", mode="RO"))
     return mounts
 
 
@@ -950,7 +954,7 @@ def _clipboard_image_mount(session_dir: Path) -> Mount:
     """
     d = clipboard_image_dir(session_dir)
     d.mkdir(parents=True, exist_ok=True)
-    return Mount(src=str(d), dst=str(d), mode="rw")
+    return BindMount(src=str(d), dst=str(d), mode="RW")
 
 
 def remove_clipboard_dir(session_dir: Path) -> None:
@@ -1068,21 +1072,27 @@ def _ensure_volumes(runtime: Runtime, mounts: list[Mount]) -> None:
     """Create any named volumes referenced by *mounts* if they don't exist.
 
     Both Docker and Podman auto-create missing volumes when ``run -v
-    name:/path`` is invoked, but doing it explicitly here surfaces creation
-    in the debug logs and lets future tooling (e.g. ``hatchery volume
-    prune``) recognise volumes hatchery owns.  ``volume inspect`` returns
-    non-zero when the volume is missing, which is the cheapest cross-runtime
-    existence check.
+    name:/path`` is invoked, but doing it explicitly here surfaces
+    creation in the debug logs and lets future tooling (e.g. ``hatchery
+    volume prune``) recognise volumes hatchery owns.  ``volume inspect``
+    returns non-zero when the volume is missing, which is the cheapest
+    cross-runtime existence check.
+
+    For seeded VolumeMounts the launch path already handled creation
+    (and seeding) via ``prepare_volume_mounts``; this call is then a
+    no-op for them. The remaining VolumeMounts are user-config volumes
+    from docker.yaml (``task_scoped=False``, no seed) used by the
+    sandbox-shell flow.
     """
     seen: set[str] = set()
     for m in mounts:
-        if not m.volume or not isinstance(m.src, str) or m.src in seen:
+        if not isinstance(m, VolumeMount) or m.name in seen:
             continue
-        seen.add(m.src)
-        if run([runtime.binary, "volume", "inspect", m.src], check=False).returncode == 0:
+        seen.add(m.name)
+        if run([runtime.binary, "volume", "inspect", m.name], check=False).returncode == 0:
             continue
-        logger.debug("creating %s volume: %s", runtime.binary, m.src)
-        run([runtime.binary, "volume", "create", m.src])
+        logger.debug("creating %s volume: %s", runtime.binary, m.name)
+        run([runtime.binary, "volume", "create", m.name])
 
 
 def _userns_flags(runtime: Runtime) -> list[str]:
@@ -1335,6 +1345,13 @@ def run_session(
         include_entries=include_entries,
     )
 
+    # Materialise per-task seeded VolumeMounts: resolve names, ensure
+    # the runtime volumes exist, seed on first launch. Bind and tmpfs
+    # mounts pass through unchanged.
+    mounts = prepare_volume_mounts(
+        runtime.binary, mounts, meta, session_dir, proxy_token, container_workdir,
+    )
+
     mode_label = "no-worktree mode" if meta.no_worktree else "worktree mode"
     logger.debug(f"Launching {runtime.binary} container for session '{meta.name}' ({mode_label})")
     with (
@@ -1381,7 +1398,7 @@ def launch_sandbox_shell(
     Caller resolves *image_name* — typically ``sessions.image_name(repo, "sandbox")``.
     """
     build_docker_image(repo, repo, image_name, backend, runtime=runtime, no_cache=no_cache)
-    mounts: list[Mount] = [Mount(src=str(repo), dst=CONTAINER_REPO_ROOT, mode="rw")]
+    mounts: list[Mount] = [BindMount(src=str(repo), dst=CONTAINER_REPO_ROOT, mode="RW")]
     mounts.extend(_default_home_mounts())
     mounts.extend(_construct_docker_mounts(config))
     mounts.extend(_construct_volume_mounts(config))

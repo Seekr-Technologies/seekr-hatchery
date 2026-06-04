@@ -5,13 +5,13 @@ import logging
 import os
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Literal
 
 from seekr_hatchery.agents.agent_backend import CONTAINER_HOME, AgentBackend
 from seekr_hatchery.locks import hatchery_lock
-from seekr_hatchery.mount import Mount
+from seekr_hatchery.mount import BindMount, Mount, SeedContext, VolumeMount
 
 logger = logging.getLogger("hatchery")
 
@@ -135,19 +135,61 @@ class CodexBackend(AgentBackend):
 
     @staticmethod
     def construct_mounts(session_dir: Path) -> list[Mount]:
-        # Mount all of ~/.codex rw so sessions, state, skills etc. persist.
-        # A fake auth.json (proxy token only) is shadow-mounted on top so the
-        # real credentials are never visible inside the container.
-        fake_auth = session_dir / "codex_auth.json"
-        if not fake_auth.exists():
-            raise RuntimeError(
-                f"codex_auth.json not found in {session_dir} — on_before_container_start must run before construct_mounts"
-            )
-        codex_dir = Path.home() / ".codex"
-        return [
-            Mount(src=str(codex_dir), dst=f"{CONTAINER_HOME}/.codex", mode="rw"),
-            Mount(src=str(fake_auth), dst=f"{CONTAINER_HOME}/.codex/auth.json", mode="rw"),
+        """Per-task volume for ~/.codex + bind mounts for cross-task state.
+
+        The volume starts almost empty — the seed only synthesises
+        ``auth.json`` so the in-container codex authenticates against the
+        hatchery proxy and never sees the host's real credentials.
+        Everything else codex creates as it runs lives in the volume:
+        sessions, history, sqlite state, caches, logs, etc. — all on the
+        runtime's native filesystem rather than virtio-fs, and per-task
+        so concurrent sandboxes don't fight over the same files.
+
+        Bind mounts overlay specific paths inside ``~/.codex/`` so they
+        cross task boundaries (memories) or stay in sync with host edits
+        (config.toml, models_cache.json). Layered mounts on top of a
+        volume mount are handled by the kernel — writes at the bind
+        paths go to the host, everything else goes to the volume.
+        """
+        mounts: list[Mount] = [
+            VolumeMount(
+                name="codex-dir",
+                dst=f"{CONTAINER_HOME}/.codex",
+                seed=CodexBackend._seed_codex_dir,
+            ),
         ]
+        host_codex = Path.home() / ".codex"
+        # Cross-task host-shared paths: RW binds so in-container
+        # mutations propagate back to the host (a memory recorded or
+        # skill edited in one task is visible to the next; the model
+        # cache and config edits stay in sync).
+        for name in ("memories", "skills", "config.toml", "models_cache.json"):
+            p = host_codex / name
+            if p.exists():
+                mounts.append(BindMount(src=p, dst=f"{CONTAINER_HOME}/.codex/{name}", mode="RW"))
+        return mounts
+
+    @staticmethod
+    def _seed_codex_dir(ctx: SeedContext) -> Mapping[str, bytes]:
+        """Initial contents of the per-task ~/.codex volume.
+
+        Only ``auth.json`` is synthesised — codex populates everything
+        else (sessions, logs, sqlite state, caches) inside the volume
+        as it runs.
+
+        Always uses ``auth_mode="apikey"`` regardless of the host's real
+        mode. In apikey mode codex respects ``OPENAI_BASE_URL`` (which
+        ``container_env`` sets to the proxy). For OAuth hosts,
+        ``container_env`` and ``proxy_kwargs`` together route codex's
+        apikey path through the OAuth backend; the container never sees
+        the host's OAuth tokens.
+        """
+        fake_auth = {
+            "auth_mode": "apikey",
+            "OPENAI_API_KEY": ctx.proxy_token,
+            "tokens": None,
+        }
+        return {"auth.json": json.dumps(fake_auth).encode()}
 
     @staticmethod
     def proxy_kwargs() -> dict:
@@ -235,22 +277,9 @@ class CodexBackend(AgentBackend):
         proxy_token: str,
         workdir: str,
     ) -> None:
-        # Write a fake auth.json that authenticates to our proxy.
-        # The real credential is injected by the proxy; the container only ever
-        # sees the short-lived proxy token.
-        #
-        # Always use auth_mode="apikey" regardless of the host's real auth mode.
-        # In apikey mode, codex respects OPENAI_BASE_URL (which points to the
-        # proxy) for its API calls.  In chatgpt mode, codex bypasses
-        # OPENAI_BASE_URL and goes directly to chatgpt.com, so the proxy is
-        # never involved.
-        #
-        # For OAuth hosts, container_env sets OPENAI_BASE_URL without a /v1
-        # suffix (e.g. http://proxy) and proxy_kwargs targets
-        # chatgpt.com/backend-api/codex, so codex's apikey path
-        # ({OPENAI_BASE_URL}/responses) correctly maps to the OAuth endpoint.
-        fake_auth = {"auth_mode": "apikey", "OPENAI_API_KEY": proxy_token, "tokens": None}
-        (session_dir / "codex_auth.json").write_text(json.dumps(fake_auth))
+        """No-op — synthesising the fake ``auth.json`` moved into the
+        VolumeMount's seed callable (``_seed_codex_dir``)."""
+        return
 
     dockerfile_install: str = f"""\
 # ── OpenAI Codex CLI ──────────────────────────────────────────────────────────

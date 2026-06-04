@@ -19,6 +19,7 @@ from click.shell_completion import CompletionItem
 import seekr_hatchery.agents as agent
 import seekr_hatchery.docker as docker
 import seekr_hatchery.git as git
+import seekr_hatchery.seeded_volumes as seeded_volumes
 import seekr_hatchery.sessions as sessions
 import seekr_hatchery.ui as ui
 import seekr_hatchery.user_config as user_config
@@ -202,6 +203,7 @@ def _do_delete(meta: sessions.SessionMeta, *, confirmed: bool = False) -> None:
 
     sessions.delete(meta)
     _cleanup_task(meta.repo_path, meta.name)
+    seeded_volumes.cleanup_task_volumes(meta.repo_path, meta.name)
 
 
 def _launch(
