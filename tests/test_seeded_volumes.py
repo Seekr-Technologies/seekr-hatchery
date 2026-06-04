@@ -66,9 +66,7 @@ def _ensure_image(image: str) -> None:
 
 class TestVolumeName:
     def test_format(self):
-        assert volume_name(_fake_meta(container_name="hatchery-foo-bar"), "app-cfg") == (
-            "hatchery-foo-bar-vol-app-cfg"
-        )
+        assert volume_name(_fake_meta(container_name="hatchery-foo-bar"), "app-cfg") == ("hatchery-foo-bar-vol-app-cfg")
 
     def test_prefix_covers_volume_names(self, tmp_path):
         # task_volume_prefix is what cleanup_task_volumes enumerates;
@@ -86,7 +84,9 @@ class TestVolumeName:
 class TestSeedFilesFor:
     def test_is_file_returns_bytes_keyed_at_basename(self):
         m = VolumeMount(
-            name="cfg", dst="/home/h/.foo.json", is_file=True,
+            name="cfg",
+            dst="/home/h/.foo.json",
+            is_file=True,
             seed=lambda ctx: b'{"x":1}',
         )
         out = _seed_files_for(m, _seed_ctx())
@@ -109,8 +109,7 @@ class TestSeedFilesFor:
 
     def test_seed_receives_context(self):
         captured = []
-        m = VolumeMount(name="c", dst="/c", is_file=True,
-                        seed=lambda ctx: (captured.append(ctx), b"x")[1])
+        m = VolumeMount(name="c", dst="/c", is_file=True, seed=lambda ctx: (captured.append(ctx), b"x")[1])
         _seed_files_for(m, _seed_ctx())
         assert captured[0].proxy_token == "t0k3n"
         assert captured[0].container_workdir == "/workspace"
@@ -127,14 +126,24 @@ class TestPrepareVolumeMountsPassThrough:
     def test_bind_passes_through(self):
         m = BindMount(src=Path("/h"), dst="/c")
         out = prepare_volume_mounts(
-            "/no/such/binary", [m], _fake_meta(), Path("/s"), "tok", "/wd",
+            "/no/such/binary",
+            [m],
+            _fake_meta(),
+            Path("/s"),
+            "tok",
+            "/wd",
         )
         assert out == [m]
 
     def test_tmpfs_passes_through(self):
         m = TmpfsMount(dst="/tmp/x")
         out = prepare_volume_mounts(
-            "/no/such/binary", [m], _fake_meta(), Path("/s"), "tok", "/wd",
+            "/no/such/binary",
+            [m],
+            _fake_meta(),
+            Path("/s"),
+            "tok",
+            "/wd",
         )
         assert out == [m]
 
@@ -302,6 +311,7 @@ class TestCleanupTaskVolumesNoRuntime:
 
     def test_silent_when_no_runtime(self, monkeypatch, tmp_path):
         import seekr_hatchery.docker as docker
+
         monkeypatch.setattr(docker, "podman_available", lambda: False)
         monkeypatch.setattr(docker, "docker_available", lambda: False)
         repo = tmp_path / "r"

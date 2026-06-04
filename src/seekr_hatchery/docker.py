@@ -1349,7 +1349,12 @@ def run_session(
     # the runtime volumes exist, seed on first launch. Bind and tmpfs
     # mounts pass through unchanged.
     mounts = prepare_volume_mounts(
-        runtime.binary, mounts, meta, session_dir, proxy_token, container_workdir,
+        runtime.binary,
+        mounts,
+        meta,
+        session_dir,
+        proxy_token,
+        container_workdir,
     )
 
     mode_label = "no-worktree mode" if meta.no_worktree else "worktree mode"

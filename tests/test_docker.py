@@ -1005,7 +1005,9 @@ class TestBuildMountsIncludesVolumes:
         cfg = docker.DockerConfig(volumes=[{"name": "uv-cache", "path": "/home/hatchery/.cache/uv"}])
         mounts = docker.build_mounts(_no_wt_meta(cwd), self._make_backend(), tmp_path, cfg)
 
-        expected = mount.VolumeMount(name="hatchery-uv-cache", dst="/home/hatchery/.cache/uv", mode="RW", task_scoped=False)
+        expected = mount.VolumeMount(
+            name="hatchery-uv-cache", dst="/home/hatchery/.cache/uv", mode="RW", task_scoped=False
+        )
         assert expected in mounts
 
 

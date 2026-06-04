@@ -341,11 +341,13 @@ class TestSeedCodexDir:
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         (home / ".codex").mkdir()
         (home / ".codex" / "auth.json").write_text(
-            json.dumps({
-                "auth_mode": "chatgpt",
-                "OPENAI_API_KEY": None,
-                "tokens": {"access_token": "real-oauth-tok"},
-            })
+            json.dumps(
+                {
+                    "auth_mode": "chatgpt",
+                    "OPENAI_API_KEY": None,
+                    "tokens": {"access_token": "real-oauth-tok"},
+                }
+            )
         )
         out = agent.CodexBackend._seed_codex_dir(self._ctx(token="proxy-tok"))
         data = json.loads(out["auth.json"])

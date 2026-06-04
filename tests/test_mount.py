@@ -105,17 +105,13 @@ class TestDiscriminator:
     TypeAdapter uses the ``kind`` field to construct the right variant."""
 
     def test_bind(self):
-        m = TypeAdapter(Mount).validate_python(
-            {"kind": "BIND", "src": "/host", "dst": "/cont", "mode": "RO"}
-        )
+        m = TypeAdapter(Mount).validate_python({"kind": "BIND", "src": "/host", "dst": "/cont", "mode": "RO"})
         assert isinstance(m, BindMount)
         assert m.src == Path("/host")
         assert m.mode == "RO"
 
     def test_volume(self):
-        m = TypeAdapter(Mount).validate_python(
-            {"kind": "VOLUME", "name": "vol-a", "dst": "/cont", "is_file": True}
-        )
+        m = TypeAdapter(Mount).validate_python({"kind": "VOLUME", "name": "vol-a", "dst": "/cont", "is_file": True})
         assert isinstance(m, VolumeMount)
         assert m.name == "vol-a"
         assert m.is_file is True

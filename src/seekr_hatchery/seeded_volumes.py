@@ -49,6 +49,7 @@ def task_volume_prefix(repo: Path, name: str) -> str:
     """
     # Lazy import: sessions → docker → seeded_volumes is the cycle.
     from seekr_hatchery.sessions import container_name
+
     return f"{container_name(repo, name)}-vol-"
 
 
@@ -150,11 +151,18 @@ def _seed_volume(
             tar.addfile(info, io.BytesIO(content))
     subprocess.run(
         [
-            runtime_binary, "run", "--rm", "-i",
-            "--user", "0:0",
-            "-v", f"{name}:/seed",
+            runtime_binary,
+            "run",
+            "--rm",
+            "-i",
+            "--user",
+            "0:0",
+            "-v",
+            f"{name}:/seed",
             image,
-            "sh", "-c", "tar -xf - -C /seed && chown -R 1000:1000 /seed",
+            "sh",
+            "-c",
+            "tar -xf - -C /seed && chown -R 1000:1000 /seed",
         ],
         input=buf.getvalue(),
         check=True,
@@ -178,14 +186,10 @@ def _seed_files_for(m: VolumeMount, ctx: SeedContext) -> Mapping[str, bytes]:
     payload = m.seed(ctx)
     if m.is_file:
         if not isinstance(payload, (bytes, bytearray)):
-            raise TypeError(
-                f"VolumeMount(is_file=True) seed must return bytes; got {type(payload).__name__}"
-            )
+            raise TypeError(f"VolumeMount(is_file=True) seed must return bytes; got {type(payload).__name__}")
         return {Path(m.dst).name: bytes(payload)}
     if isinstance(payload, (bytes, bytearray)):
-        raise TypeError(
-            "VolumeMount(is_file=False) seed must return Mapping[str, bytes]; got bytes"
-        )
+        raise TypeError("VolumeMount(is_file=False) seed must return Mapping[str, bytes]; got bytes")
     return payload
 
 
