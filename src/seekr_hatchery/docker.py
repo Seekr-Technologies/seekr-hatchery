@@ -680,14 +680,10 @@ def _construct_symlink_mounts(scan_root: Path, existing_mounts: list[Mount]) -> 
     For each symlink whose fully-resolved target lives outside the already-mounted
     area (and outside the system blocklist), emit a single ``target:target:rw``
     bind-mount so the symlink's stored host path resolves identically inside the
-    container. Deduplicates by unique resolved target.
-
-    Two link shapes do not survive the host→container path remap and are rejected
-    at launch with a clear error rather than silently dangling:
-      - absolute link whose target is inside *scan_root* (the host path doesn't
-        exist in the container; *scan_root* is mounted at a different location)
-      - relative link whose resolved target is outside *scan_root* (the relative
-        climb anchors at the remapped container path and lands elsewhere)
+    container. Deduplicates by unique resolved target. Symlinks whose target is
+    inside *scan_root* are skipped — the scan_root mount already covers them
+    (under host-path mirroring, both absolute and relative internal links
+    resolve correctly without any extra wiring).
 
     Limitation: chains that traverse multiple external symlink files only have
     their final target mounted, not intermediate hops — those chains may still
@@ -710,8 +706,6 @@ def _construct_symlink_mounts(scan_root: Path, existing_mounts: list[Mount]) -> 
 
     seen: set[Path] = set()
     mounts: list[Mount] = []
-    bad_abs_internal: list[tuple[Path, str]] = []
-    bad_rel_external: list[tuple[Path, str]] = []
 
     for dirpath, dirnames, filenames in os.walk(scan_root, followlinks=False, onerror=_on_err):
         dirnames[:] = [d for d in dirnames if d not in _SYMLINK_SKIP_DIRS]
@@ -720,28 +714,14 @@ def _construct_symlink_mounts(scan_root: Path, existing_mounts: list[Mount]) -> 
             if not p.is_symlink():
                 continue
             try:
-                link_str = os.readlink(p)
-            except OSError:
-                continue
-            try:
                 target = p.resolve(strict=True)
             except (OSError, RuntimeError):
                 logger.debug("follow_symlinks: skipping unresolvable %s", p)
                 continue
-            is_absolute = os.path.isabs(link_str)
             target_in_scan = target == scan_root_resolved or scan_root_resolved in target.parents
-
-            if is_absolute and target_in_scan:
-                bad_abs_internal.append((p, link_str))
+            if target_in_scan:
+                # Internal target — covered by the scan_root mount.
                 continue
-            if not is_absolute and not target_in_scan:
-                bad_rel_external.append((p, link_str))
-                continue
-            if not is_absolute and target_in_scan:
-                # Relative link staying inside scan_root resolves correctly inside
-                # the container — no mount needed.
-                continue
-            # Absolute link, target outside scan_root: the happy path.
             if target in seen:
                 continue
             if any(target == hp or hp in target.parents for hp in existing):
@@ -754,31 +734,6 @@ def _construct_symlink_mounts(scan_root: Path, existing_mounts: list[Mount]) -> 
                 continue
             seen.add(target)
             mounts.append(BindMount(src=str(target), dst=str(target), mode="RW"))
-
-    if bad_abs_internal or bad_rel_external:
-        lines = ["follow_symlinks: found symlinks that won't resolve inside the container:"]
-        if bad_abs_internal:
-            lines.append("")
-            lines.append(
-                f"  Absolute links pointing inside {scan_root} "
-                "(the container mounts this directory at a different absolute "
-                "path; rewrite each as a relative link):"
-            )
-            for p, link in bad_abs_internal:
-                lines.append(f"    {p} -> {link}")
-        if bad_rel_external:
-            lines.append("")
-            lines.append(
-                f"  Relative links escaping {scan_root} "
-                "(the relative climb resolves to a different path inside the "
-                "container; rewrite each as an absolute link):"
-            )
-            for p, link in bad_rel_external:
-                lines.append(f"    {p} -> {link}")
-        lines.append("")
-        lines.append("Fix the offending links, or set follow_symlinks: false in .hatchery/docker.yaml.")
-        ui.error("\n".join(lines))
-        sys.exit(1)
 
     return mounts
 

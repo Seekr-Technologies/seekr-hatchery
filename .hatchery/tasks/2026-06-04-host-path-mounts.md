@@ -62,6 +62,16 @@ resolves correctly inside the container — the previous rewrite-and-shadow
 machinery (per-session `git_ptr` file plus a bind-mount over the worktree's
 `.git`) was removed for the primary worktree.
 
+The `follow_symlinks` walker (`_construct_symlink_mounts`) was simplified
+along the same lines. Previously it rejected two link shapes that couldn't
+survive the host→container path remap (absolute links into the scan_root,
+relative links escaping it). Under host-path mirroring there is no remap,
+so both classes now Just Work: absolute internal links are covered by the
+scan_root mount, and relative external links resolve to the same absolute
+path on both sides — emit a `target:target` mount and they work like
+absolute external links did before. The walker collapses to "if target is
+outside scan_root and outside the system blocklist, mount it; else skip."
+
 **Key files changed:**
 - `src/seekr_hatchery/constants.py` — dropped `CONTAINER_REPO_ROOT`.
 - `src/seekr_hatchery/docker.py` — `launch_context`, `build_mounts`

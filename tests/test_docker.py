@@ -1272,65 +1272,32 @@ class TestConstructSymlinkMounts:
         target = external.resolve()
         assert mounts == [mount.BindMount(src=str(target), dst=str(target), mode="RW")]
 
-    def test_absolute_internal_link_raises(self, tmp_path, capsys):
-        """Absolute link pointing inside scan_root fails loudly — the host path
-        doesn't exist inside the container after the worktree remap."""
+    def test_absolute_internal_link_skipped(self, tmp_path):
+        """Absolute link pointing inside scan_root needs no extra mount: under
+        host-path mirroring, the scan_root mount makes the absolute host path
+        resolve identically inside the container."""
         scan = self._scan_root(tmp_path)
         (scan / "inner.txt").write_text("x")
         (scan / "link").symlink_to(scan / "inner.txt")  # absolute target
 
-        with pytest.raises(SystemExit):
-            docker._construct_symlink_mounts(scan, [])
+        mounts = docker._construct_symlink_mounts(scan, [])
 
-        err = capsys.readouterr().err
-        assert "follow_symlinks" in err
-        assert "Absolute links pointing inside" in err
-        assert str(scan / "link") in err
+        assert mounts == []
 
-    def test_relative_external_link_raises(self, tmp_path, capsys):
-        """Relative link escaping scan_root fails loudly — the relative climb
-        anchors at the remapped container path and lands elsewhere."""
+    def test_relative_external_link_emits_mount(self, tmp_path):
+        """Relative link escaping scan_root needs its target mounted at the
+        host path — under host-path mirroring the relative climb lands at the
+        same absolute path on both sides, so a target:target bind-mount
+        suffices."""
         scan = self._scan_root(tmp_path)
         external = tmp_path / "external"
         external.mkdir()
         (scan / "link").symlink_to("../external")
 
-        with pytest.raises(SystemExit):
-            docker._construct_symlink_mounts(scan, [])
+        mounts = docker._construct_symlink_mounts(scan, [])
 
-        err = capsys.readouterr().err
-        assert "Relative links escaping" in err
-        assert str(scan / "link") in err
-        assert "../external" in err
-
-    def test_error_reports_both_kinds_at_once(self, tmp_path, capsys):
-        """Multiple problematic links are reported together, not one at a time."""
-        scan = self._scan_root(tmp_path)
-        (scan / "inner.txt").write_text("x")
-        (tmp_path / "external").mkdir()
-        (scan / "abs_bad").symlink_to(scan / "inner.txt")
-        (scan / "rel_bad").symlink_to("../external")
-
-        with pytest.raises(SystemExit):
-            docker._construct_symlink_mounts(scan, [])
-
-        err = capsys.readouterr().err
-        assert "Absolute links pointing inside" in err
-        assert "Relative links escaping" in err
-        assert str(scan / "abs_bad") in err
-        assert str(scan / "rel_bad") in err
-
-    def test_error_mentions_disabling_the_flag(self, tmp_path, capsys):
-        """Error message points the user at the escape hatch."""
-        scan = self._scan_root(tmp_path)
-        (scan / "inner.txt").write_text("x")
-        (scan / "link").symlink_to(scan / "inner.txt")
-
-        with pytest.raises(SystemExit):
-            docker._construct_symlink_mounts(scan, [])
-
-        err = capsys.readouterr().err
-        assert "follow_symlinks: false" in err
+        target = external.resolve()
+        assert mounts == [mount.BindMount(src=str(target), dst=str(target), mode="RW")]
 
 
 # ---------------------------------------------------------------------------
