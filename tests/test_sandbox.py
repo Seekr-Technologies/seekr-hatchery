@@ -14,7 +14,6 @@ from pathlib import Path
 import pytest
 
 import seekr_hatchery.agents as agent
-import seekr_hatchery.constants as constants
 import seekr_hatchery.docker as docker
 import seekr_hatchery.proxy as proxy_mod
 import seekr_hatchery.sessions as sessions
@@ -24,8 +23,6 @@ pytestmark = pytest.mark.integration
 
 # Captured at import time, before any fixture patches HOME.
 _REAL_HOME = os.environ.get("HOME", "")
-
-CONTAINER_WORKTREE = f"{constants.CONTAINER_REPO_ROOT}/.hatchery/worktrees/test-wt"
 
 
 @pytest.fixture(autouse=True)
@@ -121,7 +118,8 @@ def no_wt_run(
     agent.CODEX.on_new_task(session_dir)
     # Codex's home_mounts requires codex_auth.json (created by on_before_container_start)
     # and ~/.codex to exist.
-    agent.CODEX.on_before_container_start(session_dir, "test-proxy-token", "/workspace")
+    container_cwd = str(no_wt_cwd)
+    agent.CODEX.on_before_container_start(session_dir, "test-proxy-token", container_cwd)
     (Path.home() / ".codex").mkdir(parents=True, exist_ok=True)
     from seekr_hatchery.models import SessionMeta
 
@@ -138,8 +136,8 @@ def no_wt_run(
             result = docker._run_container(
                 image=no_wt_image,
                 mounts=mounts,
-                workdir="/workspace",
-                hatchery_repo="/workspace",
+                workdir=container_cwd,
+                hatchery_repo=container_cwd,
                 name="test-no-wt",
                 mutator=mutator,
                 proxy_token=proxy_token,
@@ -215,14 +213,13 @@ def wt_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[Callable[[list[str]], subprocess.CompletedProcess[str]], list[Mount]]:
     """Worktree container runner.  Mirrors the pre-flight setup in launch_docker
-    (sentinel files, git_ptr rewrite, mount construction) without requiring a
-    real API key.
+    (sentinel files, mount construction) without requiring a real API key.
 
     Returns ``(run_fn, mounts)`` where ``run_fn(command)`` executes a command
     override inside the production-configured worktree sandbox container.
 
-    Note: intentionally replicates the sentinel / git_ptr logic from
-    launch_docker so that changes to that logic must be mirrored here.
+    Note: intentionally replicates the sentinel logic from launch_docker so
+    that changes to that logic must be mirrored here.
     """
     # --userns=keep-id fails in nested Podman (DinD); drop it for all sandbox tests.
     monkeypatch.setattr(docker, "_userns_flags", lambda _r: [])
@@ -231,7 +228,9 @@ def wt_run(
     session_dir = sessions.task_session_dir(wt_repo, task_name)
     session_dir.mkdir(parents=True, exist_ok=True)
     agent.CODEX.on_new_task(session_dir)
-    agent.CODEX.on_before_container_start(session_dir, "test-proxy-token", CONTAINER_WORKTREE)
+    container_worktree = str(wt_worktree)
+    container_repo = str(wt_repo)
+    agent.CODEX.on_before_container_start(session_dir, "test-proxy-token", container_worktree)
     (Path.home() / ".codex").mkdir(parents=True, exist_ok=True)
 
     # Mirror launch_docker: create sentinel files for any .git-root writes.
@@ -244,9 +243,9 @@ def wt_run(
             p.touch()
         git_sentinels.append((p, fname))
 
-    # Rewrite the worktree .git pointer to use the container-relative path.
-    git_ptr = session_dir / "git_ptr"
-    git_ptr.write_text(f"gitdir: {constants.CONTAINER_REPO_ROOT}/.git/worktrees/{task_name}\n")
+    # No .git pointer rewrite needed: under host-path mirroring, the
+    # worktree's existing .git file (gitdir: <host_repo>/.git/worktrees/<name>)
+    # already resolves correctly inside the container.
 
     from seekr_hatchery.models import SessionMeta
 
@@ -257,15 +256,14 @@ def wt_run(
         session_dir,
         docker.DockerConfig(),
         git_sentinel_files=git_sentinels,
-        worktree_git_ptr=git_ptr,
     )
 
     def run(command: list[str]) -> subprocess.CompletedProcess[str]:
         result = docker._run_container(
             image=wt_image,
             mounts=mounts,
-            workdir=CONTAINER_WORKTREE,
-            hatchery_repo=constants.CONTAINER_REPO_ROOT,
+            workdir=container_worktree,
+            hatchery_repo=container_repo,
             name=task_name,
             mutator=None,
             proxy_token=None,
@@ -384,6 +382,7 @@ class TestContainerEnv:
     def test_env_and_workdir(
         self,
         no_wt_run: tuple[Callable[..., subprocess.CompletedProcess[str]], list[Mount]],
+        no_wt_cwd: Path,
     ) -> None:
         run, _ = no_wt_run
         script = (
@@ -392,8 +391,9 @@ class TestContainerEnv:
         result = run(["sh", "-c", script])
         assert result.returncode == 0, f"Script failed:\n{result.stderr}"
         assert "TASK=test-no-wt" in result.stdout
-        assert "REPO=/workspace" in result.stdout
-        assert "WD=/workspace" in result.stdout
+        # Under host-path mirroring, the container cwd equals the host cwd.
+        assert f"REPO={no_wt_cwd}" in result.stdout
+        assert f"WD={no_wt_cwd}" in result.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -499,12 +499,13 @@ class TestGitInWorktree:
     def test_git_log_reads_history(
         self,
         wt_run: tuple[Callable[[list[str]], subprocess.CompletedProcess[str]], list[Mount]],
+        wt_worktree: Path,
     ) -> None:
         """git log can read the repo's history from inside the container."""
         run, _ = wt_run
         # -c safe.directory=* bypasses the ownership check: tests skip --userns=keep-id
         # so the container runs as root while files are owned by the host UID.
-        result = run(["git", "-c", "safe.directory=*", "-C", CONTAINER_WORKTREE, "log", "--oneline"])
+        result = run(["git", "-c", "safe.directory=*", "-C", str(wt_worktree), "log", "--oneline"])
         assert result.returncode == 0, f"git log failed:\n{result.stderr}"
         assert "init" in result.stdout
 
@@ -512,6 +513,7 @@ class TestGitInWorktree:
         self,
         wt_run: tuple[Callable[[list[str]], subprocess.CompletedProcess[str]], list[Mount]],
         wt_repo: Path,
+        wt_worktree: Path,
     ) -> None:
         """A commit written inside the container is visible in git log on the host.
 
@@ -524,7 +526,7 @@ class TestGitInWorktree:
             [
                 "sh",
                 "-c",
-                f"git -c safe.directory='*' -C {CONTAINER_WORKTREE} commit --allow-empty -m host-visible-commit",
+                f"git -c safe.directory='*' -C {wt_worktree} commit --allow-empty -m host-visible-commit",
             ]
         )
         assert result.returncode == 0, f"git commit failed:\n{result.stderr}"

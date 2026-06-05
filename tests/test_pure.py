@@ -415,16 +415,18 @@ class TestSandboxContext:
         assert "/repo/.hatchery/worktrees/my-task" in result
 
     def test_docker_contains_repo_root(self):
-        result = self._docker()
-        assert constants.CONTAINER_REPO_ROOT in result
+        result = self._docker(repo=Path("/some/repo"))
+        assert "/some/repo" in result
 
     def test_docker_mentions_read_write(self):
         result = self._docker()
         assert "read-write" in result
 
-    def test_docker_mentions_read_only(self):
+    def test_docker_mentions_main_branch_inspection(self):
+        # After the host-path-mirroring switch the RO main-branch file view
+        # at /repo is gone — the system prompt should tell agents to use git.
         result = self._docker()
-        assert "read-only" in result
+        assert "git show" in result or "git diff" in result
 
     def test_docker_contains_branch(self):
         result = self._docker(branch="hatchery/my-task")
@@ -508,9 +510,9 @@ class TestSandboxContextNoWorktree:
         result = self._no_worktree_docker()
         assert "Docker container" in result
 
-    def test_docker_no_worktree_mentions_workspace(self):
-        result = self._no_worktree_docker()
-        assert "/workspace" in result
+    def test_docker_no_worktree_mentions_working_directory(self):
+        result = self._no_worktree_docker(worktree=Path("/host/some/cwd"))
+        assert "/host/some/cwd" in result
 
     def test_docker_no_worktree_does_not_claim_native_worktree(self):
         result = self._no_worktree_docker()

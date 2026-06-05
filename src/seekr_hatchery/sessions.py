@@ -21,7 +21,6 @@ import seekr_hatchery.git as git
 import seekr_hatchery.ui as ui
 from seekr_hatchery.constants import (
     CONTAINER_INCLUDES_ROOT,
-    CONTAINER_REPO_ROOT,
     DEFAULT_BASE,
     DOCKER_CONFIG,
     WORKTREES_SUBDIR,
@@ -115,7 +114,7 @@ def sandbox_context(
             "You are running inside an **isolated Docker container** (no git worktree).",
             "",
             "**Filesystem permissions:**",
-            "- `/workspace/` — your working directory (read-write; all edits land here)",
+            f"- `{worktree}/` — your working directory (read-write; all edits land here)",
         ]
         if branch:
             lines += [
@@ -141,17 +140,18 @@ def sandbox_context(
                 f"When creating commits or pull requests, target `{main_branch}`. You may push to `{branch}` only.",
             ]
     elif use_docker:
-        container_worktree = f"{CONTAINER_REPO_ROOT}/.hatchery/worktrees/{name}"
         lines = [
             "# Sandbox Environment",
             "",
-            "You are running inside an **isolated Docker container**.",
+            "You are running inside an **isolated Docker container**. Container paths mirror host paths.",
             "",
             "**Filesystem permissions:**",
-            f"- `{container_worktree}/` — your worktree (read-write; all edits land here)",
-            f"- `{CONTAINER_REPO_ROOT}/` — the repository (read-only; main-branch files cannot be modified)",
-            f"- `{CONTAINER_REPO_ROOT}/.git/objects/` — git object store (read-write; your commits are visible on the host)",
-            f"- `{CONTAINER_REPO_ROOT}/.git/refs/heads/hatchery/` — branch refs (read-write for your branch only)",
+            f"- `{worktree}/` — your worktree (read-write; all edits land here)",
+            f"- `{repo}/.git/objects/` — git object store (read-write; your commits are visible on the host)",
+            f"- `{repo}/.git/refs/heads/hatchery/` — branch refs (read-write for your branch only)",
+            "",
+            f"Main-branch files are not directly visible at `{repo}/` — the worktree overlays it. "
+            f"Use `git show main:path/to/file` or `git diff main...` to inspect main-branch content.",
             "",
             f"**Your branch:** `{branch}`",
             f"**Target branch for PRs:** `{main_branch}`",
