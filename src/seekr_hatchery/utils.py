@@ -70,19 +70,6 @@ def repo_id(repo: Path) -> str:
     return f"{basename}-{short_hash}"
 
 
-def unique_basename(name: str, used: set[str]) -> str:
-    """Return *name* if not in *used*, else *name*-1, *name*-2, … — first unused variant.
-
-    Does NOT mutate *used*; callers are responsible for adding the result.
-    """
-    if name not in used:
-        return name
-    i = 1
-    while f"{name}-{i}" in used:
-        i += 1
-    return f"{name}-{i}"
-
-
 def open_for_editing(path: Path) -> None:
     """Open a file for the user to edit, then wait until they are done.
 

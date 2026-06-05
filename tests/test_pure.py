@@ -908,14 +908,14 @@ class TestSandboxContextIncludePaths:
         result = self._ctx(use_docker=True, no_worktree=False, include_paths=[])
         assert "Included paths" not in result
 
-    def test_docker_plain_dir_shows_container_path(self, tmp_path):
+    def test_docker_plain_dir_shows_host_path(self, tmp_path):
         plain = tmp_path / "shared-data"
         plain.mkdir()
         result = self._ctx(use_docker=True, no_worktree=False, include_paths=[self._entry(plain)])
         assert "Included paths" in result
-        assert "/includes/shared-data/" in result
+        assert str(plain) in result
 
-    def test_docker_git_repo_with_worktree_shows_worktree_path(self, tmp_path):
+    def test_docker_git_repo_with_worktree_shows_worktree_host_path(self, tmp_path):
         repo_b = tmp_path / "repo-b"
         repo_b.mkdir()
         (repo_b / ".git").mkdir()
@@ -923,17 +923,7 @@ class TestSandboxContextIncludePaths:
         wt = repo_b / constants.WORKTREES_SUBDIR / "my-task"
         wt.mkdir(parents=True)
         result = self._ctx(use_docker=True, no_worktree=False, include_paths=[self._entry(repo_b)])
-        assert "/includes/repo-b/" in result
-        assert ".hatchery/worktrees/my-task" in result
-
-    def test_docker_basename_collision_shows_suffix(self, tmp_path):
-        a = tmp_path / "a" / "api"
-        b = tmp_path / "b" / "api"
-        a.mkdir(parents=True)
-        b.mkdir(parents=True)
-        result = self._ctx(use_docker=True, no_worktree=False, include_paths=[self._entry(a), self._entry(b)])
-        assert "/includes/api/" in result
-        assert "/includes/api-1/" in result
+        assert str(wt) in result
 
     def test_native_plain_dir_shows_host_path(self, tmp_path):
         plain = tmp_path / "shared-data"
@@ -957,14 +947,14 @@ class TestSandboxContextIncludePaths:
         docs.mkdir()
         result = self._ctx(use_docker=True, no_worktree=False, include_paths=[self._entry(docs, mode="ro")])
         assert "Included paths" in result
-        assert "/includes/docs/" in result
+        assert str(docs) in result
         assert "read-only" in result
 
     def test_docker_rw_reference_shows_read_write_label(self, tmp_path):
         shared = tmp_path / "shared"
         shared.mkdir()
         result = self._ctx(use_docker=True, no_worktree=False, include_paths=[self._entry(shared, mode="rw")])
-        assert "/includes/shared/" in result
+        assert str(shared) in result
         assert "read-write" in result
 
 

@@ -28,7 +28,6 @@ import seekr_hatchery.proxy as proxy
 import seekr_hatchery.pty_proxy as pty_proxy
 import seekr_hatchery.ui as ui
 from seekr_hatchery.constants import (
-    CONTAINER_INCLUDES_ROOT,
     DOCKER_CONFIG,
     WORKTREES_SUBDIR,
 )
@@ -37,7 +36,7 @@ from seekr_hatchery.kubectl_proxy import KubectlConfig
 from seekr_hatchery.models import SessionMeta
 from seekr_hatchery.mount import BindMount, Mount, VolumeMount, mount_to_docker_args
 from seekr_hatchery.seeded_volumes import prepare_volume_mounts
-from seekr_hatchery.utils import open_for_editing, run, unique_basename
+from seekr_hatchery.utils import open_for_editing, run
 
 logger = logging.getLogger("hatchery")
 
@@ -657,6 +656,7 @@ def _check_host_path_safe_for_mount(repo: Path) -> None:
         )
         sys.exit(1)
 
+
 # Directories we don't bother descending into — large, and unlikely to host
 # meaningful user-authored symlinks.
 _SYMLINK_SKIP_DIRS: frozenset[str] = frozenset(
@@ -853,28 +853,28 @@ def _docker_mounts_includes(
 ) -> list[Mount]:
     """Return Mounts for paths included via --include / --include-rw / --include-ro.
 
-    Each path is mounted at /includes/<basename>/.  If two included paths share
-    a basename the second gets a numeric suffix (e.g. api-1).
+    Each include is mounted at its host path inside the container, same as
+    the primary repo. Distinct host paths are inherently unique, so no
+    basename collision logic is needed; the worktree's existing .git
+    pointer already resolves correctly under host-path mirroring, so no
+    pointer rewrite is needed either.
 
-    mode="worktree": For git repos with a hatchery/<name> worktree the same
-    layered mount strategy as the primary repo is applied (root:ro, targeted
-    .git sub-dirs:rw, worktree:rw) and a corrected .git pointer file is
-    written to *session_dir* and bind-mounted over the worktree's .git file.
+    mode="worktree": For git repos with a hatchery/<name> worktree the
+    same layered mount strategy as the primary repo is applied (root:ro,
+    targeted .git sub-dirs:rw, worktree:rw).
 
-    mode="rw" or mode="ro": Simple bind-mount with the corresponding access
-    mode.  No worktree is expected or created.
+    mode="rw" or mode="ro": Simple bind-mount with the corresponding
+    access mode. No worktree is expected or created.
 
-    In no-worktree mode all entries fall back to a simple mount using their
-    access mode (worktree entries are treated as rw).
+    In no-worktree mode all entries fall back to a simple mount using
+    their access mode (worktree entries are treated as rw).
     """
     mounts: list[Mount] = []
-    used_basenames: set[str] = set()
 
     for entry in include_entries:
         path = entry.path
-        basename = unique_basename(path.name, used_basenames)
-        used_basenames.add(basename)
-        container_path = f"{CONTAINER_INCLUDES_ROOT}/{basename}"
+        _check_host_path_safe_for_mount(path)
+        container_path = str(path)
 
         if entry.mode == "worktree" and not no_worktree:
             is_git = (path / ".git").exists()
@@ -883,12 +883,7 @@ def _docker_mounts_includes(
                 if worktree.exists():
                     # Layered mounts: root ro + targeted .git rw (same as primary repo)
                     mounts.extend(_git_worktree_mounts(path, name, container_path))
-                    container_worktree = f"{container_path}/.hatchery/worktrees/{name}"
-                    mounts.append(BindMount(src=str(worktree), dst=container_worktree, mode="RW"))
-                    # Rewrite .git pointer to use container-relative path
-                    git_ptr_file = session_dir / f"git_ptr_include_{basename}"
-                    git_ptr_file.write_text(f"gitdir: {container_path}/.git/worktrees/{name}\n")
-                    mounts.append(BindMount(src=str(git_ptr_file), dst=f"{container_worktree}/.git", mode="RW"))
+                    mounts.append(BindMount(src=str(worktree), dst=str(worktree), mode="RW"))
                     continue
                 logger.warning(
                     "include worktree not found for %s (expected %s); "

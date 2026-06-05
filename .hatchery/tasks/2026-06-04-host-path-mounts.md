@@ -48,13 +48,16 @@ handles one specific agent.
 
 ## Summary
 
-The hardcoded container paths `CONTAINER_REPO_ROOT = "/repo"` and
-`/workspace` were dropped. Worktree mode now mounts the worktree at
+The hardcoded container paths `CONTAINER_REPO_ROOT = "/repo"`,
+`/workspace`, and `CONTAINER_INCLUDES_ROOT = "/includes"` were all
+dropped. Worktree mode now mounts the worktree at
 `str(meta.worktree_path)` and lays `.git` / sentinel mounts at
 `str(meta.repo_path)/.git/...`. No-worktree mode mounts cwd at
 `str(meta.worktree_path)`. The container WORKDIR is the host worktree
 path (or host cwd, no-worktree). `launch_sandbox_shell` mounts the repo
-at its host path.
+at its host path. Includes mount at their host paths too, with the same
+layered structure for git-repo includes (no basename uniquing, no
+include-side `.git` pointer rewrite).
 
 Because container paths equal host paths, the worktree's existing `.git`
 pointer file (`gitdir: <host_repo>/.git/worktrees/<name>`) already
@@ -87,11 +90,11 @@ outside scan_root and outside the system blocklist, mount it; else skip."
 - `src/seekr_hatchery/resources/Dockerfile.template` — dropped
   `WORKDIR /repo` (the container runtime sets WORKDIR via `-w` at run
   time using the host path).
-- Tests: `test_pure.py`, `test_sandbox.py`, `test_session_io.py` updated
-  to assert against fixture host paths instead of hardcoded `/repo` /
-  `/workspace`. Includes-related tests still use `/includes/<basename>`
-  — included secondary repos are out of scope for this change (see
-  follow-up below).
+- `src/seekr_hatchery/utils.py` — dropped `unique_basename` (no longer
+  has any callers; host paths are inherently unique).
+- Tests: `test_pure.py`, `test_sandbox.py`, `test_session_io.py`,
+  `test_docker.py` updated to assert against fixture host paths instead
+  of hardcoded `/repo`, `/workspace`, or `/includes/<basename>`.
 
 **Tradeoff (call out for future agents):** the RO main-branch file view
 that used to exist at `/repo` is gone. The worktree mount now overlays
@@ -107,25 +110,26 @@ after switching over. In-flight sessions started before this change end
 up with their session log at the old container-path-derived location;
 they're still readable but won't be auto-discovered after the switch.
 
-**Follow-up worth considering:** apply the same host-path-mirroring to
-included secondary repos (currently mounted at `/includes/<basename>`).
-Same arguments (symlinks/lockfiles work, per-include state consolidates
-with native runs, code simplification — drops `_unique_basename`, the
-`CONTAINER_INCLUDES_ROOT` constant, and the include-side `.git` pointer
-rewrite). Punted to a separate PR to keep the scope contained and the
-collision-guard surface area small.
+**Latent bug fixed as a side effect:** under the old scheme, an absolute
+symlink inside the primary worktree pointing into an include's host path
+would dangle inside the container — the include lived at
+`/includes/<basename>`, not at its host path, so the symlink's stored
+host path didn't resolve. The symlink walker's "already-covered-by-an-
+existing-mount" filter would skip it (the host path was in the existing
+mount sources) but the host path it skipped wasn't actually present
+inside the container. With includes at host paths, the symlink resolves
+directly and the filter correctly identifies it as covered.
 
 **Things to be aware of when modifying this area:**
 - The `_git_worktree_mounts` helper takes `container_root` as a string;
-  pass `str(meta.repo_path)` for the primary repo. Included secondary
-  repos still mount at `/includes/<basename>` — their host path doesn't
-  match the container path, so they still need the per-include `.git`
-  pointer rewrite in `_docker_mounts_includes`.
-- The primary worktree's `.git` pointer is **not** rewritten. If you
-  ever change the container path away from the host path (e.g.,
-  reintroduce a fixed `/repo`), you'll need to bring back the pointer
-  rewrite + shadow-mount that lived in `run_session` / `build_mounts`.
-- The collision guard rejects host repos that resolve to a path on the
-  container blocklist (`/`, `/usr`, `/etc`, `CONTAINER_HOME`, ...).
-  Subpaths under `/home/hatchery/...` are fine — they just add a subdir
-  to the container's home.
+  pass `str(repo)` for any repo (primary or included). Container paths
+  always mirror host paths now.
+- Neither the primary worktree's nor any include worktree's `.git`
+  pointer is rewritten. If you ever change the container path away from
+  the host path (e.g., reintroduce a fixed `/repo` or `/includes`),
+  you'll need to bring back the pointer rewrite + shadow-mount that
+  used to live in `run_session` / `build_mounts` / `_docker_mounts_includes`.
+- The collision guard rejects any host path (repo, worktree, or
+  include) that resolves to the container blocklist (`/`, `/usr`,
+  `/etc`, `CONTAINER_HOME`, ...). Subpaths under `/home/hatchery/...`
+  are fine — they just add a subdir to the container's home.

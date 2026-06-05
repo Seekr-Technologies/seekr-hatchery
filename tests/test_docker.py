@@ -628,7 +628,7 @@ class TestDockerMountsIncludes:
         return IncludeEntry(path=path, mode=mode)
 
     def test_plain_dir_gets_rw_mount(self, tmp_path):
-        """A plain (non-git) directory in worktree mode is mounted rw."""
+        """A plain (non-git) directory in worktree mode is mounted rw at its host path."""
         plain = tmp_path / "shared-data"
         plain.mkdir()
         session_dir = tmp_path / "session"
@@ -636,7 +636,7 @@ class TestDockerMountsIncludes:
 
         mounts = docker._docker_mounts_includes([self._entry(plain)], "my-task", session_dir, no_worktree=False)
 
-        assert mount.BindMount(src=str(plain), dst="/includes/shared-data", mode="RW") in mounts
+        assert mount.BindMount(src=str(plain), dst=str(plain), mode="RW") in mounts
 
     def test_git_repo_without_worktree_gets_rw_mount(self, tmp_path):
         """A git repo in worktree mode with no worktree for the task falls back to rw mount."""
@@ -648,11 +648,11 @@ class TestDockerMountsIncludes:
 
         mounts = docker._docker_mounts_includes([self._entry(repo)], "my-task", session_dir, no_worktree=False)
 
-        assert mount.BindMount(src=str(repo), dst="/includes/repo-b", mode="RW") in mounts
+        assert mount.BindMount(src=str(repo), dst=str(repo), mode="RW") in mounts
         assert not any("git_ptr" in str(m.src or "") for m in mounts)
 
     def test_git_repo_with_worktree_gets_layered_mounts(self, tmp_path):
-        """A git repo in worktree mode with a task worktree gets layered mounts."""
+        """A git repo in worktree mode with a task worktree gets layered mounts at host paths."""
 
         repo = tmp_path / "repo-b"
         repo.mkdir()
@@ -666,32 +666,14 @@ class TestDockerMountsIncludes:
 
         mounts = docker._docker_mounts_includes([self._entry(repo)], "my-task", session_dir, no_worktree=False)
 
-        assert mount.BindMount(src=str(repo), dst="/includes/repo-b", mode="RO") in mounts
-        assert mount.BindMount(src=str(git_dir), dst="/includes/repo-b/.git", mode="RW") in mounts
-        assert mount.BindMount(src=str(git_dir / "objects"), dst="/includes/repo-b/.git/objects", mode="RW") in mounts
-        container_wt = "/includes/repo-b/.hatchery/worktrees/my-task"
-        assert mount.BindMount(src=str(worktree), dst=container_wt, mode="RW") in mounts
-        git_ptr_file = session_dir / "git_ptr_include_repo-b"
-        assert git_ptr_file.exists()
-        assert "gitdir: /includes/repo-b/.git/worktrees/my-task" in git_ptr_file.read_text()
-        assert mount.BindMount(src=str(git_ptr_file), dst=f"{container_wt}/.git", mode="RW") in mounts
-        assert mount.BindMount(src=str(repo), dst="/includes/repo-b", mode="RW") not in mounts
-
-    def test_basename_collision_gets_numeric_suffix(self, tmp_path):
-        """Two paths sharing the same basename get distinct container paths."""
-        a = tmp_path / "a" / "api"
-        b = tmp_path / "b" / "api"
-        a.mkdir(parents=True)
-        b.mkdir(parents=True)
-        session_dir = tmp_path / "session"
-        session_dir.mkdir()
-
-        mounts = docker._docker_mounts_includes(
-            [self._entry(a), self._entry(b)], "task", session_dir, no_worktree=False
-        )
-
-        assert mount.BindMount(src=str(a), dst="/includes/api", mode="RW") in mounts
-        assert mount.BindMount(src=str(b), dst="/includes/api-1", mode="RW") in mounts
+        assert mount.BindMount(src=str(repo), dst=str(repo), mode="RO") in mounts
+        assert mount.BindMount(src=str(git_dir), dst=f"{repo}/.git", mode="RW") in mounts
+        assert mount.BindMount(src=str(git_dir / "objects"), dst=f"{repo}/.git/objects", mode="RW") in mounts
+        assert mount.BindMount(src=str(worktree), dst=str(worktree), mode="RW") in mounts
+        # No .git pointer rewrite — under host-path mirroring, the worktree's
+        # existing .git file already resolves correctly inside the container.
+        assert not any("git_ptr" in str(m.src or "") for m in mounts)
+        assert mount.BindMount(src=str(repo), dst=str(repo), mode="RW") not in mounts
 
     def test_no_worktree_skips_layered_mounts(self, tmp_path):
         """In no-worktree mode, worktree-mode git repos get a simple rw mount."""
@@ -706,10 +688,8 @@ class TestDockerMountsIncludes:
 
         mounts = docker._docker_mounts_includes([self._entry(repo)], "my-task", session_dir, no_worktree=True)
 
-        assert mount.BindMount(src=str(repo), dst="/includes/repo-b", mode="RW") in mounts
-        git_ptr_file = session_dir / "git_ptr_include_repo-b"
-        assert not git_ptr_file.exists()
-        assert not any(str(git_ptr_file) == str(m.src) for m in mounts)
+        assert mount.BindMount(src=str(repo), dst=str(repo), mode="RW") in mounts
+        assert not any("git_ptr" in str(m.src or "") for m in mounts)
 
     def test_empty_list_returns_empty(self, tmp_path):
         mounts = docker._docker_mounts_includes([], "task", tmp_path, no_worktree=False)
@@ -728,7 +708,7 @@ class TestDockerMountsIncludes:
             [self._entry(plain, mode="rw")], "my-task", session_dir, no_worktree=False
         )
 
-        assert mount.BindMount(src=str(plain), dst="/includes/shared-data", mode="RW") in mounts
+        assert mount.BindMount(src=str(plain), dst=str(plain), mode="RW") in mounts
 
     def test_reference_ro_plain_dir(self, tmp_path):
         """mode='ro' gives a simple ro mount."""
@@ -741,8 +721,8 @@ class TestDockerMountsIncludes:
             [self._entry(plain, mode="ro")], "my-task", session_dir, no_worktree=False
         )
 
-        assert mount.BindMount(src=str(plain), dst="/includes/docs", mode="RO") in mounts
-        assert mount.BindMount(src=str(plain), dst="/includes/docs", mode="RW") not in mounts
+        assert mount.BindMount(src=str(plain), dst=str(plain), mode="RO") in mounts
+        assert mount.BindMount(src=str(plain), dst=str(plain), mode="RW") not in mounts
 
     def test_reference_mode_git_repo_no_layered_mounts(self, tmp_path):
         """mode='ro' on a git repo with a worktree still just does a simple ro mount."""
@@ -762,9 +742,9 @@ class TestDockerMountsIncludes:
             [self._entry(repo, mode="ro")], "my-task", session_dir, no_worktree=False
         )
 
-        assert mount.BindMount(src=str(repo), dst="/includes/repo-b", mode="RO") in mounts
+        assert mount.BindMount(src=str(repo), dst=str(repo), mode="RO") in mounts
         # No layered mounts
-        assert mount.BindMount(src=str(repo), dst="/includes/repo-b", mode="RW") not in mounts
+        assert mount.BindMount(src=str(repo), dst=str(repo), mode="RW") not in mounts
         assert not any("git_ptr" in str(m.src or "") for m in mounts)
         assert not any("worktrees" in str(m.dst or "") for m in mounts)
 
@@ -783,7 +763,7 @@ class TestDockerMountsIncludes:
             [self._entry(repo, mode="rw")], "my-task", session_dir, no_worktree=False
         )
 
-        assert mount.BindMount(src=str(repo), dst="/includes/repo-c", mode="RW") in mounts
+        assert mount.BindMount(src=str(repo), dst=str(repo), mode="RW") in mounts
         assert not any("git_ptr" in str(m.src or "") for m in mounts)
         assert not any("worktrees" in str(m.dst or "") for m in mounts)
 
@@ -807,9 +787,9 @@ class TestDockerMountsIncludes:
         mounts = docker._docker_mounts_includes(entries, "my-task", session_dir, no_worktree=False)
 
         # worktree entry without an actual worktree → rw fallback
-        assert mount.BindMount(src=str(wt_repo), dst="/includes/wt-repo", mode="RW") in mounts
+        assert mount.BindMount(src=str(wt_repo), dst=str(wt_repo), mode="RW") in mounts
         # ro reference entry
-        assert mount.BindMount(src=str(ro_dir), dst="/includes/docs", mode="RO") in mounts
+        assert mount.BindMount(src=str(ro_dir), dst=str(ro_dir), mode="RO") in mounts
 
 
 # ---------------------------------------------------------------------------
