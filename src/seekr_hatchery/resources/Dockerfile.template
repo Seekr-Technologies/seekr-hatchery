@@ -59,7 +59,3 @@ ENV PATH="/home/hatchery/.npm-global/bin:/home/hatchery/.local/bin:$PATH"
 # ── Podman-in-Podman (DinD) ──────────────────────────────────────────────────
 # Uncomment this section AND set `dind: true` in .hatchery/docker.yaml.
 {{DIND}}
-
-# =============================================================================
-
-WORKDIR /repo

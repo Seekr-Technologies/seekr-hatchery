@@ -336,14 +336,15 @@ class TestSandboxContextChat:
         result = sessions.sandbox_context(
             name="chat-1",
             branch="",
-            worktree=Path("/repo"),
-            repo=Path("/repo"),
+            worktree=Path("/host/repo"),
+            repo=Path("/host/repo"),
             main_branch="main",
             use_docker=True,
             no_worktree=True,
         )
         assert "Docker container" in result
-        assert "/workspace/" in result
+        # The working dir is now the host cwd path (mirroring), not /workspace.
+        assert "/host/repo/" in result
         # Should NOT mention branches or PRs when branch is empty
         assert "branch" not in result.lower()
         assert "pull request" not in result.lower()

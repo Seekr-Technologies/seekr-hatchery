@@ -28,8 +28,6 @@ import seekr_hatchery.proxy as proxy
 import seekr_hatchery.pty_proxy as pty_proxy
 import seekr_hatchery.ui as ui
 from seekr_hatchery.constants import (
-    CONTAINER_INCLUDES_ROOT,
-    CONTAINER_REPO_ROOT,
     DOCKER_CONFIG,
     WORKTREES_SUBDIR,
 )
@@ -38,7 +36,7 @@ from seekr_hatchery.kubectl_proxy import KubectlConfig
 from seekr_hatchery.models import SessionMeta
 from seekr_hatchery.mount import BindMount, Mount, VolumeMount, mount_to_docker_args
 from seekr_hatchery.seeded_volumes import prepare_volume_mounts
-from seekr_hatchery.utils import open_for_editing, run, unique_basename
+from seekr_hatchery.utils import open_for_editing, run
 
 logger = logging.getLogger("hatchery")
 
@@ -557,19 +555,20 @@ def launch_context(
     field is empty in that case and the caller doesn't pass it to the
     agent's command builder.
 
-    Worktree mode mounts the repo at ``CONTAINER_REPO_ROOT`` and uses
-    ``<repo>/<rel-to-worktree>`` as the container WORKDIR; no-worktree mode
-    bind-mounts cwd at ``/workspace``.
+    Container paths mirror host paths so any path-keyed state — agent
+    per-project directories under ``~/.<agent>/``, lockfiles with absolute
+    paths, symlink targets that point outside the worktree — lands in the
+    same location whether the session runs natively or in the sandbox.
+    The container WORKDIR is therefore the host worktree path (worktree
+    mode) or the host cwd (no-worktree mode).
     """
     if runtime is None:
         return None, [], ""
     root = meta.repo_path if meta.no_worktree else meta.worktree_path
     config = load_docker_config(root)
     features = docker_features(config)
-    if meta.no_worktree:
-        container_workdir = "/workspace"
-    else:
-        container_workdir = f"{CONTAINER_REPO_ROOT}/{meta.worktree_path.relative_to(meta.repo_path)}"
+    _check_host_path_safe_for_mount(meta.repo_path)
+    container_workdir = str(meta.worktree_path)
     return config, features, container_workdir
 
 
@@ -631,6 +630,33 @@ _SYMLINK_SYSTEM_BLOCKLIST: tuple[Path, ...] = (
     Path("/run"),
 )
 
+
+def _check_host_path_safe_for_mount(repo: Path) -> None:
+    """Reject host repo paths that would shadow load-bearing container paths.
+
+    Container paths now mirror host paths so any path-keyed state inside the
+    container (agent project dirs, lockfiles, symlink targets) matches what a
+    native run would produce. That breaks if the host repo path collides with
+    a directory the container image depends on — e.g., /usr, /etc, or the
+    container's home dir itself.
+
+    The blocklist mirrors _SYMLINK_SYSTEM_BLOCKLIST plus the container HOME.
+    Subpaths under these (e.g. /home/hatchery/myrepo) are fine — they just add
+    a subdir to the container's home.
+    """
+    blocklist: tuple[Path, ...] = _SYMLINK_SYSTEM_BLOCKLIST + (
+        Path("/"),
+        Path(agent.CONTAINER_HOME),
+    )
+    repo_resolved = repo.resolve()
+    if repo_resolved in blocklist:
+        ui.error(
+            f"Host repo path {repo} collides with a load-bearing container path. "
+            f"Move the repo to a different location (e.g. under /home, /tmp, or /Users/...)."
+        )
+        sys.exit(1)
+
+
 # Directories we don't bother descending into — large, and unlikely to host
 # meaningful user-authored symlinks.
 _SYMLINK_SKIP_DIRS: frozenset[str] = frozenset(
@@ -654,14 +680,10 @@ def _construct_symlink_mounts(scan_root: Path, existing_mounts: list[Mount]) -> 
     For each symlink whose fully-resolved target lives outside the already-mounted
     area (and outside the system blocklist), emit a single ``target:target:rw``
     bind-mount so the symlink's stored host path resolves identically inside the
-    container. Deduplicates by unique resolved target.
-
-    Two link shapes do not survive the host→container path remap and are rejected
-    at launch with a clear error rather than silently dangling:
-      - absolute link whose target is inside *scan_root* (the host path doesn't
-        exist in the container; *scan_root* is mounted at a different location)
-      - relative link whose resolved target is outside *scan_root* (the relative
-        climb anchors at the remapped container path and lands elsewhere)
+    container. Deduplicates by unique resolved target. Symlinks whose target is
+    inside *scan_root* are skipped — the scan_root mount already covers them
+    (under host-path mirroring, both absolute and relative internal links
+    resolve correctly without any extra wiring).
 
     Limitation: chains that traverse multiple external symlink files only have
     their final target mounted, not intermediate hops — those chains may still
@@ -684,8 +706,6 @@ def _construct_symlink_mounts(scan_root: Path, existing_mounts: list[Mount]) -> 
 
     seen: set[Path] = set()
     mounts: list[Mount] = []
-    bad_abs_internal: list[tuple[Path, str]] = []
-    bad_rel_external: list[tuple[Path, str]] = []
 
     for dirpath, dirnames, filenames in os.walk(scan_root, followlinks=False, onerror=_on_err):
         dirnames[:] = [d for d in dirnames if d not in _SYMLINK_SKIP_DIRS]
@@ -694,28 +714,14 @@ def _construct_symlink_mounts(scan_root: Path, existing_mounts: list[Mount]) -> 
             if not p.is_symlink():
                 continue
             try:
-                link_str = os.readlink(p)
-            except OSError:
-                continue
-            try:
                 target = p.resolve(strict=True)
             except (OSError, RuntimeError):
                 logger.debug("follow_symlinks: skipping unresolvable %s", p)
                 continue
-            is_absolute = os.path.isabs(link_str)
             target_in_scan = target == scan_root_resolved or scan_root_resolved in target.parents
-
-            if is_absolute and target_in_scan:
-                bad_abs_internal.append((p, link_str))
+            if target_in_scan:
+                # Internal target — covered by the scan_root mount.
                 continue
-            if not is_absolute and not target_in_scan:
-                bad_rel_external.append((p, link_str))
-                continue
-            if not is_absolute and target_in_scan:
-                # Relative link staying inside scan_root resolves correctly inside
-                # the container — no mount needed.
-                continue
-            # Absolute link, target outside scan_root: the happy path.
             if target in seen:
                 continue
             if any(target == hp or hp in target.parents for hp in existing):
@@ -729,31 +735,6 @@ def _construct_symlink_mounts(scan_root: Path, existing_mounts: list[Mount]) -> 
             seen.add(target)
             mounts.append(BindMount(src=str(target), dst=str(target), mode="RW"))
 
-    if bad_abs_internal or bad_rel_external:
-        lines = ["follow_symlinks: found symlinks that won't resolve inside the container:"]
-        if bad_abs_internal:
-            lines.append("")
-            lines.append(
-                f"  Absolute links pointing inside {scan_root} "
-                "(the container mounts this directory at a different absolute "
-                "path; rewrite each as a relative link):"
-            )
-            for p, link in bad_abs_internal:
-                lines.append(f"    {p} -> {link}")
-        if bad_rel_external:
-            lines.append("")
-            lines.append(
-                f"  Relative links escaping {scan_root} "
-                "(the relative climb resolves to a different path inside the "
-                "container; rewrite each as an absolute link):"
-            )
-            for p, link in bad_rel_external:
-                lines.append(f"    {p} -> {link}")
-        lines.append("")
-        lines.append("Fix the offending links, or set follow_symlinks: false in .hatchery/docker.yaml.")
-        ui.error("\n".join(lines))
-        sys.exit(1)
-
     return mounts
 
 
@@ -766,8 +747,9 @@ def _git_worktree_mounts(repo: Path, name: str, container_root: str) -> list[Mou
     shadow file are NOT included — callers append those afterwards (so sentinel
     files can be inserted between the .git layers and the worktree mount if needed).
 
-    This function is intentionally repo-agnostic: pass ``CONTAINER_REPO_ROOT``
-    for the primary repo or ``/includes/<basename>`` for an included secondary repo.
+    This function is intentionally repo-agnostic: pass ``str(repo)`` for the
+    primary repo (container paths mirror host paths) or ``/includes/<basename>``
+    for an included secondary repo.
     """
     git_dir = repo / ".git"
     mounts: list[Mount] = [
@@ -798,16 +780,19 @@ def build_mounts(
     config: DockerConfig,
     *,
     git_sentinel_files: list[tuple[Path, str]] | None = None,
-    worktree_git_ptr: Path | None = None,
     include_entries: list[IncludeEntry] | None = None,
 ) -> list[Mount]:
     """Return the Mounts for a session's container.
 
+    Container paths mirror host paths (see :func:`launch_context` for why).
     Branches on ``meta.no_worktree``:
       * False (default): layered git-worktree mounts — repo ro, targeted .git
-        sub-dirs rw, sentinel files rw, worktree rw, container-relative .git
-        pointer.
-      * True: ``meta.worktree`` mounted at ``/workspace``, no git metadata.
+        sub-dirs rw, sentinel files rw, worktree rw (overlaying the repo root
+        at the host repo path). The worktree's existing ``.git`` pointer file
+        (``gitdir: <host_repo>/.git/worktrees/<name>``) already resolves
+        correctly inside the container under host-path mirroring, so no
+        shadow rewrite is needed.
+      * True: ``meta.worktree`` mounted at its host path, no git metadata.
 
     Append ``include_entries`` mounts at the end when provided (each include
     is mapped to ``/includes/<basename>/``).
@@ -825,7 +810,7 @@ def build_mounts(
     mounts: list[Mount]
     if meta.no_worktree:
         cwd = meta.worktree_path
-        mounts = [BindMount(src=str(meta.worktree), dst="/workspace", mode="RW")]
+        mounts = [BindMount(src=str(meta.worktree), dst=str(meta.worktree_path), mode="RW")]
         mounts.extend(_default_home_mounts())
         mounts.extend(backend.construct_mounts(session_dir))
         mounts.extend(_construct_docker_mounts(config))
@@ -835,23 +820,17 @@ def build_mounts(
         if config.follow_symlinks:
             mounts.extend(_construct_symlink_mounts(cwd, mounts))
     else:
-        worktree_rel = meta.worktree_path.relative_to(meta.repo_path)
-        container_worktree = f"{CONTAINER_REPO_ROOT}/{worktree_rel}"
+        container_root = str(meta.repo_path)
+        container_worktree = str(meta.worktree_path)
 
-        mounts = _git_worktree_mounts(meta.repo_path, meta.name, CONTAINER_REPO_ROOT)
+        mounts = _git_worktree_mounts(meta.repo_path, meta.name, container_root)
 
         # git writes these into .git/ root during normal commits; use per-task
         # sentinel files so .git/ root stays ro.
         for host_file, git_filename in git_sentinel_files or []:
-            mounts.append(BindMount(src=str(host_file), dst=f"{CONTAINER_REPO_ROOT}/.git/{git_filename}", mode="RW"))
+            mounts.append(BindMount(src=str(host_file), dst=f"{container_root}/.git/{git_filename}", mode="RW"))
 
         mounts.append(BindMount(src=str(meta.worktree), dst=container_worktree, mode="RW"))
-
-        # Shadow the worktree's .git pointer file with a container-path-aware
-        # copy. Must come after the worktree:rw mount so Linux VFS lets the
-        # file mount win.
-        if worktree_git_ptr is not None:
-            mounts.append(BindMount(src=str(worktree_git_ptr), dst=f"{container_worktree}/.git", mode="RW"))
         mounts.extend(_default_home_mounts())
         mounts.extend(backend.construct_mounts(session_dir))
         mounts.extend(_construct_docker_mounts(config))
@@ -874,28 +853,28 @@ def _docker_mounts_includes(
 ) -> list[Mount]:
     """Return Mounts for paths included via --include / --include-rw / --include-ro.
 
-    Each path is mounted at /includes/<basename>/.  If two included paths share
-    a basename the second gets a numeric suffix (e.g. api-1).
+    Each include is mounted at its host path inside the container, same as
+    the primary repo. Distinct host paths are inherently unique, so no
+    basename collision logic is needed; the worktree's existing .git
+    pointer already resolves correctly under host-path mirroring, so no
+    pointer rewrite is needed either.
 
-    mode="worktree": For git repos with a hatchery/<name> worktree the same
-    layered mount strategy as the primary repo is applied (root:ro, targeted
-    .git sub-dirs:rw, worktree:rw) and a corrected .git pointer file is
-    written to *session_dir* and bind-mounted over the worktree's .git file.
+    mode="worktree": For git repos with a hatchery/<name> worktree the
+    same layered mount strategy as the primary repo is applied (root:ro,
+    targeted .git sub-dirs:rw, worktree:rw).
 
-    mode="rw" or mode="ro": Simple bind-mount with the corresponding access
-    mode.  No worktree is expected or created.
+    mode="rw" or mode="ro": Simple bind-mount with the corresponding
+    access mode. No worktree is expected or created.
 
-    In no-worktree mode all entries fall back to a simple mount using their
-    access mode (worktree entries are treated as rw).
+    In no-worktree mode all entries fall back to a simple mount using
+    their access mode (worktree entries are treated as rw).
     """
     mounts: list[Mount] = []
-    used_basenames: set[str] = set()
 
     for entry in include_entries:
         path = entry.path
-        basename = unique_basename(path.name, used_basenames)
-        used_basenames.add(basename)
-        container_path = f"{CONTAINER_INCLUDES_ROOT}/{basename}"
+        _check_host_path_safe_for_mount(path)
+        container_path = str(path)
 
         if entry.mode == "worktree" and not no_worktree:
             is_git = (path / ".git").exists()
@@ -904,12 +883,7 @@ def _docker_mounts_includes(
                 if worktree.exists():
                     # Layered mounts: root ro + targeted .git rw (same as primary repo)
                     mounts.extend(_git_worktree_mounts(path, name, container_path))
-                    container_worktree = f"{container_path}/.hatchery/worktrees/{name}"
-                    mounts.append(BindMount(src=str(worktree), dst=container_worktree, mode="RW"))
-                    # Rewrite .git pointer to use container-relative path
-                    git_ptr_file = session_dir / f"git_ptr_include_{basename}"
-                    git_ptr_file.write_text(f"gitdir: {container_path}/.git/worktrees/{name}\n")
-                    mounts.append(BindMount(src=str(git_ptr_file), dst=f"{container_worktree}/.git", mode="RW"))
+                    mounts.append(BindMount(src=str(worktree), dst=str(worktree), mode="RW"))
                     continue
                 logger.warning(
                     "include worktree not found for %s (expected %s); "
@@ -1274,9 +1248,11 @@ def run_session(
     """Replace the current process with a containerised agent session.
 
     Branches on ``meta.no_worktree``: worktree mode pre-seeds git sentinel
-    files + a container-relative .git pointer, then mounts the worktree
-    under /repo/.hatchery/worktrees/<name>; no-worktree mode mounts the
-    cwd as /workspace and skips all git metadata.
+    files, then mounts the worktree at its host path; no-worktree mode
+    mounts the cwd at its host path and skips all git metadata. Container
+    paths mirror host paths so every path-keyed thing inside the container
+    (agent state dirs, lockfiles, symlinks) sees the same absolute paths a
+    native run would.
 
     *agent_cmd* must be the full command already built for Docker mode
     (``backend.build_*_command(docker=True, workdir=...)``). Image is
@@ -1302,11 +1278,12 @@ def run_session(
     session_dir = meta.session_dir
     session_dir.mkdir(parents=True, exist_ok=True)
 
+    _check_host_path_safe_for_mount(meta.repo_path)
+
     git_sentinels: list[tuple[Path, str]] | None = None
-    git_ptr: Path | None = None
     if meta.no_worktree:
-        container_workdir = "/workspace"
-        container_repo = "/workspace"
+        container_workdir = str(meta.worktree_path)
+        container_repo = str(meta.worktree_path)
         build_root = meta.worktree_path  # cwd serves as build context root
     else:
         # Pre-seed writable sentinel files for git's .git/-root writes.
@@ -1319,13 +1296,12 @@ def run_session(
                 p.touch()
             git_sentinels.append((p, fname))
 
-        # Rewrite the worktree .git pointer to use the container-relative path.
-        git_ptr = session_dir / "git_ptr"
-        git_ptr.write_text(f"gitdir: {CONTAINER_REPO_ROOT}/.git/worktrees/{meta.name}\n")
+        # The worktree's .git pointer on the host already reads
+        # `gitdir: <host_repo>/.git/worktrees/<name>`, which is also the
+        # container path under host-path mirroring. No rewrite needed.
 
-        worktree_rel = meta.worktree_path.relative_to(meta.repo_path)
-        container_workdir = f"{CONTAINER_REPO_ROOT}/{worktree_rel}"
-        container_repo = CONTAINER_REPO_ROOT
+        container_workdir = str(meta.worktree_path)
+        container_repo = str(meta.repo_path)
         build_root = meta.worktree_path
 
     if config.dind and not _dind_dockerfile_ok(build_root, backend):
@@ -1341,7 +1317,6 @@ def run_session(
         session_dir,
         config,
         git_sentinel_files=git_sentinels,
-        worktree_git_ptr=git_ptr,
         include_entries=include_entries,
     )
 
@@ -1398,12 +1373,14 @@ def launch_sandbox_shell(
     """Drop the user into an interactive shell inside the sandbox container.
 
     Builds the same image agents use but skips all agent/proxy/session setup.
-    The repo is mounted read-only at /repo.
+    The repo is mounted RW at its host path (so the sandbox shell sees the
+    same paths a native shell would).
 
     Caller resolves *image_name* — typically ``sessions.image_name(repo, "sandbox")``.
     """
+    _check_host_path_safe_for_mount(repo)
     build_docker_image(repo, repo, image_name, backend, runtime=runtime, no_cache=no_cache)
-    mounts: list[Mount] = [BindMount(src=str(repo), dst=CONTAINER_REPO_ROOT, mode="RW")]
+    mounts: list[Mount] = [BindMount(src=str(repo), dst=str(repo), mode="RW")]
     mounts.extend(_default_home_mounts())
     mounts.extend(_construct_docker_mounts(config))
     mounts.extend(_construct_volume_mounts(config))
@@ -1423,8 +1400,8 @@ def launch_sandbox_shell(
             _run_container(
                 image=image_name,
                 mounts=mounts,
-                workdir=CONTAINER_REPO_ROOT,
-                hatchery_repo=CONTAINER_REPO_ROOT,
+                workdir=str(repo),
+                hatchery_repo=str(repo),
                 name="sandbox",
                 mutator=None,
                 proxy_token=None,

@@ -20,15 +20,13 @@ import seekr_hatchery.docker as docker
 import seekr_hatchery.git as git
 import seekr_hatchery.ui as ui
 from seekr_hatchery.constants import (
-    CONTAINER_INCLUDES_ROOT,
-    CONTAINER_REPO_ROOT,
     DEFAULT_BASE,
     DOCKER_CONFIG,
     WORKTREES_SUBDIR,
 )
 from seekr_hatchery.includes import IncludeEntry, load_include_entries, serialize_include_entries
 from seekr_hatchery.models import SCHEMA_VERSION, SessionMeta
-from seekr_hatchery.utils import open_for_editing, repo_id, run, to_name, unique_basename
+from seekr_hatchery.utils import open_for_editing, repo_id, run, to_name
 
 if TYPE_CHECKING:
     from seekr_hatchery.agents.agent_backend import AgentBackend
@@ -115,7 +113,7 @@ def sandbox_context(
             "You are running inside an **isolated Docker container** (no git worktree).",
             "",
             "**Filesystem permissions:**",
-            "- `/workspace/` — your working directory (read-write; all edits land here)",
+            f"- `{worktree}/` — your working directory (read-write; all edits land here)",
         ]
         if branch:
             lines += [
@@ -141,17 +139,18 @@ def sandbox_context(
                 f"When creating commits or pull requests, target `{main_branch}`. You may push to `{branch}` only.",
             ]
     elif use_docker:
-        container_worktree = f"{CONTAINER_REPO_ROOT}/.hatchery/worktrees/{name}"
         lines = [
             "# Sandbox Environment",
             "",
-            "You are running inside an **isolated Docker container**.",
+            "You are running inside an **isolated Docker container**. Container paths mirror host paths.",
             "",
             "**Filesystem permissions:**",
-            f"- `{container_worktree}/` — your worktree (read-write; all edits land here)",
-            f"- `{CONTAINER_REPO_ROOT}/` — the repository (read-only; main-branch files cannot be modified)",
-            f"- `{CONTAINER_REPO_ROOT}/.git/objects/` — git object store (read-write; your commits are visible on the host)",
-            f"- `{CONTAINER_REPO_ROOT}/.git/refs/heads/hatchery/` — branch refs (read-write for your branch only)",
+            f"- `{worktree}/` — your worktree (read-write; all edits land here)",
+            f"- `{repo}/.git/objects/` — git object store (read-write; your commits are visible on the host)",
+            f"- `{repo}/.git/refs/heads/hatchery/` — branch refs (read-write for your branch only)",
+            "",
+            f"Main-branch files are not directly visible at `{repo}/` — the worktree overlays it. "
+            f"Use `git show main:path/to/file` or `git diff main...` to inspect main-branch content.",
             "",
             f"**Your branch:** `{branch}`",
             f"**Target branch for PRs:** `{main_branch}`",
@@ -175,30 +174,18 @@ def sandbox_context(
     if include_paths:
         lines.append("")
         lines.append("**Included paths:**")
-        used_basenames: set[str] = set()
         for entry in include_paths:
             inc = entry.path
             is_git = (inc / ".git").exists()
-            if use_docker:
-                basename = unique_basename(inc.name, used_basenames)
-                used_basenames.add(basename)
-                container_inc = f"{CONTAINER_INCLUDES_ROOT}/{basename}"
-                if entry.mode == "worktree" and is_git and not no_worktree:
-                    container_inc_wt = f"{container_inc}/.hatchery/worktrees/{name}"
-                    lines.append(f"- `{container_inc}/` — git repo (read-write); your worktree: `{container_inc_wt}/`")
-                else:
-                    access_label = "read-only" if entry.mode == "ro" else "read-write"
-                    kind = "git repo" if is_git else "directory"
-                    lines.append(f"- `{container_inc}/` — {kind} ({access_label})")
+            # Includes mount at their host path inside the container too,
+            # so docker and native rendering are identical.
+            if entry.mode == "worktree" and is_git and not no_worktree:
+                wt = inc / WORKTREES_SUBDIR / name
+                lines.append(f"- `{wt}/` — git repo worktree (read-write)")
             else:
-                # Native mode: report host paths
-                if entry.mode == "worktree" and is_git and not no_worktree:
-                    wt = inc / WORKTREES_SUBDIR / name
-                    lines.append(f"- `{wt}/` — git repo worktree (host path, read-write)")
-                else:
-                    access_label = "read-only" if entry.mode == "ro" else "read-write"
-                    kind = "git repo" if is_git else "directory"
-                    lines.append(f"- `{inc}/` — {kind} (host path, {access_label})")
+                access_label = "read-only" if entry.mode == "ro" else "read-write"
+                kind = "git repo" if is_git else "directory"
+                lines.append(f"- `{inc}/` — {kind} ({access_label})")
 
     return "\n".join(lines)
 

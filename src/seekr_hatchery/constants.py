@@ -24,9 +24,3 @@ WORKTREES_SUBDIR = Path(".hatchery") / "worktrees"
 # Docker config file inside a repo (relative to repo root). Read by both
 # cli.py and docker.py when staging Docker scaffolding commits.
 DOCKER_CONFIG = Path(".hatchery") / "docker.yaml"
-
-# Inside the container the repo is always mounted at this path.
-CONTAINER_REPO_ROOT = "/repo"
-
-# --include paths mount under this prefix inside the container.
-CONTAINER_INCLUDES_ROOT = "/includes"
