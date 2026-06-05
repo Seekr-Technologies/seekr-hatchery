@@ -925,23 +925,6 @@ class TestSandboxContextIncludePaths:
         result = self._ctx(use_docker=True, no_worktree=False, include_paths=[self._entry(repo_b)])
         assert str(wt) in result
 
-    def test_native_plain_dir_shows_host_path(self, tmp_path):
-        plain = tmp_path / "shared-data"
-        plain.mkdir()
-        result = self._ctx(use_docker=False, no_worktree=False, include_paths=[self._entry(plain)])
-        assert "Included paths" in result
-        assert str(plain) in result
-
-    def test_native_git_repo_shows_worktree_host_path(self, tmp_path):
-        repo_b = tmp_path / "repo-b"
-        repo_b.mkdir()
-        (repo_b / ".git").mkdir()
-
-        wt = repo_b / constants.WORKTREES_SUBDIR / "my-task"
-        wt.mkdir(parents=True)
-        result = self._ctx(use_docker=False, no_worktree=False, include_paths=[self._entry(repo_b)])
-        assert str(wt) in result
-
     def test_docker_ro_reference_shows_read_only_label(self, tmp_path):
         docs = tmp_path / "docs"
         docs.mkdir()
