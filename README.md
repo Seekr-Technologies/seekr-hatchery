@@ -155,6 +155,18 @@ This means a jailbroken or adversarially-prompted agent that reads its API key e
 
 The proxy token is stable per-task (persisted across container restarts) so cached credentials stay valid on subsequent `resume` launches.
 
+### WSL & Docker Desktop Bind-Mounts
+
+When running Hatchery in Windows Subsystem for Linux (WSL) with Docker Desktop, you may occasionally run into issues where bind-mounted directories appear empty inside the agent's sandbox container. This is a known WSL2/Docker Desktop bug where host-to-container mount translation fails.
+
+To fix this, you can run the provided WSL setup script:
+
+```bash
+./scripts/heal-wsl-docker.sh
+```
+
+This script will repair the `/var/run/docker.sock` permissions, mount the WSL distribution virtual disk inside the `docker-desktop` VM, and correctly symlink the repository path within the `dockerd` process namespace.
+
 ### Container runtime auto-detection
 
 Hatchery prefers **Podman** as the sandbox runtime when it is installed, falling back to Docker otherwise. Podman is rootless-native: UID 0 inside the sandbox maps to the calling user on the host — not real root. No daemon required. If you have both installed, `podman info` is checked first.

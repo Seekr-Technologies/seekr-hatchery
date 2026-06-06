@@ -1406,125 +1406,6 @@ def exec_task_shell(container_name: str, runtime: Runtime, shell: str = "/bin/ba
     subprocess.run([runtime.binary, "exec", "-it", container_name, shell])
 
 
-def self_heal_wsl_docker(repo: Path) -> None:
-    """Ensure Docker socket and mount translation are fully active and healthy under WSL."""
-    wsl_exe = Path("/mnt/c/Windows/System32/wsl.exe")
-    if not wsl_exe.exists():
-        return
-
-    logger.debug("WSL environment detected. Running Docker self-healing routine...")
-
-    try:
-        import time
-
-        # Wait for Moby raw socket to be populated by the host integration daemon on boot
-        raw_socket = Path("/mnt/wsl/docker-desktop/shared-sockets/guest-services/docker.sock")
-        for i in range(10):
-            if raw_socket.exists():
-                break
-            logger.debug("Waiting for Docker Desktop integration socket to populate...")
-            time.sleep(1)
-
-        # 1. Fix /var/run/docker.sock link and permissions.
-        subprocess.run(
-            [
-                str(wsl_exe),
-                "-d",
-                "Ubuntu",
-                "-u",
-                "root",
-                "sh",
-                "-c",
-                "rm -f /var/run/docker.sock && ln -s /mnt/wsl/docker-desktop/shared-sockets/guest-services/docker.sock /var/run/docker.sock && chmod 666 /mnt/wsl/docker-desktop/shared-sockets/guest-services/docker.sock",
-            ],
-            capture_output=True,
-            check=True,
-        )
-
-        # 2. Trigger mount registration inside Moby VM by running a dummy container.
-        subprocess.run(
-            [
-                "docker",
-                "-H",
-                "unix:///mnt/wsl/docker-desktop/shared-sockets/guest-services/docker.sock",
-                "run",
-                "--rm",
-                "-v",
-                f"{repo}:/test-trigger",
-                "alpine",
-                "ls",
-                "/test-trigger",
-            ],
-            capture_output=True,
-            check=False,
-        )
-
-        # 3. Find active Ubuntu bind mount GUID.
-        bind_mounts_dir = Path("/mnt/wsl/docker-desktop-bind-mounts/Ubuntu")
-        guid = None
-        if bind_mounts_dir.exists():
-            entries = [p.name for p in bind_mounts_dir.iterdir() if p.is_dir()]
-            if entries:
-                guid = entries[0]
-
-        if not guid:
-            # Fallback to the stable static GUID for this Ubuntu distro instance
-            guid = "f525dea9c35cdbd8225d2221946425bd125ce1dfc356a46d56148f4dc2163db1"
-            logger.debug(f"Using default fallback WSL bind mount GUID: {guid}")
-        else:
-            logger.debug(f"Resolved WSL bind mount GUID: {guid}")
-
-        # 4. Manually mount the Ubuntu disk inside docker-desktop VM if not already mounted.
-        subprocess.run(
-            [
-                str(wsl_exe),
-                "-d",
-                "docker-desktop",
-                "-u",
-                "root",
-                "sh",
-                "-c",
-                f"mkdir -p /mnt/host/wsl/docker-desktop-bind-mounts/Ubuntu/{guid} && mount /dev/sdd /mnt/host/wsl/docker-desktop-bind-mounts/Ubuntu/{guid}",
-            ],
-            capture_output=True,
-            check=False,
-        )
-
-        # 5. Find dockerd PID in VM.
-        pid_res = subprocess.run(
-            [str(wsl_exe), "-d", "docker-desktop", "-u", "root", "pgrep", "dockerd"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        pid = pid_res.stdout.strip().split("\n")[0]
-        if not pid:
-            logger.warning("dockerd process not found in docker-desktop VM.")
-            return
-
-        # 6. Symlink repository path inside dockerd process namespace.
-        subprocess.run(
-            [
-                str(wsl_exe),
-                "-d",
-                "docker-desktop",
-                "-u",
-                "root",
-                "sh",
-                "-c",
-                f"nsenter -t {pid} -m -u -i -n -p rm -rf '{repo}' && "
-                f"nsenter -t {pid} -m -u -i -n -p mkdir -p '{repo.parent}' && "
-                f"nsenter -t {pid} -m -u -i -n -p ln -s '/run/desktop/mnt/host/wsl/docker-desktop-bind-mounts/Ubuntu/{guid}{repo}' '{repo}'",
-            ],
-            capture_output=True,
-            check=True,
-        )
-        logger.info("WSL Docker socket and mount translation successfully self-healed!")
-
-    except Exception as e:
-        logger.warning(f"WSL Docker self-healing failed: {e}")
-
-
 def resolve_runtime(
     repo: Path, worktree: Path, no_docker: bool, backend: agent.AgentBackend = agent.CODEX
 ) -> Runtime | None:
@@ -1540,7 +1421,6 @@ def resolve_runtime(
     if no_docker:
         logger.debug("--no-docker set, running natively")
         return None
-    self_heal_wsl_docker(repo)
     agent_df = dockerfile_path(worktree, backend)
     if not agent_df.exists():
         ui.error(

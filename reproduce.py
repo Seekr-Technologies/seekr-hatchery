@@ -1,8 +1,9 @@
-import sys
-import time
 import shutil
+import sys
 from pathlib import Path
+
 import pexpect
+
 
 def main():
     session_name = "test-e2e-resume"
@@ -10,7 +11,7 @@ def main():
 
     # We must run this bootstrap step in the python context of seekr-hatchery
     repo = Path("/home/cam/repos/seekr-hatchery")
-    
+
     # 1. Clean up any previous runs
     task_dir = Path("/home/cam/.hatchery/tasks/seekr-hatchery-f525dea9") / session_name
     if task_dir.exists():
@@ -27,8 +28,8 @@ def main():
         test_file.unlink()
 
     # 2. Programmatically create the task metadata and task file
-    import seekr_hatchery.sessions as sessions
     import seekr_hatchery.agents as agents
+    import seekr_hatchery.sessions as sessions
 
     meta = sessions.create(
         name=session_name,
@@ -58,11 +59,11 @@ def main():
         # Wait for the post-exit prompt
         print("\n--- Waiting for task execution to complete and show post-exit prompt ---")
         child.expect("Mark task 'test-e2e-resume' as done", timeout=120)
-        
+
         # Send 'y' to mark done and complete
         print("\n--- Sending 'y' to mark task complete ---")
         child.sendline("y")
-        
+
         child.expect(pexpect.EOF, timeout=10)
         print("\n--- Hatchery session exited successfully! ---")
     except Exception as e:
@@ -84,6 +85,7 @@ def main():
     else:
         print("\nFAILURE: File hello_hatchery.txt was not created!")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
