@@ -10,6 +10,7 @@ from seekr_hatchery.mount import (
     Mount,
     TmpfsMount,
     VolumeMount,
+    file_mount_prestart_cmds,
     mount_to_docker_args,
 )
 
@@ -150,25 +151,54 @@ class TestMountToDockerArgs:
         m = VolumeMount(name="vol-a", dst="/d", mode="RO")
         assert mount_to_docker_args(m) == ["-v", "vol-a:/d:ro"]
 
-    def test_volume_file_shape_uses_subpath(self):
-        """File-shaped volume mounts emit --mount type=volume,...,subpath=...
-        so the kernel surfaces a single file from the volume at the agent's
-        expected file path. Plain -v would mount as a directory and shadow
-        the file."""
+    def test_volume_file_shape_uses_sidecar(self):
+        """File-shaped volume mounts use a sidecar directory (dst + ".vol") so
+        the volume (which the kernel always presents as a directory) doesn't
+        shadow the parent directory.  A symlink from dst into the sidecar is
+        created at container startup via file_mount_prestart_cmds."""
         m = VolumeMount(
             name="hatchery-x-vol-cfg",
             dst="/home/h/.cfg.json",
             is_file=True,
             mode="RW",
         )
-        assert mount_to_docker_args(m) == [
-            "--mount",
-            "type=volume,source=hatchery-x-vol-cfg,target=/home/h/.cfg.json,subpath=.cfg.json",
+        assert mount_to_docker_args(m) == ["-v", "hatchery-x-vol-cfg:/home/h/.cfg.json.vol:rw"]
+
+    def test_volume_file_shape_ro(self):
+        m = VolumeMount(name="v", dst="/home/h/.cfg.json", is_file=True, mode="RO")
+        assert mount_to_docker_args(m) == ["-v", "v:/home/h/.cfg.json.vol:ro"]
+
+
+class TestFileMountPrestart:
+    def test_empty_when_no_file_mounts(self):
+        mounts = [
+            BindMount(src=Path("/host"), dst="/cont"),
+            VolumeMount(name="vol-state", dst="/home/h/.state"),
+            TmpfsMount(dst="/tmp"),
+        ]
+        assert file_mount_prestart_cmds(mounts) == []
+
+    def test_single_file_mount(self):
+        mounts = [VolumeMount(name="vol-cfg", dst="/home/h/.cfg.json", is_file=True)]
+        cmds = file_mount_prestart_cmds(mounts)
+        assert cmds == ["ln -sf /home/h/.cfg.json.vol/.cfg.json /home/h/.cfg.json"]
+
+    def test_multiple_file_mounts(self):
+        mounts = [
+            VolumeMount(name="vol-a", dst="/home/h/.a.json", is_file=True),
+            VolumeMount(name="vol-b", dst="/home/h/.b.json", is_file=True),
+        ]
+        cmds = file_mount_prestart_cmds(mounts)
+        assert cmds == [
+            "ln -sf /home/h/.a.json.vol/.a.json /home/h/.a.json",
+            "ln -sf /home/h/.b.json.vol/.b.json /home/h/.b.json",
         ]
 
-    def test_volume_file_shape_ro_appends_readonly(self):
-        m = VolumeMount(name="v", dst="/home/h/.cfg.json", is_file=True, mode="RO")
-        out = mount_to_docker_args(m)
-        assert out[0] == "--mount"
-        assert "readonly" in out[1]
-        assert "subpath=.cfg.json" in out[1]
+    def test_mixed_mounts(self):
+        mounts = [
+            BindMount(src=Path("/host"), dst="/cont"),
+            VolumeMount(name="vol-cfg", dst="/home/h/.cfg.json", is_file=True),
+            VolumeMount(name="vol-state", dst="/home/h/.state"),
+        ]
+        cmds = file_mount_prestart_cmds(mounts)
+        assert cmds == ["ln -sf /home/h/.cfg.json.vol/.cfg.json /home/h/.cfg.json"]

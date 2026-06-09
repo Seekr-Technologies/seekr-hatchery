@@ -112,6 +112,17 @@ Mount = Annotated[
 ]
 
 
+def _sidecar_dir(dst: str) -> str:
+    """Return the container-side sidecar directory path for a file-shaped VolumeMount.
+
+    Named volumes always present as directories to the kernel, so a file-shaped
+    mount (``is_file=True``) cannot be mounted directly at ``dst``.  Instead we
+    mount the volume at ``dst + ".vol"`` and create a symlink from ``dst`` into
+    that directory before the agent starts (see ``file_mount_prestart_cmds``).
+    """
+    return dst + ".vol"
+
+
 def mount_to_docker_args(m: BindMount | VolumeMount | TmpfsMount) -> list[str]:
     """Convert a Mount into Docker/Podman CLI flag(s) for ``run``.
 
@@ -119,12 +130,12 @@ def mount_to_docker_args(m: BindMount | VolumeMount | TmpfsMount) -> list[str]:
     volume name — the launch path resolves the per-task name before
     calling this function (via ``model_copy(update={"name": ...})``).
 
-    File-shaped volume mounts (``is_file=True``) emit ``--mount
-    type=volume,subpath=…`` rather than ``-v``: that's the only way to
-    surface a single file from a volume at a fixed in-container file
-    path. Requires docker ≥ 25 / podman ≥ 4.7. Whether the resulting
-    mount survives an agent's atomic-rename write pattern is the open
-    question task #53 exists to answer.
+    File-shaped volume mounts (``is_file=True``) mount the volume at a sidecar
+    directory (``dst + ".vol"``) rather than at ``dst`` directly.  Docker and
+    Podman both treat named-volume mount points as directories, so mounting at
+    the file path itself would shadow any parent directory with an empty dir.
+    A symlink from ``dst`` into the sidecar is injected at container startup via
+    ``file_mount_prestart_cmds``.
     """
     if isinstance(m, TmpfsMount):
         return ["--tmpfs", m.dst]
@@ -132,14 +143,25 @@ def mount_to_docker_args(m: BindMount | VolumeMount | TmpfsMount) -> list[str]:
         return ["-v", f"{m.src}:{m.dst}:{m.mode.lower()}"]
     if isinstance(m, VolumeMount):
         if m.is_file:
-            parts = [
-                "type=volume",
-                f"source={m.name}",
-                f"target={m.dst}",
-                f"subpath={Path(m.dst).name}",
-            ]
-            if m.mode == "RO":
-                parts.append("readonly")
-            return ["--mount", ",".join(parts)]
+            sidecar = _sidecar_dir(m.dst)
+            return ["-v", f"{m.name}:{sidecar}:{m.mode.lower()}"]
         return ["-v", f"{m.name}:{m.dst}:{m.mode.lower()}"]
     raise TypeError(f"unknown mount type: {type(m).__name__}")
+
+
+def file_mount_prestart_cmds(mounts: list[Mount]) -> list[str]:
+    """Return shell commands that wire up symlinks for ``is_file=True`` VolumeMounts.
+
+    For each file-shaped volume mount, the volume is mounted at a sidecar
+    directory (``dst + ".vol"``).  The agent expects the file at ``dst``, so we
+    emit a ``ln -sf`` command that creates (or replaces) that symlink before the
+    agent process starts.  These commands must run inside the container before
+    the agent binary is exec'd.
+    """
+    cmds = []
+    for m in mounts:
+        if isinstance(m, VolumeMount) and m.is_file:
+            sidecar = _sidecar_dir(m.dst)
+            filename = Path(m.dst).name
+            cmds.append(f"ln -sf {sidecar}/{filename} {m.dst}")
+    return cmds

@@ -3,6 +3,7 @@
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -34,7 +35,7 @@ from seekr_hatchery.constants import (
 from seekr_hatchery.includes import IncludeEntry, IncludeItem
 from seekr_hatchery.kubectl_proxy import KubectlConfig
 from seekr_hatchery.models import SessionMeta
-from seekr_hatchery.mount import BindMount, Mount, VolumeMount, mount_to_docker_args
+from seekr_hatchery.mount import BindMount, Mount, VolumeMount, file_mount_prestart_cmds, mount_to_docker_args
 from seekr_hatchery.seeded_volumes import prepare_volume_mounts
 from seekr_hatchery.utils import open_for_editing, run
 
@@ -1190,8 +1191,18 @@ def _run_container(
             return None
         return subprocess.run(cmd, capture_output=True, text=True)
 
+    # Wrap agent_cmd with symlink setup for any file-shaped volume mounts.
+    # Named volumes always mount as directories, so is_file=True mounts land at
+    # dst + ".vol/" and need a symlink from dst into that directory before the
+    # agent binary starts.
+    prestart = file_mount_prestart_cmds(mounts)
+    effective_cmd = agent_cmd
+    if prestart:
+        setup = " && ".join(prestart)
+        effective_cmd = ["sh", "-c", f"{setup} && exec {shlex.join(agent_cmd)}"]
+
     # Append the full agent command (binary + args, docker-mode already applied).
-    cmd += agent_cmd
+    cmd += effective_cmd
 
     logger.debug(f"Launching {runtime.binary} container image={image!r} name={name!r} workdir={workdir!r}")
     returncode = _exec_agent(cmd, paste_interceptor)
