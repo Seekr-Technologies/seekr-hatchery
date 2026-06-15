@@ -703,6 +703,19 @@ class TestSessionLaunch:
         names = [c[0] for c in spy_backend.calls]
         assert names == ["on_before_launch", "build_resume_command"]
 
+    def test_resume_succeeds_when_task_file_missing(self, spy_backend, fake_tasks_db, tmp_path, no_input):
+        """Regression: resume must not crash if the task file is absent from
+        the worktree (e.g. agent switched branches or deleted it). The fallback
+        prompt should mention the task name so the agent knows what's missing.
+        """
+        meta = self._meta(tmp_path)
+        # Intentionally do NOT create .hatchery/tasks/ — file is missing.
+        self._drive(meta, kind="resume", backend=spy_backend)
+        build = next(c for c in spy_backend.calls if c[0] == "build_resume_command")
+        _, _sid, _system, initial, _docker, _wd = build
+        assert meta.name in initial
+        assert "not present" in initial or "missing" in initial
+
     def test_finalize_skips_on_before_launch(self, spy_backend, fake_tasks_db, tmp_path, no_input):
         meta = self._meta(tmp_path)
         self._drive(meta, kind="finalize", backend=spy_backend)

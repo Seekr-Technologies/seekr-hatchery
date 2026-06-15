@@ -204,8 +204,19 @@ def find_task_file(worktree: Path, name: str) -> Path | None:
 def session_prompt(name: str, worktree: Path) -> str:
     task_path = find_task_file(worktree, name)
     if task_path is None:
-        ui.error(f"task file not found for '{name}' in {worktree / '.hatchery' / 'tasks'}")
-        sys.exit(1)
+        tasks_dir = worktree / ".hatchery" / "tasks"
+        ui.warn(
+            f"task file not found for '{name}' in {tasks_dir} — "
+            "resuming anyway (agent will be told the file is missing)."
+        )
+        return (
+            f"The task file for '{name}' was expected at "
+            f"`.hatchery/tasks/*-{name}.md` in the worktree but is not "
+            "present. Common causes: a different branch is checked out, "
+            "or the file was deleted or renamed. Before doing further "
+            "work on this task, check `git status`, the current branch, "
+            "and recent commits, then ask the user how to proceed."
+        )
     rel_path = str(task_path.relative_to(worktree))
     contents = task_path.read_text()
     return f"The task file is at `{rel_path}`:\n\n{contents}\nPlease begin."
