@@ -145,10 +145,36 @@ class TestSessionPrompt:
         result = sessions.session_prompt("foo", tmp_path)
         assert isinstance(result, str)
 
-    def test_file_not_found_exits(self, tmp_path):
+    def test_file_not_found_returns_fallback_prompt(self, tmp_path):
+        """Resume must not crash when the task file is missing — instead the
+        prompt explains the situation so the agent can recover.
+        """
         (tmp_path / ".hatchery" / "tasks").mkdir(parents=True)
-        with pytest.raises(SystemExit, match="1"):
-            sessions.session_prompt("nonexistent", tmp_path)
+        result = sessions.session_prompt("nonexistent", tmp_path)
+        assert isinstance(result, str)
+        assert "nonexistent" in result
+        assert "not present" in result or "missing" in result
+
+    def test_file_not_found_when_tasks_dir_absent(self, tmp_path):
+        """Even with no .hatchery/tasks/ directory at all, session_prompt
+        should return a fallback string rather than raising.
+        """
+        result = sessions.session_prompt("nonexistent", tmp_path)
+        assert isinstance(result, str)
+        assert "nonexistent" in result
+
+    def test_extra_note_prepended_when_file_present(self, tmp_path):
+        task_file = tmp_path / ".hatchery" / "tasks" / "2026-01-15-foo.md"
+        task_file.parent.mkdir(parents=True)
+        task_file.write_text("contents")
+        result = sessions.session_prompt("foo", tmp_path, extra_note="HELLO")
+        assert result.startswith("HELLO")
+        assert "contents" in result
+
+    def test_extra_note_prepended_when_file_missing(self, tmp_path):
+        result = sessions.session_prompt("foo", tmp_path, extra_note="HELLO")
+        assert result.startswith("HELLO")
+        assert "foo" in result
 
     def test_finds_file_from_different_date(self, tmp_path):
         """Regression: resuming a task created on a different day must work."""

@@ -201,14 +201,37 @@ def find_task_file(worktree: Path, name: str) -> Path | None:
     return matches[-1] if matches else None
 
 
-def session_prompt(name: str, worktree: Path) -> str:
+def session_prompt(name: str, worktree: Path, extra_note: str = "") -> str:
+    """Build the initial agent prompt for a session.
+
+    When the task file is missing, emit a warning and return a fallback prompt
+    explaining the situation so the agent can recover rather than crashing.
+
+    *extra_note* is prepended verbatim when non-empty — used to surface other
+    degraded-state notes (e.g. "branch was recreated") to the agent.
+    """
     task_path = find_task_file(worktree, name)
     if task_path is None:
-        ui.error(f"task file not found for '{name}' in {worktree / '.hatchery' / 'tasks'}")
-        sys.exit(1)
-    rel_path = str(task_path.relative_to(worktree))
-    contents = task_path.read_text()
-    return f"The task file is at `{rel_path}`:\n\n{contents}\nPlease begin."
+        tasks_dir = worktree / ".hatchery" / "tasks"
+        ui.warn(
+            f"task file not found for '{name}' in {tasks_dir} — "
+            "resuming anyway (agent will be told the file is missing)."
+        )
+        body = (
+            f"The task file for '{name}' was expected at "
+            f"`.hatchery/tasks/*-{name}.md` in the worktree but is not "
+            "present. Common causes: a different branch is checked out, "
+            "or the file was deleted or renamed. Before doing further "
+            "work on this task, check `git status`, the current branch, "
+            "and recent commits, then ask the user how to proceed."
+        )
+    else:
+        rel_path = str(task_path.relative_to(worktree))
+        contents = task_path.read_text()
+        body = f"The task file is at `{rel_path}`:\n\n{contents}\nPlease begin."
+    if extra_note:
+        return f"{extra_note}\n\n{body}"
+    return body
 
 
 # ---------------------------------------------------------------------------
@@ -865,6 +888,7 @@ def launch(
     session_id: str,
     no_cache: bool = False,
     include_repos: list[IncludeEntry] | None = None,
+    prompt_note: str = "",
 ) -> list[str]:
     """Launch an agent session: build the agent command, run it (inside the
     container if a runtime is given, natively otherwise), and bracket the
@@ -906,7 +930,9 @@ def launch(
             include_paths=include_repos,
         )
         system_prompt = _SESSION_SYSTEM + "\n" + env_ctx
-        initial_prompt = "" if kind == "finalize" else session_prompt(meta.name, meta.worktree_path)
+        initial_prompt = (
+            "" if kind == "finalize" else session_prompt(meta.name, meta.worktree_path, prompt_note)
+        )
 
     config, features, container_workdir = docker.launch_context(meta, runtime)
 

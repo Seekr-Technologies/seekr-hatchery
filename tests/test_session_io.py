@@ -683,9 +683,17 @@ class TestSessionLaunch:
         return meta
 
     @staticmethod
-    def _drive(meta, *, kind, backend):
+    def _drive(meta, *, kind, backend, prompt_note=""):
         with patch("seekr_hatchery.sessions.subprocess.run"):
-            return sessions.launch(meta, kind=kind, backend=backend, runtime=None, main_branch="main", session_id="sid")
+            return sessions.launch(
+                meta,
+                kind=kind,
+                backend=backend,
+                runtime=None,
+                main_branch="main",
+                session_id="sid",
+                prompt_note=prompt_note,
+            )
 
     def test_new_fires_hooks_in_order(self, spy_backend, fake_tasks_db, tmp_path, no_input):
         meta = self._meta(tmp_path)
@@ -710,6 +718,30 @@ class TestSessionLaunch:
         assert names == ["build_finalize_command"]
         _, _sid, _sys, wrap_up, _docker, _wd = spy_backend.calls[0]
         assert wrap_up == sessions._WRAP_UP_PROMPT
+
+    def test_resume_succeeds_when_task_file_missing(self, spy_backend, fake_tasks_db, tmp_path, no_input):
+        """Regression: resume must not crash if the task file is absent from
+        the worktree (e.g. agent switched branches or deleted it). The fallback
+        prompt should mention the task name so the agent knows what's missing.
+        """
+        meta = self._meta(tmp_path)
+        # Intentionally do NOT create .hatchery/tasks/ — file is missing.
+        self._drive(meta, kind="resume", backend=spy_backend)
+        build = next(c for c in spy_backend.calls if c[0] == "build_resume_command")
+        _, _sid, _system, initial, _docker, _wd = build
+        assert meta.name in initial
+        assert "not present" in initial or "missing" in initial
+
+    def test_resume_prompt_note_prepended(self, spy_backend, fake_tasks_db, tmp_path, no_input):
+        """prompt_note threads through launch() and ends up at the start of
+        the agent's initial prompt — used to surface branch-recreated etc."""
+        meta = self._meta(tmp_path)
+        (meta.worktree_path / ".hatchery" / "tasks").mkdir(parents=True, exist_ok=True)
+        (meta.worktree_path / ".hatchery" / "tasks" / sessions.task_file_name(meta.name)).write_text("body\n")
+        self._drive(meta, kind="resume", backend=spy_backend, prompt_note="HELLO-NOTE")
+        build = next(c for c in spy_backend.calls if c[0] == "build_resume_command")
+        _, _sid, _system, initial, _docker, _wd = build
+        assert initial.startswith("HELLO-NOTE")
 
     def test_chat_uses_empty_prompts(self, spy_backend, fake_tasks_db, tmp_path, no_input):
         meta = self._meta(tmp_path, is_chat=True, no_worktree=True)
