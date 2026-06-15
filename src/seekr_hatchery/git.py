@@ -215,6 +215,20 @@ def delete_include_branches(includes: list[IncludeEntry], name: str) -> None:
             delete_branch(path, branch)
 
 
+def branch_exists(repo: Path, branch: str) -> bool:
+    """Return True iff *branch* exists as a local ref in *repo*.
+
+    Qualifies the lookup with ``refs/heads/`` so a tag of the same name
+    cannot satisfy the check.
+    """
+    result = run(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+        cwd=repo,
+        check=False,
+    )
+    return result.returncode == 0
+
+
 def get_default_branch(repo: Path) -> str:
     """Return the repo's default branch name (main / master / etc.)."""
     # Prefer the remote's HEAD pointer — reliable on repos with a remote.

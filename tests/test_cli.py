@@ -1107,6 +1107,128 @@ class TestCliResume:
 
         assert not mock_ensure.called
 
+    # -- Degraded-state resume scenarios --------------------------------------
+
+    def test_resume_missing_worktree_confirm_yes_recreates(self, tmp_path, fake_tasks_db):
+        """In-progress + missing worktree + 'y' at the prompt → worktree
+        is recreated and the launch proceeds."""
+        runner = CliRunner()
+        wt = tmp_path / "missing-wt"  # intentionally NOT created
+        meta = _resume_meta(wt, status="in-progress")
+
+        with (
+            patch("seekr_hatchery.cli.sessions.load", return_value=meta),
+            patch("seekr_hatchery.cli.git.branch_exists", return_value=True),
+            patch("seekr_hatchery.cli.git.create_worktree") as mock_create,
+            patch("seekr_hatchery.cli.git.create_include_worktrees"),
+            patch("seekr_hatchery.cli.sessions.save"),
+            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
+            patch("seekr_hatchery.cli._launch") as mock_launch,
+        ):
+            result = runner.invoke(cli, ["resume", "my-task", "--no-docker"], input="y\n")
+
+        assert result.exit_code == 0, result.output
+        assert mock_create.called
+        assert mock_launch.called
+
+    def test_resume_missing_worktree_confirm_no_aborts(self, tmp_path, fake_tasks_db):
+        """In-progress + missing worktree + 'n' → no recreate, no launch,
+        exit 0 (clean abort)."""
+        runner = CliRunner()
+        wt = tmp_path / "missing-wt"
+        meta = _resume_meta(wt, status="in-progress")
+
+        with (
+            patch("seekr_hatchery.cli.sessions.load", return_value=meta),
+            patch("seekr_hatchery.cli.git.create_worktree") as mock_create,
+            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
+            patch("seekr_hatchery.cli._launch") as mock_launch,
+        ):
+            result = runner.invoke(cli, ["resume", "my-task"], input="n\n")
+
+        assert result.exit_code == 0, result.output
+        assert not mock_create.called
+        assert not mock_launch.called
+        assert "Aborted" in result.output
+
+    def test_resume_missing_branch_recreates_from_default(self, tmp_path, fake_tasks_db):
+        """Archived task + missing branch → create_worktree called with
+        base=default_branch, and _launch receives a prompt_note naming the
+        missing branch."""
+        runner = CliRunner()
+        wt = tmp_path / "missing-wt"
+        meta = _resume_meta(wt, status="archived")
+
+        with (
+            patch("seekr_hatchery.cli.sessions.load", return_value=meta),
+            patch("seekr_hatchery.cli.git.branch_exists", return_value=False),
+            patch("seekr_hatchery.cli.git.create_worktree") as mock_create,
+            patch("seekr_hatchery.cli.git.create_include_worktrees"),
+            patch("seekr_hatchery.cli.sessions.save"),
+            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
+            patch("seekr_hatchery.cli._launch") as mock_launch,
+        ):
+            result = runner.invoke(cli, ["resume", "my-task", "--no-docker"])
+
+        assert result.exit_code == 0, result.output
+        # 4th positional arg (or kwarg "base") on create_worktree is the base ref
+        args, kwargs = mock_create.call_args
+        base = kwargs.get("base") if "base" in kwargs else args[3]
+        assert base == "main"
+        # _launch should receive a prompt_note mentioning the missing branch
+        note = mock_launch.call_args.kwargs.get("prompt_note", "")
+        assert meta.branch in note
+
+    def test_resume_missing_worktree_and_branch_compose(self, tmp_path, fake_tasks_db):
+        """In-progress task with missing worktree AND missing branch:
+        'y' at the prompt triggers recreate-from-default."""
+        runner = CliRunner()
+        wt = tmp_path / "missing-wt"
+        meta = _resume_meta(wt, status="in-progress")
+
+        with (
+            patch("seekr_hatchery.cli.sessions.load", return_value=meta),
+            patch("seekr_hatchery.cli.git.branch_exists", return_value=False),
+            patch("seekr_hatchery.cli.git.create_worktree") as mock_create,
+            patch("seekr_hatchery.cli.git.create_include_worktrees"),
+            patch("seekr_hatchery.cli.sessions.save"),
+            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
+            patch("seekr_hatchery.cli._launch") as mock_launch,
+        ):
+            result = runner.invoke(cli, ["resume", "my-task", "--no-docker"], input="y\n")
+
+        assert result.exit_code == 0, result.output
+        assert mock_create.called
+        args, kwargs = mock_create.call_args
+        base = kwargs.get("base") if "base" in kwargs else args[3]
+        assert base == "main"
+        assert mock_launch.called
+
+    def test_resume_missing_session_id_falls_back_to_new(self, tmp_path, fake_tasks_db):
+        """Worktree present but session_id is empty → launch with kind='new'."""
+        runner = CliRunner()
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        meta = _resume_meta(wt, session_id="")
+
+        with (
+            patch("seekr_hatchery.cli.sessions.load", return_value=meta),
+            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted"),
+            patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
+            patch("seekr_hatchery.cli._launch") as mock_launch,
+        ):
+            result = runner.invoke(cli, ["resume", "my-task"])
+
+        assert result.exit_code == 0, result.output
+        assert mock_launch.called
+        assert mock_launch.call_args.kwargs["kind"] == "new"
+        assert mock_launch.call_args.kwargs["session_id"] == ""
+
 
 # ---------------------------------------------------------------------------
 # CLI dispatch — sandbox

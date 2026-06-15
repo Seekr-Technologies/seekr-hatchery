@@ -216,6 +216,7 @@ def _launch(
     session_id: str,
     no_cache: bool = False,
     include_repos: list[IncludeEntry] | None = None,
+    prompt_note: str = "",
 ) -> None:
     """CLI-layer launch: ``sessions.launch`` followed by the post-exit prompts.
 
@@ -232,6 +233,7 @@ def _launch(
         session_id=session_id,
         no_cache=no_cache,
         include_repos=include_repos,
+        prompt_note=prompt_note,
     )
     if meta.is_chat:
         _chat_post_exit(meta.name, meta.repo_path)
@@ -730,25 +732,61 @@ def cmd_resume(
     repo = meta.repo_path
 
     backend = agent.from_kind(meta.agent)
+    default_branch = git.get_default_branch(repo)
+    prompt_note = ""
 
+    # ---- Scenario 1: missing worktree ------------------------------------
+    needs_recreate = False
     if not meta.no_worktree and not meta.worktree_path.exists():
         if meta.status in ("archived", "complete"):
             label = "archived" if meta.status == "archived" else "completed"
             ui.info(f"Re-creating worktree for {label} task '{name}'...")
-            git.create_worktree(repo, meta.branch, meta.worktree_path, meta.branch)
-            archived_includes = load_include_entries({"include": meta.include})
-            if archived_includes:
-                git.create_include_worktrees(archived_includes, name)
-            meta.status = "in-progress"
-            sessions.save(meta)
-            ui.success(f"Worktree restored: {meta.worktree_path}")
+            needs_recreate = True
         else:
-            ui.error(f"worktree {meta.worktree_path} does not exist.")
-            sys.exit(1)
+            answer = input(
+                f"Worktree for '{name}' is missing for an in-progress task. "
+                f"Recreate from branch {meta.branch}? [y/N] "
+            ).strip().lower()
+            if answer != "y":
+                ui.info("Aborted.")
+                return
+            needs_recreate = True
 
-    if not meta.session_id:
-        ui.error("no session ID found for this task. Cannot resume.")
-        sys.exit(1)
+    # ---- Scenario 2: missing branch (only if recreating) -----------------
+    if needs_recreate:
+        if git.branch_exists(repo, meta.branch):
+            base = meta.branch
+        else:
+            ui.warn(
+                f"branch '{meta.branch}' is missing — recreating worktree "
+                f"from default branch '{default_branch}'."
+            )
+            base = default_branch
+            prompt_note = (
+                f"NOTE: the branch '{meta.branch}' was missing and has been "
+                f"recreated from '{default_branch}'. The worktree may not "
+                "contain the prior work for this task. Check `git log` and "
+                "ask the user how to proceed before making changes."
+            )
+        git.create_worktree(repo, meta.branch, meta.worktree_path, base)
+        archived_includes = load_include_entries({"include": meta.include})
+        if archived_includes:
+            git.create_include_worktrees(archived_includes, name)
+        meta.status = "in-progress"
+        sessions.save(meta)
+        ui.success(f"Worktree restored: {meta.worktree_path}")
+
+    # ---- Scenario 3: missing session_id ----------------------------------
+    if meta.session_id:
+        launch_kind: Literal["new", "resume"] = "resume"
+        session_id = meta.session_id
+    else:
+        ui.warn(
+            "no session ID found for this task — starting a fresh agent "
+            "invocation in the existing worktree."
+        )
+        launch_kind = "new"
+        session_id = ""
 
     if not backend.supports_sessions:
         ui.note(
@@ -782,16 +820,16 @@ def cmd_resume(
     include_repos = sessions.merge_include_updates(include_repos, updates, meta)
 
     runtime = docker.resolve_runtime(repo, meta.worktree_path, no_docker, backend=backend)
-    main_branch = git.get_default_branch(repo)
     _launch(
         meta,
-        kind="resume",
+        kind=launch_kind,
         backend=backend,
         runtime=runtime,
-        main_branch=main_branch,
-        session_id=meta.session_id,
+        main_branch=default_branch,
+        session_id=session_id,
         no_cache=rebuild_sandbox,
         include_repos=include_repos,
+        prompt_note=prompt_note,
     )
 
 

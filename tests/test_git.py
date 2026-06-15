@@ -300,3 +300,25 @@ class TestCreateWorktreeErrors:
         repo = _git_repo(tmp_path / "repo")
         with pytest.raises(SystemExit):
             git.create_worktree(repo, "hatchery/t", repo / "wt", "nonexistent-branch")
+
+
+# ---------------------------------------------------------------------------
+# branch_exists
+# ---------------------------------------------------------------------------
+
+
+class TestBranchExists:
+    def test_true_for_existing_branch(self, tmp_path):
+        repo = _git_repo(tmp_path / "repo")
+        utils.run(["git", "branch", "feature/x"], cwd=repo)
+        assert git.branch_exists(repo, "feature/x") is True
+
+    def test_false_for_missing_branch(self, tmp_path):
+        repo = _git_repo(tmp_path / "repo")
+        assert git.branch_exists(repo, "no-such-branch") is False
+
+    def test_false_for_tag_with_same_name(self, tmp_path):
+        """A tag named ``v1`` must not satisfy the heads-only lookup."""
+        repo = _git_repo(tmp_path / "repo")
+        utils.run(["git", "tag", "v1"], cwd=repo)
+        assert git.branch_exists(repo, "v1") is False
