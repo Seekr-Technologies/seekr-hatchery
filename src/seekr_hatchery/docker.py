@@ -34,7 +34,7 @@ from seekr_hatchery.constants import (
 from seekr_hatchery.includes import IncludeEntry, IncludeItem
 from seekr_hatchery.kubectl_proxy import KubectlConfig
 from seekr_hatchery.models import SessionMeta
-from seekr_hatchery.mount import BindMount, Mount, VolumeMount, mount_to_docker_args
+from seekr_hatchery.mount import BindMount, Mount, VolumeMount, mount_to_docker_args, wrap_cmd_for_file_mounts
 from seekr_hatchery.seeded_volumes import prepare_volume_mounts
 from seekr_hatchery.utils import open_for_editing, run
 
@@ -1182,8 +1182,9 @@ def _run_container(
         cmd += ["--security-opt", "label=disable"]
         cmd += ["--security-opt", f"seccomp={_SECCOMP}"]
     cmd += [image]
+
     if _command_override is not None:
-        cmd += _command_override
+        cmd += wrap_cmd_for_file_mounts(_command_override, mounts)
         logger.debug(f"Launching {runtime.binary} container image={image!r} name={name!r} (command override)")
         if _interactive:
             subprocess.run(cmd)
@@ -1191,7 +1192,7 @@ def _run_container(
         return subprocess.run(cmd, capture_output=True, text=True)
 
     # Append the full agent command (binary + args, docker-mode already applied).
-    cmd += agent_cmd
+    cmd += wrap_cmd_for_file_mounts(agent_cmd, mounts)
 
     logger.debug(f"Launching {runtime.binary} container image={image!r} name={name!r} workdir={workdir!r}")
     returncode = _exec_agent(cmd, paste_interceptor)
