@@ -166,6 +166,29 @@ This means a jailbroken or adversarially-prompted agent that reads its API key e
 
 The proxy token is stable per-task (persisted across container restarts) so cached credentials stay valid on subsequent `resume` launches.
 
+### Custom Codex providers
+
+If `~/.codex/config.toml` configures a custom provider via
+`experimental_bearer_token` (any non-OpenAI provider with a static
+bearer), hatchery routes the host-side proxy at that provider instead of
+OpenAI. Detection is automatic — there is no flag to set. The bearer
+token stays on the host: the container only sees a per-task proxy token,
+and a sanitized `config.toml` is mounted RO at `~/.codex/config.toml`
+inside the sandbox (the host file is **not** bind-mounted in this mode).
+
+TLS verification uses the OS native trust store via
+[`truststore`](https://truststore.readthedocs.io/) — macOS Keychain,
+Linux `/etc/ssl/certs`, Windows cert store. Any CA already installed
+system-wide (public or corporate) is trusted automatically. If the
+upstream presents a certificate signed by a private CA that's not yet
+in your OS trust store, install it there (the same way you'd install
+it for `curl`, your browser, or any other tool) — no hatchery-specific
+config required.
+
+There is no automatic token refresh — when the host bearer rotates,
+update `config.toml` on the host through whatever workflow your setup
+uses.
+
 ### Container runtime auto-detection
 
 Hatchery prefers **Podman** as the sandbox runtime when it is installed, falling back to Docker otherwise. Podman is rootless-native: UID 0 inside the sandbox maps to the calling user on the host — not real root. No daemon required. If you have both installed, `podman info` is checked first.

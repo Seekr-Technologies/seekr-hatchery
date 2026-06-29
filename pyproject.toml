@@ -25,6 +25,7 @@ dependencies = [
     "pyyaml>=6",
     "pydantic>=2",
     "urllib3>=2.0",
+    "truststore>=0.10.4",
 ]
 
 [project.urls]

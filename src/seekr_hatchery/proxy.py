@@ -26,11 +26,13 @@ import http.client
 import http.server
 import logging
 import socketserver
+import ssl
 import threading
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from typing import Any
 
+import truststore
 import urllib3
 
 _UPSTREAM_TIMEOUT = urllib3.Timeout(connect=10, read=60)
@@ -358,6 +360,15 @@ def api_server(
     sessions cannot route through each other's proxy.
     The real credentials never leave the host process.
 
+    The outbound ``urllib3.PoolManager`` is constructed with a
+    ``truststore.SSLContext`` so TLS verification uses the OS native
+    trust store (macOS Keychain, Linux ``/etc/ssl/certs``, Windows cert
+    store) instead of Python's bundled certifi list.  This means any
+    non-public CA the user has already installed system-wide — public
+    or corporate — is trusted automatically; no hatchery-specific CA
+    config is needed.  The patch is scoped to this pool only (the
+    process-wide ``ssl`` module is untouched).
+
     Args:
         header_mutator: Callable that transforms outbound request headers.
             Called for every proxied request with the inbound headers (hop-by-hop
@@ -379,7 +390,11 @@ def api_server(
     _BoundHandler.proxy_token = proxy_token
     _BoundHandler.target_host = target_host
     _BoundHandler.path_prefix = path_prefix
-    _BoundHandler.pool = _pool if _pool is not None else urllib3.PoolManager(maxsize=16)
+    if _pool is not None:
+        _BoundHandler.pool = _pool
+    else:
+        ssl_context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        _BoundHandler.pool = urllib3.PoolManager(maxsize=16, ssl_context=ssl_context)
 
     server = _ThreadingHTTPServer(("0.0.0.0", 0), _BoundHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)

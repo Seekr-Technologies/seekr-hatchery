@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 import seekr_hatchery.agents as agent
+import seekr_hatchery.agents.codex as codex_backend
 import seekr_hatchery.constants as constants
 import seekr_hatchery.mount as mount
 import seekr_hatchery.sessions as sessions
@@ -141,6 +142,10 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(constants, "HATCHERY_DIR", fake_home / ".hatchery")
     monkeypatch.setattr(sessions, "_TASKS_DB_DIR", fake_home / ".hatchery" / "tasks")
     monkeypatch.setattr(user_config.UserConfig, "CONFIG_PATH", fake_home / ".hatchery" / "config.json")
+    # CodexBackend caches ~/.codex/config.toml for the lifetime of the
+    # process to avoid re-parsing it 5+ times per launch. Tests mutate the
+    # file across assertions, so reset the cache between tests.
+    codex_backend._host_config_data.cache_clear()
     return fake_home
 
 

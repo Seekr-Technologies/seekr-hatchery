@@ -122,6 +122,18 @@ class TestProxyStartsAndStops:
         with proxy.api_server(_make_api_key_mutator("dummy-key"), _TOKEN) as server:
             assert server.port > 0
 
+    def test_pool_uses_truststore_ssl_context(self):
+        """The proxy's outbound PoolManager is built with a
+        ``truststore.SSLContext`` so TLS verification uses the OS
+        native trust store.  Asserts via ``connection_pool_kw`` rather
+        than performing a real handshake."""
+        import truststore
+
+        with proxy.api_server(_make_api_key_mutator("dummy-key"), _TOKEN) as server:
+            handler_pool = server._server.RequestHandlerClass.pool  # type: ignore[attr-defined]
+            ssl_ctx = handler_pool.connection_pool_kw.get("ssl_context")
+            assert isinstance(ssl_ctx, truststore.SSLContext)
+
     def test_stops_cleanly(self):
         with proxy.api_server(_make_api_key_mutator("dummy-key"), _TOKEN) as server:
             port = server.port
