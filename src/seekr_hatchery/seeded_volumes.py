@@ -176,8 +176,8 @@ def _seed_files_for(m: VolumeMount, ctx: SeedContext) -> Mapping[str, bytes]:
     For ``is_file=True`` the callable returns raw bytes; we wrap them
     under the basename of ``dst`` (e.g. ``app-config.json`` for
     ``dst="/home/hatchery/.app-config.json"``) so the volume contains exactly
-    one file at that name — which is also what the subpath mount points
-    at when the agent container starts.
+    one file at that name — which is what the startup symlink resolves to
+    (see ``mount.file_mount_prestart_cmds``).
 
     For ``is_file=False`` the callable returns ``{relpath: bytes}``
     directly.

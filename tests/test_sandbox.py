@@ -17,7 +17,7 @@ import seekr_hatchery.agents as agent
 import seekr_hatchery.docker as docker
 import seekr_hatchery.proxy as proxy_mod
 import seekr_hatchery.sessions as sessions
-from seekr_hatchery.mount import Mount
+from seekr_hatchery.mount import Mount, VolumeMount
 
 pytestmark = pytest.mark.integration
 
@@ -720,3 +720,122 @@ class TestDinD:
                 break
         else:
             pytest.fail(f"CapEff line not found in output: {result.stdout}")
+
+
+# ---------------------------------------------------------------------------
+# TestFileMountSymlink
+# ---------------------------------------------------------------------------
+
+
+class TestFileMountSymlink:
+    """Verify that is_file=True VolumeMounts surface the seeded file at dst
+    inside the container via the sidecar-dir + symlink mechanism.
+
+    This is a regression test for the Docker subpath incompatibility: Docker
+    does not support subpath for type=volume mounts, so hatchery uses a sidecar
+    directory and injects a symlink before the agent starts.
+    """
+
+    @pytest.fixture()
+    def seeded_volume(self, runtime: docker.Runtime, no_wt_image: str) -> str:
+        """Create a named volume with a single file and clean it up after the test."""
+        vol = "hatchery-test-file-mount-vol"
+        subprocess.run([runtime.binary, "volume", "rm", "-f", vol], capture_output=True)
+        subprocess.run([runtime.binary, "volume", "create", vol], check=True, capture_output=True)
+        # Seed the file into the volume via a helper container.
+        subprocess.run(
+            [
+                runtime.binary,
+                "run",
+                "--rm",
+                "-v",
+                f"{vol}:/seed",
+                "alpine",
+                "sh",
+                "-c",
+                "echo 'hello-from-volume' > /seed/test.json",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        yield vol
+        subprocess.run([runtime.binary, "volume", "rm", "-f", vol], capture_output=True)
+
+    def test_file_accessible_at_dst(
+        self,
+        seeded_volume: str,
+        no_wt_image: str,
+        runtime: docker.Runtime,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The seeded file must be readable at dst inside the container."""
+        monkeypatch.setattr(docker, "_userns_flags", lambda _r: [])
+        mount = VolumeMount(
+            name=seeded_volume,
+            dst="/home/hatchery/test.json",
+            is_file=True,
+            mode="RW",
+        )
+        result = docker._run_container(
+            image=no_wt_image,
+            mounts=[mount],
+            workdir="/",
+            hatchery_repo="/",
+            name="test-file-mount",
+            mutator=None,
+            proxy_token=None,
+            agent_cmd=[],
+            runtime=runtime,
+            _command_override=["cat", "/home/hatchery/test.json"],
+        )
+        assert result is not None
+        assert result.returncode == 0, f"cat failed:\nstdout={result.stdout}\nstderr={result.stderr}"
+        assert "hello-from-volume" in result.stdout
+
+    def test_file_writable_and_persists(
+        self,
+        seeded_volume: str,
+        no_wt_image: str,
+        runtime: docker.Runtime,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Writes to dst must persist in the volume (not just the symlink)."""
+        monkeypatch.setattr(docker, "_userns_flags", lambda _r: [])
+        mount = VolumeMount(
+            name=seeded_volume,
+            dst="/home/hatchery/test.json",
+            is_file=True,
+            mode="RW",
+        )
+        # Write a new value via the container.
+        write_result = docker._run_container(
+            image=no_wt_image,
+            mounts=[mount],
+            workdir="/",
+            hatchery_repo="/",
+            name="test-file-mount-write",
+            mutator=None,
+            proxy_token=None,
+            agent_cmd=[],
+            runtime=runtime,
+            _command_override=["sh", "-c", "echo 'updated' > /home/hatchery/test.json"],
+        )
+        assert write_result is not None
+        assert write_result.returncode == 0, f"write failed:\nstderr={write_result.stderr}"
+
+        # Read it back in a fresh container to confirm persistence.
+        read_result = docker._run_container(
+            image=no_wt_image,
+            mounts=[mount],
+            workdir="/",
+            hatchery_repo="/",
+            name="test-file-mount-read",
+            mutator=None,
+            proxy_token=None,
+            agent_cmd=[],
+            runtime=runtime,
+            _command_override=["cat", "/home/hatchery/test.json"],
+        )
+        assert read_result is not None
+        assert read_result.returncode == 0, f"read failed:\nstderr={read_result.stderr}"
+        assert "updated" in read_result.stdout
