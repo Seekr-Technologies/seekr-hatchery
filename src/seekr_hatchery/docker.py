@@ -276,7 +276,12 @@ def _maybe_api_server(
     if mutator is None:
         yield None
         return
-    with proxy.api_server(mutator, proxy_token or "", **backend.proxy_kwargs()) as server:
+    try:
+        kwargs = backend.proxy_kwargs()
+    except RuntimeError as exc:
+        ui.error(str(exc))
+        sys.exit(1)
+    with proxy.api_server(mutator, proxy_token or "", **kwargs) as server:
         yield server
 
 

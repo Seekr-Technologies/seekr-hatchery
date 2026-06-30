@@ -387,3 +387,306 @@ class TestFormatImageReference:
     def test_returns_raw_absolute_path(self):
         # Codex's TUI composer accepts a bare absolute path — no markup needed.
         assert agent.CODEX.format_image_reference(Path("/tmp/clip.png")) == "/tmp/clip.png"
+
+
+# ---------------------------------------------------------------------------
+# Custom-provider mode
+# ---------------------------------------------------------------------------
+
+
+def _make_custom_provider_config(
+    home,
+    *,
+    provider: str = "dev-adapter",
+    base_url: str = "https://adapter.example.com/v1",
+    bearer: str = "real-bearer-1234",
+    model: str = "some/Model",
+    model_reasoning_effort: str = "high",
+    wire_api: str = "responses",
+    section_name: str = "Custom adapter",
+) -> None:
+    """Write a config.toml matching the custom-provider layout."""
+    (home / ".codex").mkdir(exist_ok=True)
+    (home / ".codex" / "config.toml").write_text(
+        f"""\
+model = "{model}"
+model_provider = "{provider}"
+model_reasoning_effort = "{model_reasoning_effort}"
+
+[model_providers.{provider}]
+name = "{section_name}"
+wire_api = "{wire_api}"
+base_url = "{base_url}"
+experimental_bearer_token = "{bearer}"
+"""
+    )
+
+
+class TestReadCustomProvider:
+    def test_none_when_no_config(self, home):
+        assert agent.CodexBackend._read_custom_provider() is None
+
+    def test_returns_tuple_when_active_provider_has_bearer(self, home):
+        _make_custom_provider_config(home)
+        assert agent.CodexBackend._read_custom_provider() == (
+            "dev-adapter",
+            "https://adapter.example.com/v1",
+            "real-bearer-1234",
+        )
+
+    def test_none_when_active_provider_missing_bearer(self, home):
+        (home / ".codex").mkdir()
+        (home / ".codex" / "config.toml").write_text(
+            """model_provider = "openai"
+[model_providers.openai]
+base_url = "https://api.openai.com/v1"
+"""
+        )
+        assert agent.CodexBackend._read_custom_provider() is None
+
+    @pytest.mark.parametrize("bad_name", ["dev adapter", 'dev"adapter', "dev$adapter", ""])
+    def test_invalid_provider_name_rejected(self, home, bad_name):
+        if bad_name == "":
+            (home / ".codex").mkdir()
+            (home / ".codex" / "config.toml").write_text(
+                """model_provider = ""
+"""
+            )
+        else:
+            _make_custom_provider_config(home, provider=bad_name)
+        assert agent.CodexBackend._read_custom_provider() is None
+
+    @pytest.mark.parametrize(
+        "bad_path",
+        [
+            '/v1"; echo pwned',  # quote — would break the docker wrapper's shell-quoted --config
+            "/v1$(echo pwned)",  # shell substitution
+            "/v1 with space",  # space — breaks shell-word boundaries
+            "/v1\nNEW",  # newline
+        ],
+    )
+    def test_invalid_base_url_path_rejected(self, home, bad_path):
+        """A provider whose base_url path contains characters that would
+        break the _DOCKER_WRAPPER shell quoting is treated as
+        not-configured (same as a malformed provider name)."""
+        _make_custom_provider_config(home, base_url=f"https://adapter.example.com{bad_path}")
+        assert agent.CodexBackend._read_custom_provider() is None
+
+    def test_non_utf8_config_does_not_crash(self, home):
+        """A non-UTF-8 byte in the host config.toml must not raise an
+        uncaught UnicodeDecodeError — the function should fall through
+        to None like any other unparseable config."""
+        (home / ".codex").mkdir()
+        # 0xFF is invalid as a stand-alone byte in UTF-8.
+        (home / ".codex" / "config.toml").write_bytes(b'model_provider = "openai"\n# \xff invalid utf-8\n')
+        # Must return None, not propagate UnicodeDecodeError.
+        assert agent.CodexBackend._read_custom_provider() is None
+
+
+class TestCustomProviderProxyKwargs:
+    def test_returns_target_host(self, home):
+        """The provider's URL path lives in OPENAI_BASE_URL (see
+        container_env), not in path_prefix — putting it in both would
+        double-prepend and 404 against the upstream.
+
+        TLS validation uses the OS trust store (see proxy.api_server),
+        so no CA-bundle kwarg is needed here."""
+        _make_custom_provider_config(home)
+        assert agent.CODEX.proxy_kwargs() == {"target_host": "adapter.example.com"}
+
+    def test_http_base_url_works(self, home):
+        """Plain-HTTP providers don't need TLS validation either way —
+        same code path, no extra config."""
+        _make_custom_provider_config(home, base_url="http://localhost:8000/v1")
+        assert agent.CODEX.proxy_kwargs() == {"target_host": "localhost:8000"}
+
+    def test_custom_provider_wins_over_oauth(self, home):
+        """A host with both an OAuth auth.json and a custom provider config
+        is treated as custom-provider — the explicit provider setup is the
+        deliberate signal."""
+        _make_custom_provider_config(home)
+        (home / ".codex" / "auth.json").write_text(
+            json.dumps({"auth_mode": "chatgpt", "tokens": {"access_token": "oauth-tok"}})
+        )
+        kwargs = agent.CODEX.proxy_kwargs()
+        assert kwargs["target_host"] == "adapter.example.com"
+
+
+class TestCustomProviderMakeHeaderMutator:
+    def test_injects_bearer_from_config(self, home, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        _make_custom_provider_config(home, bearer="real-bearer-1234")
+        mutator = agent.CODEX.make_header_mutator()
+        result = mutator({})
+        assert result.get("Authorization") == "Bearer real-bearer-1234"
+
+    def test_strips_inbound_auth_headers(self, home, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        _make_custom_provider_config(home, bearer="real-bearer-1234")
+        mutator = agent.CODEX.make_header_mutator()
+        result = mutator(
+            {"x-api-key": "proxy-tok", "authorization": "Bearer proxy-tok", "content-type": "application/json"}
+        )
+        assert result.get("Authorization") == "Bearer real-bearer-1234"
+        assert result.get("content-type") == "application/json"
+        # Only one Authorization-like header (case-insensitive); never the proxy one
+        lower = {k.lower(): v for k, v in result.items()}
+        assert lower["authorization"] == "Bearer real-bearer-1234"
+        assert "x-api-key" not in lower
+
+    def test_refresh_kwarg_is_noop(self, home, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        _make_custom_provider_config(home, bearer="real-bearer-1234")
+        mutator = agent.CODEX.make_header_mutator()
+        # refresh=True must not raise (no kubectl, no internal lookup)
+        assert mutator({}, refresh=True).get("Authorization") == "Bearer real-bearer-1234"
+
+
+class TestCustomProviderContainerEnv:
+    def test_returns_expected_env(self, home):
+        _make_custom_provider_config(home)
+        env = agent.CODEX.container_env("proxy-tok", 9999)
+        assert env == {
+            "OPENAI_API_KEY": "proxy-tok",
+            "OPENAI_BASE_URL": "http://host.docker.internal:9999/v1",
+            "HATCHERY_CODEX_PROVIDER": "dev-adapter",
+        }
+
+    def test_empty_path_when_base_url_has_no_path(self, home):
+        _make_custom_provider_config(home, base_url="https://adapter.example.com")
+        env = agent.CODEX.container_env("proxy-tok", 9999)
+        assert env["OPENAI_BASE_URL"] == "http://host.docker.internal:9999"
+
+
+class TestCustomProviderDockerWrapper:
+    def test_wrapper_contains_both_branches(self):
+        wrapper = agent.CodexBackend._DOCKER_WRAPPER
+        # Custom-provider branch
+        assert "HATCHERY_CODEX_PROVIDER" in wrapper
+        assert "model_providers.${HATCHERY_CODEX_PROVIDER}.base_url" in wrapper
+        assert "model_providers.${HATCHERY_CODEX_PROVIDER}.experimental_bearer_token" in wrapper
+        # Legacy openai_base_url branch must still be present
+        assert "openai_base_url" in wrapper
+
+
+class TestCustomProviderConstructMounts:
+    def test_skips_host_config_toml(self, home, tmp_path):
+        _make_custom_provider_config(home)
+        # Host config.toml exists (written by _make_custom_provider_config), so the
+        # non-custom-provider path would have bind-mounted it RW.
+        mounts = agent.CODEX.construct_mounts(tmp_path)
+        bind_srcs = {str(m.src) for m in mounts if isinstance(m, mount.BindMount) and m.mode == "RW"}
+        # No RW bind from the host config.toml — it contains the real bearer.
+        assert str(home / ".codex" / "config.toml") not in bind_srcs
+
+    def test_includes_synthesized_config_path(self, home, tmp_path):
+        _make_custom_provider_config(home)
+        mounts = agent.CODEX.construct_mounts(tmp_path)
+        synth = [
+            m
+            for m in mounts
+            if isinstance(m, mount.BindMount) and m.dst == f"{agent.CONTAINER_HOME}/.codex/config.toml"
+        ]
+        assert len(synth) == 1
+        assert synth[0].src == tmp_path / "codex_config.toml"
+        # RW so codex can persist project trust / model selection / TUI
+        # prefs into its own scratch copy of the file.
+        assert synth[0].mode == "RW"
+
+    def test_includes_catalog_when_present(self, home, tmp_path):
+        _make_custom_provider_config(home)
+        (home / ".codex" / "model-catalog.json").write_text('{"models": []}')
+        mounts = agent.CODEX.construct_mounts(tmp_path)
+        catalog = [
+            m
+            for m in mounts
+            if isinstance(m, mount.BindMount) and m.dst == f"{agent.CONTAINER_HOME}/.codex/model-catalog.json"
+        ]
+        assert len(catalog) == 1
+        assert catalog[0].mode == "RO"
+
+
+class TestCustomProviderOnBeforeContainerStart:
+    def test_writes_sanitized_config(self, home, tmp_path):
+        _make_custom_provider_config(home, bearer="real-bearer-NEVER-IN-CONTAINER")
+        session_dir = tmp_path / "session"
+        agent.CODEX.on_before_container_start(session_dir, "proxy-tok-XYZ", "/workdir")
+        out = session_dir / "codex_config.toml"
+        assert out.exists()
+        content = out.read_text()
+        # Sanity-checks on the synthesised TOML
+        assert 'model = "some/Model"' in content
+        assert 'model_provider = "dev-adapter"' in content
+        assert "[model_providers.dev-adapter]" in content
+        assert 'wire_api = "responses"' in content
+        assert 'base_url = "http://placeholder/"' in content
+        assert 'experimental_bearer_token = "proxy-tok-XYZ"' in content
+        # Critical: the real bearer must NEVER appear in the file
+        assert "real-bearer-NEVER-IN-CONTAINER" not in content
+
+    def test_noop_when_not_custom_provider(self, home, tmp_path):
+        # No config.toml on host → not in custom-provider mode → no file written
+        session_dir = tmp_path / "session"
+        agent.CODEX.on_before_container_start(session_dir, "proxy-tok", "/workdir")
+        assert not session_dir.exists() or not (session_dir / "codex_config.toml").exists()
+
+    def test_includes_catalog_path_only_when_host_catalog_exists(self, home, tmp_path):
+        _make_custom_provider_config(home)
+        session_dir = tmp_path / "session"
+        agent.CODEX.on_before_container_start(session_dir, "proxy-tok", "/workdir")
+        content = (session_dir / "codex_config.toml").read_text()
+        assert "model_catalog_json" not in content
+
+        # Now add the host catalog and re-run
+        (home / ".codex" / "model-catalog.json").write_text('{"models": []}')
+        agent.CODEX.on_before_container_start(session_dir, "proxy-tok", "/workdir")
+        content = (session_dir / "codex_config.toml").read_text()
+        assert f'model_catalog_json = "{agent.CONTAINER_HOME}/.codex/model-catalog.json"' in content
+
+    def test_synthesized_config_pre_trusts_workdir(self, home, tmp_path):
+        """The workdir is added as a trusted project so codex doesn't
+        prompt on startup (and doesn't try to persist the answer back
+        to config.toml)."""
+        import tomllib
+
+        _make_custom_provider_config(home)
+        session_dir = tmp_path / "session"
+        workdir = "/Users/me/code/myrepo/.hatchery/worktrees/feature-x"
+        agent.CODEX.on_before_container_start(session_dir, "proxy-tok", workdir)
+        data = tomllib.loads((session_dir / "codex_config.toml").read_text())
+        assert data["projects"][workdir] == {"trust_level": "trusted"}
+
+    def test_synthesized_config_does_not_carry_host_trust_entries(self, home, tmp_path):
+        """Only the workdir is trusted — other host entries don't exist
+        inside the container, so copying them would be inert noise."""
+        import tomllib
+
+        (home / ".codex").mkdir()
+        (home / ".codex" / "config.toml").write_text(
+            """\
+model = "some/Model"
+model_provider = "dev-adapter"
+
+[model_providers.dev-adapter]
+wire_api = "responses"
+base_url = "https://adapter.example.com/v1"
+experimental_bearer_token = "real-bearer"
+
+[projects."/Users/me/other-repo"]
+trust_level = "trusted"
+"""
+        )
+        session_dir = tmp_path / "session"
+        agent.CODEX.on_before_container_start(session_dir, "proxy-tok", "/workdir")
+        data = tomllib.loads((session_dir / "codex_config.toml").read_text())
+        assert set(data["projects"]) == {"/workdir"}
+
+    def test_synthesized_config_is_valid_toml(self, home, tmp_path):
+        import tomllib
+
+        _make_custom_provider_config(home)
+        session_dir = tmp_path / "session"
+        agent.CODEX.on_before_container_start(session_dir, "proxy-tok", "/workdir")
+        data = tomllib.loads((session_dir / "codex_config.toml").read_text())
+        assert data["model_provider"] == "dev-adapter"
+        assert data["model_providers"]["dev-adapter"]["experimental_bearer_token"] == "proxy-tok"

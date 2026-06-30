@@ -1404,3 +1404,24 @@ class TestRemoveClipboardDir:
         # No clipboard subdir was ever created.
         docker.remove_clipboard_dir(tmp_path)  # must not raise
         assert not docker.clipboard_image_dir(tmp_path).exists()
+
+
+class TestMaybeApiServerErrorPath:
+    """``_maybe_api_server`` must surface ``backend.proxy_kwargs()`` errors
+    as ``ui.error`` + ``sys.exit(1)`` so users see a clean message rather
+    than a stack trace.  Mirrors the existing handling for
+    ``make_header_mutator``.
+    """
+
+    def test_runtime_error_from_proxy_kwargs_exits_cleanly(self, monkeypatch, capsys):
+        class BadBackend:
+            def proxy_kwargs(self):
+                raise RuntimeError("clean message for the user")
+
+        with pytest.raises(SystemExit) as excinfo:
+            with docker._maybe_api_server(lambda h: h, "tok", BadBackend()):
+                pass
+        assert excinfo.value.code == 1
+        captured = capsys.readouterr()
+        # ui.error writes to stderr by default.
+        assert "clean message for the user" in (captured.err + captured.out)
