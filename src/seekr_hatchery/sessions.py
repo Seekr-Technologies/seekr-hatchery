@@ -10,7 +10,10 @@ import os
 import re
 import subprocess
 import sys
+import threading
+import time
 import uuid
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -720,7 +723,11 @@ def create(
     """
     include_entries = list(include_entries or [])
     is_chat = type == "chat"
-    session_id = str(uuid.uuid4())
+    # Backends that accept a session id at launch (claude) get a pre-generated
+    # UUID here. Backends that generate their own id at runtime (codex) leave
+    # session_id empty until the background_threads poller captures the real
+    # id during the first launch.
+    session_id = str(uuid.uuid4()) if backend.session_id_pre_generated else None
 
     if is_chat:
         no_worktree = True
@@ -937,6 +944,18 @@ def launch(
         )
 
     set_status(meta.repo_path, meta.name, "running")
+    launch_start = time.time()
+    stop = threading.Event()
+    workers = backend.background_threads(
+        meta,
+        docker=bool(runtime),
+        runtime=runtime,
+        launch_start=launch_start,
+        stop=stop,
+    )
+    threads = [threading.Thread(target=_wrap_worker(w), daemon=True) for w in workers]
+    for t in threads:
+        t.start()
     try:
         if runtime:
             # Tokens are resolved here (filesystem side-effects belong to
@@ -962,9 +981,31 @@ def launch(
             os.chdir(meta.worktree_path)
             subprocess.run(agent_cmd, env=session_env(meta.name, meta.repo_path))
     finally:
+        stop.set()
+        for t in threads:
+            t.join(timeout=2)
+            if t.is_alive():
+                logger.warning("background thread %s did not exit within 2s", t.name)
         set_status(meta.repo_path, meta.name, "in-progress")
 
     return features
+
+
+def _wrap_worker(worker: Callable[[], None]) -> Callable[[], None]:
+    """Wrap a background worker so exceptions are logged, not propagated.
+
+    Catches ``Exception`` (not ``BaseException``) so KeyboardInterrupt still
+    propagates — this keeps a crashing worker from masking the launch's own
+    exceptions or crashing the launch process.
+    """
+
+    def _run() -> None:
+        try:
+            worker()
+        except Exception:
+            logger.exception("background worker crashed")
+
+    return _run
 
 
 def repo_tasks_for_current_repo(repo: Path) -> list[dict]:

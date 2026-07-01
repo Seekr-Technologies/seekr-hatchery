@@ -693,7 +693,7 @@ class TestSessionLaunch:
         (meta.worktree_path / ".hatchery" / "tasks" / sessions.task_file_name(meta.name)).write_text("body\n")
         self._drive(meta, kind="new", backend=spy_backend)
         names = [c[0] for c in spy_backend.calls]
-        assert names == ["on_new_task", "on_before_launch", "build_new_command"]
+        assert names == ["on_new_task", "on_before_launch", "build_new_command", "background_threads"]
 
     def test_resume_skips_on_new_task(self, spy_backend, fake_tasks_db, tmp_path, no_input):
         meta = self._meta(tmp_path)
@@ -701,13 +701,13 @@ class TestSessionLaunch:
         (meta.worktree_path / ".hatchery" / "tasks" / sessions.task_file_name(meta.name)).write_text("body\n")
         self._drive(meta, kind="resume", backend=spy_backend)
         names = [c[0] for c in spy_backend.calls]
-        assert names == ["on_before_launch", "build_resume_command"]
+        assert names == ["on_before_launch", "build_resume_command", "background_threads"]
 
     def test_finalize_skips_on_before_launch(self, spy_backend, fake_tasks_db, tmp_path, no_input):
         meta = self._meta(tmp_path)
         self._drive(meta, kind="finalize", backend=spy_backend)
         names = [c[0] for c in spy_backend.calls]
-        assert names == ["build_finalize_command"]
+        assert names == ["build_finalize_command", "background_threads"]
         _, _sid, _sys, wrap_up, _docker, _wd = spy_backend.calls[0]
         assert wrap_up == sessions._WRAP_UP_PROMPT
 
@@ -737,6 +737,117 @@ class TestSessionLaunch:
             sessions.launch(meta, kind="new", backend=spy_backend, runtime=None, main_branch="main", session_id="sid")
         assert statuses == ["running", "in-progress"]
         assert sessions.load(Path(meta.repo), meta.name).status == "in-progress"
+
+
+class TestSessionLaunchBackgroundThreads:
+    """Thread lifecycle: launch() starts backend.background_threads() workers,
+    signals stop when the agent exits, and joins them."""
+
+    @staticmethod
+    def _meta(tmp_path):
+        wt = tmp_path / "wt"
+        wt.mkdir(exist_ok=True)
+        m = sessions.SessionMeta(
+            name="t",
+            repo=str(tmp_path),
+            worktree=str(wt),
+            branch="hatchery/t",
+            type="task",
+            session_id="sid",
+            status="in-progress",
+        )
+        sessions.save(m)
+        return m
+
+    def test_each_worker_runs_in_its_own_thread(self, spy_backend, fake_tasks_db, tmp_path, no_input):
+        import threading as _threading
+
+        seen: list[str] = []
+        started = _threading.Event()
+
+        def w1() -> None:
+            seen.append(_threading.current_thread().name)
+            started.set()
+
+        def w2() -> None:
+            seen.append(_threading.current_thread().name)
+
+        spy_backend.background_threads = lambda meta, **kw: [w1, w2]
+
+        meta = self._meta(tmp_path)
+        (meta.worktree_path / ".hatchery" / "tasks").mkdir(parents=True, exist_ok=True)
+        (meta.worktree_path / ".hatchery" / "tasks" / sessions.task_file_name(meta.name)).write_text("body\n")
+        with patch("seekr_hatchery.sessions.subprocess.run"):
+            sessions.launch(meta, kind="new", backend=spy_backend, runtime=None, main_branch="main", session_id="sid")
+        # Both workers must have executed
+        assert len(seen) == 2
+
+    def test_stop_event_is_set_after_agent_exit(self, spy_backend, fake_tasks_db, tmp_path, no_input):
+        import threading as _threading
+
+        stop_captured: dict[str, _threading.Event] = {}
+
+        # Worker records the stop event so we can inspect it after launch()
+        # returns; the event must be set by then.
+        def hook(meta, *, docker, runtime, launch_start, stop):
+            stop_captured["stop"] = stop
+
+            def _worker() -> None:
+                stop.wait(1)
+
+            return [_worker]
+
+        spy_backend.background_threads = hook
+
+        meta = self._meta(tmp_path)
+        (meta.worktree_path / ".hatchery" / "tasks").mkdir(parents=True, exist_ok=True)
+        (meta.worktree_path / ".hatchery" / "tasks" / sessions.task_file_name(meta.name)).write_text("body\n")
+        with patch("seekr_hatchery.sessions.subprocess.run"):
+            sessions.launch(meta, kind="new", backend=spy_backend, runtime=None, main_branch="main", session_id="sid")
+        assert stop_captured["stop"].is_set()
+
+    def test_worker_exception_does_not_mask_agent_exit(self, spy_backend, fake_tasks_db, tmp_path, no_input):
+        # A crashing worker must be logged and swallowed. The launch itself
+        # completes normally.
+        def crashing_worker() -> None:
+            raise RuntimeError("worker exploded")
+
+        spy_backend.background_threads = lambda meta, **kw: [crashing_worker]
+
+        meta = self._meta(tmp_path)
+        (meta.worktree_path / ".hatchery" / "tasks").mkdir(parents=True, exist_ok=True)
+        (meta.worktree_path / ".hatchery" / "tasks" / sessions.task_file_name(meta.name)).write_text("body\n")
+        with patch("seekr_hatchery.sessions.subprocess.run"):
+            # Must not raise
+            sessions.launch(meta, kind="new", backend=spy_backend, runtime=None, main_branch="main", session_id="sid")
+        # Status still flipped back to in-progress cleanly.
+        assert sessions.load(Path(meta.repo), meta.name).status == "in-progress"
+
+    def test_stop_and_join_run_even_when_agent_raises(self, spy_backend, fake_tasks_db, tmp_path, no_input):
+        import threading as _threading
+
+        stop_captured: dict[str, _threading.Event] = {}
+
+        def hook(meta, *, docker, runtime, launch_start, stop):
+            stop_captured["stop"] = stop
+
+            def _worker() -> None:
+                stop.wait(1)
+
+            return [_worker]
+
+        spy_backend.background_threads = hook
+
+        meta = self._meta(tmp_path)
+        (meta.worktree_path / ".hatchery" / "tasks").mkdir(parents=True, exist_ok=True)
+        (meta.worktree_path / ".hatchery" / "tasks" / sessions.task_file_name(meta.name)).write_text("body\n")
+        with patch("seekr_hatchery.sessions.subprocess.run", side_effect=RuntimeError("agent boom")):
+            with pytest.raises(RuntimeError, match="agent boom"):
+                sessions.launch(
+                    meta, kind="new", backend=spy_backend, runtime=None, main_branch="main", session_id="sid"
+                )
+        # Thread lifecycle still happened
+        assert stop_captured["stop"].is_set()
 
 
 class TestSessionMarkDone:

@@ -109,6 +109,18 @@ class SpyBackend(agent.AgentBackend):
     ) -> None:
         self.calls.append(("on_before_container_start", session_dir, proxy_token, workdir))
 
+    def background_threads(
+        self,
+        meta,
+        *,
+        docker: bool,
+        runtime,
+        launch_start: float,
+        stop,
+    ) -> list:
+        self.calls.append(("background_threads", meta, docker, runtime, launch_start, stop))
+        return []
+
     # ── Class-level constant properties ───────────────────────────────────
 
     @property

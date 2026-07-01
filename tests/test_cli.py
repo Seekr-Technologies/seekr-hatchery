@@ -1753,7 +1753,7 @@ class TestLaunchHooks:
             )
 
         call_names = [c[0] for c in spy_backend.calls]
-        assert call_names == ["on_new_task", "on_before_launch", "build_new_command"]
+        assert call_names == ["on_new_task", "on_before_launch", "build_new_command", "background_threads"]
         _, session_dir = spy_backend.calls[0]
         assert session_dir == Path("/session")
         _, worktree = spy_backend.calls[1]
@@ -1778,7 +1778,7 @@ class TestLaunchHooks:
             )
 
         call_names = [c[0] for c in spy_backend.calls]
-        assert call_names == ["on_before_launch", "build_resume_command"]
+        assert call_names == ["on_before_launch", "build_resume_command", "background_threads"]
         _, worktree = spy_backend.calls[0]
         assert worktree == Path("/worktree")
         _, sid, _sys, _init, docker, workdir = spy_backend.calls[1]
@@ -1801,7 +1801,7 @@ class TestLaunchHooks:
             )
 
         call_names = [c[0] for c in spy_backend.calls]
-        assert call_names == ["build_finalize_command"]
+        assert call_names == ["build_finalize_command", "background_threads"]
         _, sid, _sys, wrap_up, docker, workdir = spy_backend.calls[0]
         assert sid == "sid"
         assert wrap_up == _WRAP_UP_PROMPT
