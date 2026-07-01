@@ -35,12 +35,6 @@ from typing import Any
 import truststore
 import urllib3
 
-# Patch Python's ssl module to use the OS trust store (macOS Keychain, Linux
-# /etc/ssl/certs, Windows cert store).  Must run before any SSL connections are
-# made.  Using inject_into_ssl() rather than truststore.SSLContext() preserves
-# check_hostname=True so urllib3 does not emit InsecureRequestWarning.
-truststore.inject_into_ssl()
-
 _UPSTREAM_TIMEOUT = urllib3.Timeout(connect=10, read=60)
 
 logger = logging.getLogger("hatchery")
