@@ -41,6 +41,7 @@ uv tool upgrade seekr-hatchery
 
 Requires Python 3.12+ and at least one agent:
 - **OpenAI Codex**: `npm install -g @openai/codex` — `codex` on `$PATH`, `OPENAI_API_KEY`
+- **OpenCode**: `npm install -g opencode-ai` — `opencode` on `$PATH`, provider config in `~/.config/opencode/opencode.json`
 
 ## Quick start
 
@@ -50,6 +51,9 @@ hatchery new add-auth
 
 # Start a new task using OpenAI Codex
 hatchery new add-auth --agent codex
+
+# Start a new task using OpenCode
+hatchery new add-auth --agent opencode
 
 # Resume an interrupted session
 hatchery resume add-auth
@@ -96,7 +100,7 @@ All `new` / `resume` commands accept:
 `new` also accepts:
 - `--from <ref>` — fork from a specific branch or commit (default: `HEAD`)
 - `--editor / --no-editor` — force editor or prompt mode for the task objective. By default, hatchery prompts in the terminal; set `"open_editor": true` in `~/.hatchery/config.json` to default to `$EDITOR`. If the editor is opened and the file is unchanged on close, the task is cancelled.
-- `--agent [codex]` — choose the AI agent (auto-detected from installed agents)
+- `--agent [codex|opencode]` — choose the AI agent (auto-detected from installed agents)
 
 The chosen agent is stored in task metadata and re-used automatically on `resume`.
 
@@ -111,6 +115,8 @@ The container receives:
 - `.git/refs/heads/hatchery/` read-write (own branch ref)
 - The task worktree read-write (the only place edits land)
 - `~/.codex` and a per-task auth config — Codex only
+- `~/.config/opencode/` (per-task volume) plus bind mounts for skills, agents, commands, and plugins — OpenCode only
+- `~/.claude/skills/` and `~/.agents/skills/` — OpenCode only (it searches these for compatible skills)
 - `~/.gitconfig` read-only (commit identity)
 
 A `.hatchery/docker.yaml` config file is also created alongside the Dockerfile.
@@ -160,6 +166,10 @@ The real API key never enters the container. Hatchery starts a lightweight **hos
 - `OPENAI_API_KEY` — a random per-task proxy token
 - `OPENAI_BASE_URL` — pointing to the host proxy (`http://host.docker.internal:<port>`)
 
+**OpenCode:**
+- `OPENCODE_CONFIG_CONTENT` — a JSON config with the provider's `baseURL` rewritten to the host proxy and `apiKey` replaced with the per-task proxy token
+- `OPENCODE_DANGEROUSLY_SKIP_PERMISSIONS` — `true` (the container is already isolated)
+
 The SDK inside the container uses these transparently. The proxy validates the inbound token, strips whatever credentials the container sends, injects the real API key in the correct format (`Authorization: Bearer` for OpenAI), and forwards the request over HTTPS. The real key never leaves the host process.
 
 This means a jailbroken or adversarially-prompted agent that reads its API key env var or attempts to exfiltrate it gets only the proxy token — which is worthless outside the session.
@@ -199,7 +209,7 @@ DinD enables the agent to run a nested container engine inside its Docker sandbo
 
 **To enable:**
 
-1. Uncomment the `── Podman-in-Podman (DinD)` block in `.hatchery/Dockerfile`. This installs `podman`, `fuse-overlayfs`, and `uidmap`, and wires up a passwordless `sudo` wrapper so the `hatchery` user can invoke Podman.
+1. Uncomment the `── Podman-in-Podman (DinD)` block in `.hatchery/Dockerfile`. This installs `podman` and `podman-docker`, and wires up a passwordless `sudo` wrapper so the `hatchery` user can invoke Podman. The block uses the `fuse-overlayfs` storage driver (required for rootless nested containers).
 
 2. Set `dind: true` in `.hatchery/docker.yaml`:
 

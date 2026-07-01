@@ -13,21 +13,26 @@ the appropriate singleton.
 
 from seekr_hatchery.agents.agent_backend import CONTAINER_HOME, AgentBackend
 from seekr_hatchery.agents.codex import CodexBackend
+from seekr_hatchery.agents.opencode import OpenCodeBackend
 
 __all__ = [
     "AgentBackend",
     "CONTAINER_HOME",
     "CodexBackend",
+    "OpenCodeBackend",
     "CODEX",
+    "OPENCODE",
     "from_kind",
 ]
 
 # ── Module-level singletons ────────────────────────────────────────────────────
 
 CODEX: AgentBackend = CodexBackend()
+OPENCODE: AgentBackend = OpenCodeBackend()
 
 ALL_BACKENDS = [
     CODEX,
+    OPENCODE,
 ]
 
 _REGISTRY: dict[str, AgentBackend] = {b.kind: b for b in ALL_BACKENDS}
