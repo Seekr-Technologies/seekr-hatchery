@@ -6,16 +6,21 @@ import logging
 import os
 import re
 import subprocess
+import threading
 import time
 import tomllib
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlsplit
 
 from seekr_hatchery.agents.agent_backend import CONTAINER_HOME, AgentBackend
 from seekr_hatchery.locks import hatchery_lock
 from seekr_hatchery.mount import BindMount, Mount, SeedContext, VolumeMount
+
+if TYPE_CHECKING:
+    from seekr_hatchery.docker import Runtime
+    from seekr_hatchery.models import SessionMeta
 
 logger = logging.getLogger("hatchery")
 
@@ -30,6 +35,27 @@ _PROVIDER_NAME_RE: re.Pattern[str] = re.compile(r"^[A-Za-z0-9_-]+$")
 # ``_DOCKER_WRAPPER``; restricting to RFC 3986 unreserved + ``/`` avoids
 # quote / metacharacter trouble at the shell boundary.
 _BASE_URL_PATH_RE: re.Pattern[str] = re.compile(r"^[A-Za-z0-9._~/-]*$")
+
+# Extracts the session UUID from a codex rollout filename
+# ``rollout-<ISO-timestamp>-<uuid>.jsonl``. The trailing UUID is the id
+# that ``codex resume <ID>`` accepts.
+_ROLLOUT_UUID_RE: re.Pattern[str] = re.compile(
+    r"rollout-[^/]*-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.jsonl$"
+)
+
+# Shell snippet: for the newest rollout file, print one line ``<mtime> <path>``.
+# Emits nothing if no rollout exists yet. The Python caller parses the
+# mtime and filters out stale rollouts (e.g. from a previous task run
+# that reused this volume).
+_STAT_NEWEST_ROLLOUT_SH: str = (
+    'f=$(ls -1t ~/.codex/sessions/*/*/*/rollout-*.jsonl 2>/dev/null | head -n1); [ -n "$f" ] && stat -c "%Y %n" "$f"'
+)
+
+# Grace window (seconds) when comparing rollout mtimes to launch_start.
+# Docker/podman on macOS runs the engine inside a Linux VM whose clock can
+# drift a second or two from the host; a 5-second window accommodates that
+# without letting truly stale rollouts through.
+_MTIME_GRACE_SECONDS: float = 5.0
 
 
 @functools.lru_cache(maxsize=1)
@@ -59,10 +85,158 @@ def _host_config_data() -> dict:
         return {}
 
 
+def _extract_uuid_from_path(path: str) -> str | None:
+    """Return the session UUID embedded in a codex rollout filename, or None."""
+    match = _ROLLOUT_UUID_RE.search(path)
+    return match.group(1) if match else None
+
+
+def _probe_session_id(
+    meta: "SessionMeta",
+    *,
+    docker: bool,
+    runtime: "Runtime | None",
+    launch_start: float,
+) -> str | None:
+    """Return codex's session UUID for this launch, or ``None`` if not yet visible.
+
+    Codex writes rollout files at
+    ``~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl``; the
+    trailing UUID is the id that ``codex resume <ID>`` accepts. Both
+    probe paths pick the newest such file, verify its mtime falls
+    within this launch, and extract the UUID from the filename.
+    """
+    if docker:
+        assert runtime is not None
+        return _probe_session_id_docker(meta, runtime, launch_start)
+    return _probe_session_id_native(launch_start)
+
+
+def _probe_session_id_docker(
+    meta: "SessionMeta",
+    runtime: "Runtime",
+    launch_start: float,
+) -> str | None:
+    cmd = [runtime.binary, "exec", meta.container_name, "sh", "-c", _STAT_NEWEST_ROLLOUT_SH]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        logger.debug("codex probe (docker): exec failed: %s", exc)
+        return None
+    if result.returncode != 0:
+        logger.debug("codex probe (docker): exec rc=%s stderr=%r", result.returncode, result.stderr[:200])
+        return None
+
+    line = result.stdout.strip()
+    if not line:
+        return None
+    # ``stat -c "%Y %n"`` output: ``<mtime-epoch> <path>``.
+    mtime_str, _, path = line.partition(" ")
+    if not path:
+        logger.warning("codex probe (docker): unparseable stat output: %r", line)
+        return None
+    try:
+        mtime = float(mtime_str)
+    except ValueError:
+        logger.warning("codex probe (docker): non-numeric mtime %r for %s", mtime_str, path)
+        return None
+    if mtime < launch_start - _MTIME_GRACE_SECONDS:
+        logger.debug(
+            "codex probe (docker): skipping stale rollout %s (mtime=%.1f, launch_start=%.1f)",
+            path,
+            mtime,
+            launch_start,
+        )
+        return None
+
+    sid = _extract_uuid_from_path(path)
+    if sid is None:
+        logger.warning("codex probe (docker): no UUID in filename %r", path)
+    else:
+        logger.info("codex probe (docker): extracted session id %s from %s", sid, path)
+    return sid
+
+
+def _probe_session_id_native(launch_start: float) -> str | None:
+    sessions_dir = Path.home() / ".codex" / "sessions"
+    if not sessions_dir.exists():
+        logger.debug("codex probe (native): sessions dir does not exist: %s", sessions_dir)
+        return None
+    fresh: list[tuple[float, Path]] = []
+    for p in sessions_dir.glob("*/*/*/rollout-*.jsonl"):
+        try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            continue
+        if mtime >= launch_start - _MTIME_GRACE_SECONDS:
+            fresh.append((mtime, p))
+    if not fresh:
+        logger.debug("codex probe (native): no fresh rollouts under %s (launch_start=%.1f)", sessions_dir, launch_start)
+        return None
+    fresh.sort(reverse=True)
+    winner = fresh[0][1]
+    sid = _extract_uuid_from_path(str(winner))
+    if sid is None:
+        logger.warning("codex probe (native): no UUID in filename %s", winner)
+    else:
+        logger.info("codex probe (native): extracted session id %s from %s", sid, winner)
+    return sid
+
+
+def _make_session_id_poller(
+    meta: "SessionMeta",
+    *,
+    docker: bool,
+    runtime: "Runtime | None",
+    launch_start: float,
+    stop: threading.Event,
+) -> Callable[[], None]:
+    """Return a closure that polls for codex's session UUID and persists it."""
+
+    def _poll() -> None:
+        from seekr_hatchery import sessions
+
+        logger.info(
+            "codex session-id poller started (docker=%s, runtime=%s, container=%s, current=%s)",
+            docker,
+            runtime.binary if runtime else None,
+            meta.container_name if docker else "n/a",
+            meta.session_id or "<unset>",
+        )
+        attempt = 0
+        while not stop.is_set():
+            if stop.wait(1.0):
+                logger.info("codex session-id poller stopped after %d attempts without capture", attempt)
+                return
+            attempt += 1
+            try:
+                sid = _probe_session_id(meta, docker=docker, runtime=runtime, launch_start=launch_start)
+            except Exception as exc:
+                logger.debug("codex session-id probe #%d failed (will retry): %s", attempt, exc)
+                continue
+            if sid is None:
+                continue
+            if sid == meta.session_id:
+                logger.info("codex session_id confirmed on attempt %d: %s", attempt, sid)
+                return
+            prior = meta.session_id
+            meta.session_id = sid
+            sessions.save(meta)
+            if prior:
+                logger.info("codex session_id updated on attempt %d: %s → %s", attempt, prior, sid)
+            else:
+                logger.info("codex session_id captured on attempt %d: %s", attempt, sid)
+            return
+
+    return _poll
+
+
 class CodexBackend(AgentBackend):
     kind = "CODEX"
     binary = "codex"
-    supports_sessions = False
+    supports_sessions = True
+    # Codex generates its own session UUID; the poller captures it live.
+    session_id_pre_generated = False
 
     # ── Command construction ───────────────────────────────────────────────────
 
@@ -81,14 +255,22 @@ class CodexBackend(AgentBackend):
     # through the hatchery proxy with the proxy token.  Provider names are
     # validated against ``_PROVIDER_NAME_RE`` before being placed in the env
     # var, so interpolating ``$HATCHERY_CODEX_PROVIDER`` here is shell-safe.
+    # ``check_for_update_on_startup=false`` suppresses the interactive
+    # "Update available" prompt that otherwise blocks resume launches
+    # while codex waits for the user to press enter. The Codex image is
+    # rebuilt by hatchery, not upgraded interactively by the agent.
     _DOCKER_WRAPPER: str = (
         'if [ -n "${HATCHERY_CODEX_PROVIDER:-}" ]; then '
         "exec codex "
+        "--config check_for_update_on_startup=false "
         '--config "model_providers.${HATCHERY_CODEX_PROVIDER}.base_url=\\"$OPENAI_BASE_URL\\"" '
         '--config "model_providers.${HATCHERY_CODEX_PROVIDER}.experimental_bearer_token=\\"$OPENAI_API_KEY\\"" '
         '--dangerously-bypass-approvals-and-sandbox "$@"; '
         "fi; "
-        'exec codex --config "openai_base_url=\\"$OPENAI_BASE_URL\\"" --dangerously-bypass-approvals-and-sandbox "$@"'
+        "exec codex "
+        "--config check_for_update_on_startup=false "
+        '--config "openai_base_url=\\"$OPENAI_BASE_URL\\"" '
+        '--dangerously-bypass-approvals-and-sandbox "$@"'
     )
 
     @staticmethod
@@ -116,12 +298,28 @@ class CodexBackend(AgentBackend):
         docker: bool = False,
         workdir: str = "",
     ) -> list[str]:
-        # session_id unused — codex has no resume support.
-        # Re-run with combined context so the agent knows what to continue.
-        prompt = f"{system_prompt}\n\n{initial_prompt}".strip()
+        """Resume codex's prior session so in-agent state is preserved.
+
+        - With a known ``session_id``: ``codex resume <sid>``.
+        - Without one, in docker: ``codex resume --last``. The per-task
+          ``~/.codex/`` volume means "last" is unambiguously this task's
+          own rollout.
+        - Without one, in native: fall back to a fresh session with the
+          combined context. ``cli.py`` bails before reaching us if
+          ``session_id`` is missing in the native flow, so this is a
+          defensive path.
+        """
+        if session_id:
+            resume_args = ["resume", session_id]
+        elif docker:
+            resume_args = ["resume", "--last"]
+        else:
+            prompt = f"{system_prompt}\n\n{initial_prompt}".strip()
+            return ["codex", "--dangerously-bypass-approvals-and-sandbox", prompt]
+
         if docker:
-            return ["sh", "-c", CodexBackend._DOCKER_WRAPPER, "sh", prompt]
-        return ["codex", "--dangerously-bypass-approvals-and-sandbox", prompt]
+            return ["sh", "-c", CodexBackend._DOCKER_WRAPPER, "sh", *resume_args]
+        return ["codex", "--dangerously-bypass-approvals-and-sandbox", *resume_args]
 
     @staticmethod
     def build_finalize_command(
@@ -132,10 +330,23 @@ class CodexBackend(AgentBackend):
         docker: bool = False,
         workdir: str = "",
     ) -> list[str]:
-        # session_id unused.
+        """Wrap-up with the same session context as new/resume.
+
+        - With a known ``session_id``: ``codex exec resume <sid> <wrap_up>``.
+        - Without one, in docker: ``codex exec resume --last <wrap_up>``.
+        - Without one, in native: fall back to a fresh non-interactive
+          ``codex exec <wrap_up>``.
+        """
+        if session_id:
+            exec_args = ["exec", "resume", session_id, wrap_up_prompt]
+        elif docker:
+            exec_args = ["exec", "resume", "--last", wrap_up_prompt]
+        else:
+            exec_args = ["exec", wrap_up_prompt]
+
         if docker:
-            return ["sh", "-c", CodexBackend._DOCKER_WRAPPER, "sh", wrap_up_prompt]
-        return ["codex", "--dangerously-bypass-approvals-and-sandbox", wrap_up_prompt]
+            return ["sh", "-c", CodexBackend._DOCKER_WRAPPER, "sh", *exec_args]
+        return ["codex", "--dangerously-bypass-approvals-and-sandbox", *exec_args]
 
     # ── Docker infrastructure ─────────────────────────────────────────────────
 
@@ -598,6 +809,32 @@ class CodexBackend(AgentBackend):
         out = session_dir / "codex_config.toml"
         out.write_text("\n".join(lines) + "\n")
         out.chmod(0o600)
+
+    @staticmethod
+    def background_threads(
+        meta: "SessionMeta",
+        *,
+        docker: bool,
+        runtime: "Runtime | None",
+        launch_start: float,
+        stop: threading.Event,
+    ) -> list[Callable[[], None]]:
+        """Poll for codex's rollout file and persist the session UUID.
+
+        Codex generates its session UUID at launch — there is no CLI flag
+        to pre-set it — and stores rollouts at
+        ``~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`` within
+        ~1s of startup. We detect the file live so ``meta.session_id``
+        is on disk before the process exits, which means resume works
+        even if hatchery is killed mid-session.
+
+        The poller runs on every launch (new + resume). On resume codex
+        may create a new rollout file for the resumed thread; capturing
+        the newest id keeps the chain fresh. Both probe paths apply an
+        mtime filter against ``launch_start`` so rollouts from a previous
+        task run (that reused this task's docker volume) never leak in.
+        """
+        return [_make_session_id_poller(meta, docker=docker, runtime=runtime, launch_start=launch_start, stop=stop)]
 
     dockerfile_install: str = f"""\
 # ── OpenAI Codex CLI ──────────────────────────────────────────────────────────

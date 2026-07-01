@@ -1,10 +1,16 @@
 """AgentBackend abstract base class."""
 
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from seekr_hatchery.mount import Mount
+
+if TYPE_CHECKING:
+    from seekr_hatchery.docker import Runtime
+    from seekr_hatchery.models import SessionMeta
 
 # Home directory of the non-root user inside every sandbox container.
 CONTAINER_HOME = "/home/hatchery"
@@ -19,11 +25,30 @@ class AgentBackend(ABC):
     All methods are either pure static functions (no instance state) or
     class-level constant attributes.  ``self`` never carries data — the
     only reason the class hierarchy exists is polymorphic dispatch.
+
+    Class attributes:
+      kind:
+        Serialisation key stored in task metadata (e.g. ``"CODEX"``).
+      binary:
+        Executable name on ``$PATH``.
+      supports_sessions:
+        True when the agent's CLI can resume a prior conversation by id
+        (e.g. ``claude --resume=<uuid>``, ``codex resume <uuid>``). When
+        False the resume flow falls back to re-launching with the task
+        file as context.
+      session_id_pre_generated:
+        True when the agent's CLI accepts a session id at launch time
+        (e.g. claude's ``--session-id=<uuid>``) and hatchery pre-generates
+        a UUID at task-creation time. False when the agent generates its
+        own id at runtime (codex) — hatchery leaves ``meta.session_id``
+        empty until the ``background_threads`` poller captures the real
+        id.
     """
 
-    kind: str  # serialisation key stored in task metadata (e.g. "CODEX")
-    binary: str  # executable name on $PATH
+    kind: str
+    binary: str
     supports_sessions: bool
+    session_id_pre_generated: bool = True
 
     # ── Command construction ───────────────────────────────────────────────────
 
@@ -134,15 +159,18 @@ class AgentBackend(ABC):
     #     1. on_new_task(session_dir)              one-time task setup
     #     2. on_before_launch(worktree)             every launch, native + Docker
     #     3. on_before_container_start(...)         Docker only
-    #        └─ container runs
+    #     4. background_threads(...) → workers      every launch, threads run
+    #        └─ container runs (workers alive)         for the launch's lifetime
     #
     #   Resume (cmd_resume)
     #     1. on_before_launch(worktree)             every launch, native + Docker
     #     2. on_before_container_start(...)         Docker only
-    #        └─ container runs
+    #     3. background_threads(...) → workers      every launch
+    #        └─ container runs (workers alive)
     #
     #   Finalize (_post_exit_check)
-    #     (no hooks — only command construction is used)
+    #     1. background_threads(...) → workers      every launch
+    #        └─ container runs (workers alive)
 
     @staticmethod
     @abstractmethod
@@ -182,6 +210,32 @@ class AgentBackend(ABC):
         this launch.  *workdir* is the agent's working directory inside the
         container.
         """
+
+    @staticmethod
+    def background_threads(
+        meta: "SessionMeta",
+        *,
+        docker: bool,
+        runtime: "Runtime | None",
+        launch_start: float,
+        stop: threading.Event,
+    ) -> list[Callable[[], None]]:
+        """Return nullary callables to run in daemon threads for the launch.
+
+        The launch layer starts one thread per callable just before the
+        agent process runs, signals *stop* in its finally block, and
+        joins each thread with a short timeout.  Each callable may loop
+        until *stop* is set, or return early once its work is done —
+        both are supported.  Exceptions raised inside a worker are logged
+        and swallowed; they never mask the launch's own exceptions.
+
+        Workers may mutate *meta* and call ``sessions.save(meta)`` to
+        persist state discovered live during the launch (e.g. an
+        auto-generated session id detected on disk).
+
+        Default: no workers.  Backends that need live work override.
+        """
+        return []
 
     @property
     @abstractmethod

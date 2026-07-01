@@ -1,12 +1,18 @@
 """Unit tests for CodexBackend."""
 
 import json
+import subprocess
+import threading
+import time
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 import seekr_hatchery.agents as agent
+import seekr_hatchery.agents.codex as codex_backend
 import seekr_hatchery.mount as mount
+from seekr_hatchery.models import SessionMeta
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -17,7 +23,7 @@ class TestCodexBackendConstants:
     def test_constants(self):
         assert agent.CODEX.kind == "CODEX"
         assert agent.CODEX.binary == "codex"
-        assert agent.CODEX.supports_sessions is False
+        assert agent.CODEX.supports_sessions is True
 
 
 # ---------------------------------------------------------------------------
@@ -49,6 +55,12 @@ class TestBuildNewCommand:
         cmd2 = agent.CODEX.build_new_command("sid", "sys", "initial", docker=True, workdir="/w")
         assert cmd1 == cmd2
 
+    def test_docker_disables_update_check(self):
+        # The interactive "Update available" prompt would otherwise block
+        # resume launches while codex waits for the user to press enter.
+        cmd = agent.CODEX.build_new_command("sid", "sys", "initial", docker=True)
+        assert "check_for_update_on_startup=false" in cmd[2]
+
 
 # ---------------------------------------------------------------------------
 # build_resume_command
@@ -56,16 +68,25 @@ class TestBuildNewCommand:
 
 
 class TestBuildResumeCommand:
-    def test_uses_initial_prompt_as_context_native(self):
-        # session_id is unused; initial_prompt provides task context
-        cmd = agent.CODEX.build_resume_command("sid-ignored", "sys", "ctx")
+    def test_native_with_session_id_resumes(self):
+        cmd = agent.CODEX.build_resume_command("sid-123", "sys", "ctx")
+        assert cmd == ["codex", "--dangerously-bypass-approvals-and-sandbox", "resume", "sid-123"]
+
+    def test_native_without_session_id_falls_back_to_fresh_prompt(self):
+        # Native + no sid is the defensive path (cli.py bails first).
+        cmd = agent.CODEX.build_resume_command("", "sys", "ctx")
         assert cmd == ["codex", "--dangerously-bypass-approvals-and-sandbox", "sys\n\nctx"]
 
-    def test_docker_uses_proxy_wrapper(self):
-        cmd = agent.CODEX.build_resume_command("sid-ignored", "sys", "ctx", docker=True)
+    def test_docker_with_session_id_resumes(self):
+        cmd = agent.CODEX.build_resume_command("sid-123", "sys", "ctx", docker=True)
         assert cmd[0] == "sh"
         assert "openai_base_url" in cmd[2]
-        assert cmd[-1] == "sys\n\nctx"
+        assert cmd[-2:] == ["resume", "sid-123"]
+
+    def test_docker_without_session_id_uses_last(self):
+        cmd = agent.CODEX.build_resume_command("", "sys", "ctx", docker=True)
+        assert cmd[0] == "sh"
+        assert cmd[-2:] == ["resume", "--last"]
 
 
 # ---------------------------------------------------------------------------
@@ -74,15 +95,31 @@ class TestBuildResumeCommand:
 
 
 class TestBuildFinalizeCommand:
-    def test_uses_wrap_up_prompt_native(self):
-        cmd = agent.CODEX.build_finalize_command("sid-ignored", "sys", "wrap up")
-        assert cmd == ["codex", "--dangerously-bypass-approvals-and-sandbox", "wrap up"]
+    def test_native_with_session_id_execs_resume(self):
+        cmd = agent.CODEX.build_finalize_command("sid-123", "sys", "wrap up")
+        assert cmd == [
+            "codex",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "exec",
+            "resume",
+            "sid-123",
+            "wrap up",
+        ]
 
-    def test_docker_uses_proxy_wrapper(self):
-        cmd = agent.CODEX.build_finalize_command("sid-ignored", "sys", "wrap up", docker=True)
+    def test_native_without_session_id_execs_fresh(self):
+        cmd = agent.CODEX.build_finalize_command("", "sys", "wrap up")
+        assert cmd == ["codex", "--dangerously-bypass-approvals-and-sandbox", "exec", "wrap up"]
+
+    def test_docker_with_session_id_execs_resume(self):
+        cmd = agent.CODEX.build_finalize_command("sid-123", "sys", "wrap up", docker=True)
         assert cmd[0] == "sh"
         assert "openai_base_url" in cmd[2]
-        assert cmd[-1] == "wrap up"
+        assert cmd[-4:] == ["exec", "resume", "sid-123", "wrap up"]
+
+    def test_docker_without_session_id_uses_last(self):
+        cmd = agent.CODEX.build_finalize_command("", "sys", "wrap up", docker=True)
+        assert cmd[0] == "sh"
+        assert cmd[-4:] == ["exec", "resume", "--last", "wrap up"]
 
 
 # ---------------------------------------------------------------------------
@@ -690,3 +727,318 @@ trust_level = "trusted"
         data = tomllib.loads((session_dir / "codex_config.toml").read_text())
         assert data["model_provider"] == "dev-adapter"
         assert data["model_providers"]["dev-adapter"]["experimental_bearer_token"] == "proxy-tok"
+
+
+# ---------------------------------------------------------------------------
+# session-id probe
+# ---------------------------------------------------------------------------
+
+
+def _meta(**overrides) -> SessionMeta:
+    """Minimal SessionMeta for probe / poller tests."""
+    return SessionMeta(
+        name=overrides.pop("name", "t"),
+        repo=overrides.pop("repo", "/repo"),
+        worktree=overrides.pop("worktree", "/wt"),
+        agent="CODEX",
+        **overrides,
+    )
+
+
+def _write_rollout(root: Path, uuid: str, *, mtime: float | None = None) -> Path:
+    """Create an empty rollout file at ~/.codex/sessions/YYYY/MM/DD/.
+
+    The trailing UUID in the filename is the id that ``codex resume``
+    accepts — that's what our probe extracts.
+    """
+    day = root / ".codex" / "sessions" / "2026" / "07" / "01"
+    day.mkdir(parents=True, exist_ok=True)
+    path = day / f"rollout-2026-07-01T12-00-00-{uuid}.jsonl"
+    path.write_text("")
+    if mtime is not None:
+        import os
+
+        os.utime(path, (mtime, mtime))
+    return path
+
+
+def _docker_probe_stdout(
+    uuid: str,
+    *,
+    path_prefix: str = "/home/hatchery/.codex/sessions/2026/07/01/rollout-2026-07-01T12-00-00-",
+    mtime: float | None = None,
+    raw: str | None = None,
+) -> str:
+    """Assemble the ``<mtime> <path>`` line the docker probe shell snippet emits.
+
+    ``raw`` bypasses the mtime/uuid formatting for tests that need to
+    inject malformed output.
+    """
+    if raw is not None:
+        return raw
+    m = mtime if mtime is not None else time.time()
+    return f"{m} {path_prefix}{uuid}.jsonl\n"
+
+
+class TestExtractUuidFromPath:
+    def test_extracts_trailing_uuid(self):
+        uuid = "019f1e3c-5b9a-76f3-b6f7-e5f967162066"
+        got = codex_backend._extract_uuid_from_path(
+            f"/home/hatchery/.codex/sessions/2026/07/01/rollout-2026-07-01T12-00-00-{uuid}.jsonl"
+        )
+        assert got == uuid
+
+    def test_returns_none_when_no_uuid(self):
+        assert codex_backend._extract_uuid_from_path("/tmp/rollout-not-a-uuid.jsonl") is None
+
+    def test_returns_none_on_unrelated_path(self):
+        assert codex_backend._extract_uuid_from_path("/etc/passwd") is None
+
+
+class TestProbeSessionIdNative:
+    def test_returns_uuid_from_newest_rollout(self, home):
+        uuid = "019f1e3c-5b9a-76f3-b6f7-e5f967162066"
+        _write_rollout(home, uuid, mtime=time.time())
+        got = codex_backend._probe_session_id(_meta(), docker=False, runtime=None, launch_start=time.time() - 10)
+        assert got == uuid
+
+    def test_ignores_stale_rollouts(self, home):
+        _write_rollout(home, "019f1e3c-5b9a-76f3-b6f7-e5f967162066", mtime=time.time() - 3600)
+        assert codex_backend._probe_session_id(_meta(), docker=False, runtime=None, launch_start=time.time()) is None
+
+    def test_prefers_newest_when_multiple_fresh(self, home):
+        newer = "019f1e3c-5b9a-76f3-b6f7-000000000002"
+        older = "019f1e3c-5b9a-76f3-b6f7-000000000001"
+        now = time.time()
+        _write_rollout(home, older, mtime=now - 1)
+        _write_rollout(home, newer, mtime=now + 1)
+        got = codex_backend._probe_session_id(_meta(), docker=False, runtime=None, launch_start=now - 10)
+        assert got == newer
+
+    def test_handles_missing_sessions_dir(self, home):
+        assert codex_backend._probe_session_id(_meta(), docker=False, runtime=None, launch_start=time.time()) is None
+
+    def test_slight_negative_skew_still_accepted(self, home):
+        # Filesystem clock a couple of seconds behind — still accepted
+        # thanks to the 5s tolerance window.
+        uuid = "019f1e3c-5b9a-76f3-b6f7-e5f967162066"
+        launch = time.time()
+        _write_rollout(home, uuid, mtime=launch - 2)
+        got = codex_backend._probe_session_id(_meta(), docker=False, runtime=None, launch_start=launch)
+        assert got == uuid
+
+
+class TestProbeSessionIdDocker:
+    def test_shells_out_to_docker_exec(self):
+        from seekr_hatchery.docker import Runtime
+
+        uuid = "019f1e3c-5b9a-76f3-b6f7-e5f967162066"
+        launch = time.time()
+        completed = MagicMock(returncode=0, stdout=_docker_probe_stdout(uuid, mtime=launch + 1))
+        with patch("subprocess.run", return_value=completed) as sp:
+            got = codex_backend._probe_session_id(
+                _meta(name="my-task"), docker=True, runtime=Runtime.DOCKER, launch_start=launch
+            )
+        assert got == uuid
+        cmd = sp.call_args[0][0]
+        assert cmd[0] == "docker"
+        assert cmd[1] == "exec"
+        assert any("my-task" in part for part in cmd)
+
+    def test_nonzero_exit_returns_none(self):
+        from seekr_hatchery.docker import Runtime
+
+        with patch("subprocess.run", return_value=MagicMock(returncode=1, stdout="")):
+            assert (
+                codex_backend._probe_session_id(_meta(), docker=True, runtime=Runtime.DOCKER, launch_start=time.time())
+                is None
+            )
+
+    def test_empty_stdout_returns_none(self):
+        from seekr_hatchery.docker import Runtime
+
+        with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="")):
+            assert (
+                codex_backend._probe_session_id(_meta(), docker=True, runtime=Runtime.DOCKER, launch_start=time.time())
+                is None
+            )
+
+    def test_timeout_returns_none(self):
+        from seekr_hatchery.docker import Runtime
+
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd=["docker"], timeout=2)):
+            assert (
+                codex_backend._probe_session_id(_meta(), docker=True, runtime=Runtime.DOCKER, launch_start=time.time())
+                is None
+            )
+
+    def test_stale_rollout_returns_none(self):
+        # File mtime is well before launch_start (dirty volume from a
+        # previous task run) — must be filtered.
+        from seekr_hatchery.docker import Runtime
+
+        launch = time.time()
+        completed = MagicMock(
+            returncode=0,
+            stdout=_docker_probe_stdout("019f1e3c-5b9a-76f3-b6f7-e5f967162066", mtime=launch - 3600),
+        )
+        with patch("subprocess.run", return_value=completed):
+            assert (
+                codex_backend._probe_session_id(_meta(), docker=True, runtime=Runtime.DOCKER, launch_start=launch)
+                is None
+            )
+
+    def test_slight_negative_skew_still_accepted(self):
+        # Container clock is a couple of seconds behind host — still
+        # accepted thanks to the 5s tolerance window.
+        from seekr_hatchery.docker import Runtime
+
+        uuid = "019f1e3c-5b9a-76f3-b6f7-e5f967162066"
+        launch = time.time()
+        completed = MagicMock(returncode=0, stdout=_docker_probe_stdout(uuid, mtime=launch - 2))
+        with patch("subprocess.run", return_value=completed):
+            got = codex_backend._probe_session_id(_meta(), docker=True, runtime=Runtime.DOCKER, launch_start=launch)
+        assert got == uuid
+
+    def test_unparseable_stdout_returns_none(self):
+        # Missing space between mtime and path, or otherwise garbage.
+        from seekr_hatchery.docker import Runtime
+
+        with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="not-a-stat-line\n")):
+            assert (
+                codex_backend._probe_session_id(_meta(), docker=True, runtime=Runtime.DOCKER, launch_start=time.time())
+                is None
+            )
+
+    def test_non_numeric_mtime_returns_none(self):
+        from seekr_hatchery.docker import Runtime
+
+        with patch(
+            "subprocess.run",
+            return_value=MagicMock(
+                returncode=0,
+                stdout="notanumber /home/hatchery/.codex/sessions/2026/07/01/rollout-x-abc.jsonl\n",
+            ),
+        ):
+            assert (
+                codex_backend._probe_session_id(_meta(), docker=True, runtime=Runtime.DOCKER, launch_start=time.time())
+                is None
+            )
+
+    def test_malformed_filename_returns_none(self):
+        # File exists and mtime is fresh, but the filename doesn't carry
+        # a UUID — we must not persist garbage.
+        from seekr_hatchery.docker import Runtime
+
+        launch = time.time()
+        stdout = f"{launch + 1} /home/hatchery/.codex/sessions/2026/07/01/rollout-oops.jsonl\n"
+        with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout=stdout)):
+            assert (
+                codex_backend._probe_session_id(_meta(), docker=True, runtime=Runtime.DOCKER, launch_start=launch)
+                is None
+            )
+
+
+# ---------------------------------------------------------------------------
+# background_threads
+# ---------------------------------------------------------------------------
+
+
+class TestBackgroundThreads:
+    def test_returns_poller_when_no_session_id(self):
+        stop = threading.Event()
+        workers = agent.CODEX.background_threads(
+            _meta(), docker=False, runtime=None, launch_start=time.time(), stop=stop
+        )
+        assert len(workers) == 1
+        assert callable(workers[0])
+
+    def test_returns_poller_even_when_session_id_set(self):
+        # Poller runs unconditionally — on resume, codex may write a new
+        # rollout for the resumed thread and we need to capture it.
+        stop = threading.Event()
+        workers = agent.CODEX.background_threads(
+            _meta(session_id="019f1e3e-d5ff-7ce0-801b-28a905c7d3ed"),
+            docker=False,
+            runtime=None,
+            launch_start=time.time(),
+            stop=stop,
+        )
+        assert len(workers) == 1
+
+    def test_session_id_pre_generated_flag(self):
+        assert agent.CODEX.session_id_pre_generated is False
+
+    def test_poller_persists_on_capture(self, fake_tasks_db, tmp_path):
+        # Write a valid meta so sessions.save() works.
+        import seekr_hatchery.sessions as sessions
+
+        meta = _meta(repo=str(tmp_path), worktree=str(tmp_path))
+        sessions.save(meta)
+
+        uuid = "cafebabe-cafe-babe-cafe-babecafebabe"
+        # Probe returns None first call, then the UUID.
+        calls = {"n": 0}
+
+        def fake_probe(meta_arg, *, docker, runtime, launch_start):
+            calls["n"] += 1
+            return uuid if calls["n"] >= 2 else None
+
+        stop = threading.Event()
+        with patch.object(codex_backend, "_probe_session_id", side_effect=fake_probe):
+            workers = agent.CODEX.background_threads(
+                meta, docker=False, runtime=None, launch_start=time.time(), stop=stop
+            )
+            assert len(workers) == 1
+            # Run in a thread so we can time it out.
+            t = threading.Thread(target=workers[0])
+            t.start()
+            t.join(timeout=5)
+            assert not t.is_alive(), "poller did not exit after capture"
+
+        assert meta.session_id == uuid
+        # Persisted to disk too
+        loaded = sessions.load(Path(meta.repo), meta.name)
+        assert loaded.session_id == uuid
+
+    def test_poller_exits_promptly_on_stop(self):
+        meta = _meta()
+        stop = threading.Event()
+        with patch.object(codex_backend, "_probe_session_id", return_value=None):
+            workers = agent.CODEX.background_threads(
+                meta, docker=False, runtime=None, launch_start=time.time(), stop=stop
+            )
+            t = threading.Thread(target=workers[0])
+            t.start()
+            time.sleep(0.1)  # let the worker enter its loop
+            stop.set()
+            t.join(timeout=2)
+            assert not t.is_alive()
+        assert meta.session_id is None
+
+    def test_poller_swallows_probe_exceptions(self, fake_tasks_db, tmp_path):
+        import seekr_hatchery.sessions as sessions
+
+        meta = _meta(repo=str(tmp_path), worktree=str(tmp_path))
+        sessions.save(meta)
+
+        uuid = "deadbeef-dead-beef-dead-beefdeadbeef"
+        calls = {"n": 0}
+
+        def fake_probe(meta_arg, *, docker, runtime, launch_start):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("container not up yet")
+            return uuid
+
+        stop = threading.Event()
+        with patch.object(codex_backend, "_probe_session_id", side_effect=fake_probe):
+            workers = agent.CODEX.background_threads(
+                meta, docker=False, runtime=None, launch_start=time.time(), stop=stop
+            )
+            t = threading.Thread(target=workers[0])
+            t.start()
+            t.join(timeout=5)
+            assert not t.is_alive()
+
+        assert meta.session_id == uuid
