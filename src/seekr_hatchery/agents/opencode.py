@@ -226,16 +226,17 @@ class OpenCodeBackend(AgentBackend):
         return None
 
     @staticmethod
-    def _read_credentials() -> tuple[str | None, str | None]:
-        """Return (api_key, target_host) from the host's opencode config.
+    def _read_credentials() -> str | None:
+        """Return the resolved API key from the host's opencode config.
 
-        Both values are resolved from {env:VAR} references in the config.
-        Returns (None, None) when no custom provider is configured.
+        Resolves {env:VAR} and {file:PATH} references in the provider's
+        ``apiKey``.  Returns None when no custom provider is configured or no
+        API key is set.
         """
         config = OpenCodeBackend._read_opencode_config()
         result = OpenCodeBackend._find_primary_provider(config)
         if result is None:
-            return None, None
+            return None
 
         _, pdata = result
         opts = pdata.get("options", {})
@@ -243,16 +244,8 @@ class OpenCodeBackend(AgentBackend):
         raw_key = opts.get("apiKey", "")
         api_key = OpenCodeBackend._resolve_config_ref(raw_key) if raw_key else None
         if not api_key:
-            api_key = None
-
-        raw_url = opts.get("baseURL", "")
-        target_host = None
-        if raw_url:
-            resolved = OpenCodeBackend._resolve_env_ref(raw_url)
-            parsed = urlparse(resolved)
-            target_host = parsed.netloc or None
-
-        return api_key, target_host
+            return None
+        return api_key
 
     @staticmethod
     def _resolve_model(host_config: dict) -> str | None:
@@ -265,7 +258,9 @@ class OpenCodeBackend(AgentBackend):
         stale ``model`` pointing at a builtin provider (e.g. ``openai/...``)
         would crash with ``ProviderModelNotFoundError`` once ``enabled_providers``
         restricts the sandbox to the custom provider alone.  Otherwise we fall
-        back to the first model listed under the primary provider.
+        back to the first model listed under the primary provider.  Raises
+        ``RuntimeError`` when a custom provider is configured but has no
+        ``models`` — the sandbox would have no selectable model.
         """
         result = OpenCodeBackend._find_primary_provider(host_config)
         if result is None:
@@ -279,7 +274,11 @@ class OpenCodeBackend(AgentBackend):
                 return host_model
         if models:
             return f"{provider_id}/{next(iter(models))}"
-        return None
+        raise RuntimeError(
+            f"custom provider '{provider_id}' has no models configured; add at "
+            f"least one entry under provider.{provider_id}.models in "
+            f"~/.config/opencode/opencode.json"
+        )
 
     @staticmethod
     def _build_inline_config(proxy_url: str, proxy_token: str, host_config: dict) -> dict:
@@ -445,7 +444,7 @@ class OpenCodeBackend(AgentBackend):
 
     @staticmethod
     def make_header_mutator() -> Callable[..., dict[str, str]]:
-        api_key, _ = OpenCodeBackend._read_credentials()
+        api_key = OpenCodeBackend._read_credentials()
         if not api_key:
             raise RuntimeError(
                 "no API key found for opencode; ensure apiKey is set in your "
@@ -518,4 +517,4 @@ RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm \\
     && rm -rf /var/lib/apt/lists/*
 USER hatchery
 RUN npm config set prefix '{CONTAINER_HOME}/.npm-global' \\
-    && npm install -g opencode-ai"""
+    && npm install -g opencode-ai@1.17.13"""
