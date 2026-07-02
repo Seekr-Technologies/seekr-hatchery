@@ -76,6 +76,7 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
     header_mutator = staticmethod(lambda h: h)
     proxy_token: str = ""
     target_host: str = "api.anthropic.com"
+    target_scheme: str = "https"  # "http" for plain-HTTP internal endpoints
     path_prefix: str = ""  # prepended to every forwarded path (e.g. "/backend-api/codex")
     pool: urllib3.PoolManager  # set per-instance by api_server()
 
@@ -183,7 +184,11 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
         # WebSocket upgrades need raw socket access for bidirectional relay;
         # urllib3 does not support 101, so keep http.client for that path only.
         if self.headers.get("upgrade", "").lower() == "websocket":
-            conn = http.client.HTTPSConnection(self.target_host, timeout=60)
+            conn = (
+                http.client.HTTPSConnection(self.target_host, timeout=60)
+                if self.target_scheme == "https"
+                else http.client.HTTPConnection(self.target_host, timeout=60)
+            )
             try:
                 conn.request(self.command, self.path_prefix + self.path, body=body, headers=out_headers)
                 resp = conn.getresponse()
@@ -223,7 +228,7 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
             return
 
         # Normal request — use the shared connection pool.
-        url = f"https://{self.target_host}{self.path_prefix}{self.path}"
+        url = f"{self.target_scheme}://{self.target_host}{self.path_prefix}{self.path}"
         try:
             resp = self.pool.urlopen(
                 self.command,
@@ -347,6 +352,7 @@ def api_server(
     header_mutator: Callable[..., dict[str, str]],
     proxy_token: str,
     target_host: str = "api.anthropic.com",
+    target_scheme: str = "https",
     path_prefix: str = "",
     *,
     _pool: urllib3.PoolManager | None = None,
@@ -377,6 +383,8 @@ def api_server(
         proxy_token: The stable per-task token the container uses.
         target_host: Upstream API hostname (default: ``api.anthropic.com``).
             Use ``"api.openai.com"`` for OpenAI/codex.
+        target_scheme: URL scheme for the upstream connection (default: ``"https"``).
+            Set to ``"http"`` for plain-HTTP internal/on-prem endpoints.
         path_prefix: String prepended to every forwarded path (default: ``""``).
             Use ``"/backend-api/codex"`` for ChatGPT OAuth mode.
     """
@@ -389,6 +397,7 @@ def api_server(
     _BoundHandler.header_mutator = staticmethod(header_mutator)
     _BoundHandler.proxy_token = proxy_token
     _BoundHandler.target_host = target_host
+    _BoundHandler.target_scheme = target_scheme
     _BoundHandler.path_prefix = path_prefix
     if _pool is not None:
         _BoundHandler.pool = _pool

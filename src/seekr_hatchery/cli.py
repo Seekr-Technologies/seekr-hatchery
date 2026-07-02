@@ -469,7 +469,7 @@ def cli(log_level: str, log_file: str | None) -> None:
     "--agent",
     "agent_name",
     default=None,
-    type=click.Choice(["codex"], case_sensitive=False),
+    type=click.Choice(["codex", "opencode"], case_sensitive=False),
     help="Agent to use (auto-detected if not specified)",
 )
 @click.option(
@@ -625,7 +625,7 @@ def cmd_new(
     "--agent",
     "agent_name",
     default=None,
-    type=click.Choice(["codex"], case_sensitive=False),
+    type=click.Choice(["codex", "opencode"], case_sensitive=False),
     help="Agent to use (auto-detected if not specified)",
 )
 @click.option(
