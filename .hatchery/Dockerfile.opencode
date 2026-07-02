@@ -28,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm \
     && rm -rf /var/lib/apt/lists/*
 USER hatchery
 RUN npm config set prefix '/home/hatchery/.npm-global' \
-    && npm install -g opencode-ai
+    && npm install -g opencode-ai@1.17.13
 
 # =============================================================================
 # Optional extras — uncomment what you need

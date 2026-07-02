@@ -204,6 +204,20 @@ class TestBuildFinalizeCommand:
         cmd = agent.OPENCODE.build_finalize_command("sid-ignored", "sys", "wrap up")
         assert "--print-logs" not in cmd
 
+    def test_raises_when_custom_provider_has_no_models(self, home):
+        # A custom provider with a baseURL but no `models` is unusable: opencode
+        # run would fall back to its default model while enabled_providers
+        # restricts the sandbox to the custom provider alone — no model works.
+        # Must fail loudly instead of emitting a silently-broken command.
+        config = {
+            "provider": {
+                "my-provider": {"options": {"baseURL": "https://api.example.com/v1"}},
+            }
+        }
+        _write_opencode_config(home, config)
+        with pytest.raises(RuntimeError, match="no models configured"):
+            agent.OPENCODE.build_finalize_command("sid", "sys", "wrap up")
+
 
 # ---------------------------------------------------------------------------
 # _resolve_env_ref
@@ -349,9 +363,14 @@ class TestResolveModel:
         config = {"model": "openai/gpt-5.2-codex"}
         assert agent.OpenCodeBackend._resolve_model(config) == "openai/gpt-5.2-codex"
 
-    def test_returns_none_when_no_model_and_no_models(self, home):
+    def test_raises_when_custom_provider_has_no_models(self, home):
+        # A custom provider without models is unusable in the sandbox: the only
+        # selectable model would be a builtin (openai/...) which enabled_providers
+        # disables. Raise instead of silently returning None (which would make
+        # opencode run fall back to the openai default and then crash).
         config = {"provider": {"my-custom": {"options": {"baseURL": "https://x.example.com/v1"}}}}
-        assert agent.OpenCodeBackend._resolve_model(config) is None
+        with pytest.raises(RuntimeError, match="no models configured"):
+            agent.OpenCodeBackend._resolve_model(config)
 
     def test_returns_none_when_no_config(self, home):
         assert agent.OpenCodeBackend._resolve_model({}) is None
@@ -371,9 +390,7 @@ class TestReadCredentials:
     def test_resolves_api_key_from_file(self, home):
         _write_opencode_config(home, _ONPREM_CONFIG)
         _write_api_key_file(home, "real-token-xyz")
-        api_key, target_host = agent.OpenCodeBackend._read_credentials()
-        assert api_key == "real-token-xyz"
-        assert target_host == "on-prem.example.com"
+        assert agent.OpenCodeBackend._read_credentials() == "real-token-xyz"
 
     def test_resolves_api_key_from_env(self, home, monkeypatch):
         config = {
@@ -388,25 +405,19 @@ class TestReadCredentials:
         }
         monkeypatch.setenv("MY_API_KEY", "env-token-xyz")
         _write_opencode_config(home, config)
-        api_key, _ = agent.OpenCodeBackend._read_credentials()
-        assert api_key == "env-token-xyz"
+        assert agent.OpenCodeBackend._read_credentials() == "env-token-xyz"
 
     def test_returns_none_when_config_missing(self, home):
-        api_key, target_host = agent.OpenCodeBackend._read_credentials()
-        assert api_key is None
-        assert target_host is None
+        assert agent.OpenCodeBackend._read_credentials() is None
 
     def test_returns_none_when_only_builtins(self, home):
         _write_opencode_config(home, _BUILTIN_ONLY_CONFIG)
-        api_key, target_host = agent.OpenCodeBackend._read_credentials()
-        assert api_key is None
-        assert target_host is None
+        assert agent.OpenCodeBackend._read_credentials() is None
 
     def test_api_key_none_when_file_missing(self, home):
         _write_opencode_config(home, _ONPREM_CONFIG)
         # api-key file not written — should return None
-        api_key, _ = agent.OpenCodeBackend._read_credentials()
-        assert api_key is None
+        assert agent.OpenCodeBackend._read_credentials() is None
 
     def test_literal_api_key(self, home):
         config = {
@@ -420,9 +431,16 @@ class TestReadCredentials:
             }
         }
         _write_opencode_config(home, config)
-        api_key, target_host = agent.OpenCodeBackend._read_credentials()
-        assert api_key == "literal-key-abc"
-        assert target_host == "api.example.com"
+        assert agent.OpenCodeBackend._read_credentials() == "literal-key-abc"
+
+    def test_returns_only_api_key(self, home):
+        # _read_credentials must return a single value (the api key), not a
+        # (api_key, target_host) tuple — target_host was unused at the call site
+        # and was resolved inconsistently (_resolve_env_ref vs _resolve_config_ref).
+        _write_opencode_config(home, _ONPREM_CONFIG)
+        _write_api_key_file(home, "real-token-xyz")
+        result = agent.OpenCodeBackend._read_credentials()
+        assert isinstance(result, str)
 
 
 # ---------------------------------------------------------------------------
@@ -489,6 +507,18 @@ class TestBuildInlineConfig:
         opts = inline["provider"][pid]["options"]
         assert opts["baseURL"] == "http://proxy/v1"
         assert opts["apiKey"] == "tok"
+
+    def test_raises_when_custom_provider_has_no_models(self, home):
+        # enabled_providers restricts the sandbox to the custom provider, but
+        # with no models listed there is no selectable model — building the
+        # inline config must fail loudly rather than produce a broken sandbox.
+        config = {
+            "provider": {
+                "my-provider": {"options": {"baseURL": "https://api.example.com/v1"}},
+            }
+        }
+        with pytest.raises(RuntimeError, match="no models configured"):
+            agent.OpenCodeBackend._build_inline_config("http://proxy/v1", "tok", config)
 
 
 # ---------------------------------------------------------------------------
@@ -795,6 +825,20 @@ class TestDockerfileInstall:
     def test_contains_nodejs(self):
         snippet = agent.OPENCODE.dockerfile_install
         assert "nodejs" in snippet
+
+    def test_pins_opencode_to_exact_version(self):
+        # `npm install -g opencode-ai` (unpinned) lets the registry float to
+        # whatever latest is at build time — non-reproducible and flagged by
+        # Scorecard's Pinned-Dependencies check. Must pin to an exact version.
+        import re
+
+        snippet = agent.OPENCODE.dockerfile_install
+        assert "opencode-ai@" in snippet
+        # No bare unpinned install of the package.
+        assert not re.search(r"npm install -g opencode-ai\b(?!@)", snippet)
+        # The pin is an exact x.y.z version, not a range/tag.
+        match = re.search(r"opencode-ai@(\d+\.\d+\.\d+)", snippet)
+        assert match, f"opencode-ai is not pinned to an exact x.y.z version in:\n{snippet}"
 
 
 # ---------------------------------------------------------------------------
