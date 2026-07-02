@@ -576,7 +576,6 @@ requires-dist = [
     { name = "prompt-toolkit", specifier = ">=3.0.52" },
     { name = "pydantic", specifier = ">=2" },
     { name = "pyyaml", specifier = ">=6" },
-    { name = "truststore", specifier = ">=0.9" },
     { name = "truststore", specifier = ">=0.10.4" },
     { name = "urllib3", specifier = ">=2.0" },
 ]
