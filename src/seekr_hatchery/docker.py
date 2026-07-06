@@ -38,7 +38,7 @@ from seekr_hatchery.mount import BindMount, Mount, VolumeMount, mount_to_docker_
 from seekr_hatchery.seeded_volumes import prepare_volume_mounts
 from seekr_hatchery.utils import open_for_editing, run
 
-logger = logging.getLogger("hatchery")
+logger = logging.getLogger(__name__)
 
 
 class Runtime(Enum):

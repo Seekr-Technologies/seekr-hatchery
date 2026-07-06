@@ -38,7 +38,7 @@ from seekr_hatchery.models import SessionMeta
 from seekr_hatchery.mount import BindMount, Mount, SeedContext, TmpfsMount, VolumeMount
 from seekr_hatchery.utils import run
 
-logger = logging.getLogger("hatchery")
+logger = logging.getLogger(__name__)
 
 
 def task_volume_prefix(repo: Path, name: str) -> str:

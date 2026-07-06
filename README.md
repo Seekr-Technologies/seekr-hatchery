@@ -88,6 +88,7 @@ When the agent starts a new task it is given a task file at `.hatchery/tasks/YYY
 | `status <name>` | Show task metadata and the full task file |
 | `self update` | Upgrade hatchery to the latest release |
 | `config edit` | Open `~/.hatchery/config.json` in `$EDITOR` with validation |
+| `logs` | View or follow the hatchery log file (`~/.hatchery/hatchery.log`) |
 
 All `new` / `resume` commands accept:
 - `--no-docker` — skip the container even if a Dockerfile is present
@@ -265,6 +266,7 @@ Then output `"$top\n$hatchery_line\n$bottom"` when `$hatchery_line` is non-empty
 
 ~/.hatchery/
   meta.json                # DB schema version
+  hatchery.log             # always-on rotating log file (5 MB × 3 backups)
   tasks/                   # all per-task state, namespaced by repository
     <repo-id>/             # stable hash of the repo path
       <task-name>/         # one directory per task
@@ -274,6 +276,29 @@ Then output `"$top\n$hatchery_line\n$bottom"` when `$hatchery_line` is non-empty
         COMMIT_EDITMSG     # Docker session: git sentinel file
         ORIG_HEAD          # Docker session: git sentinel file
         git_ptr            # Docker session: container-path .git pointer
+```
+
+## Logging
+
+Hatchery always writes logs to `~/.hatchery/hatchery.log` (rotating, 5 MB × 3 backups).
+The file captures **INFO** level by default, so proxy requests, RBAC decisions, and
+session lifecycle events are on disk even when the console is quiet.
+
+Use `--log-level DEBUG` to see verbose output on the console **and** capture DEBUG
+in the log file:
+
+```
+hatchery --log-level DEBUG new my-task
+```
+
+Available levels: `DEBUG`, `INFO`, `WARNING` (default), `ERROR`.
+
+### Viewing logs
+
+```
+hatchery logs              # show last 50 lines
+hatchery logs -n 100       # show last 100 lines
+hatchery logs -f           # follow the log file (tail -f)
 ```
 
 ## Development

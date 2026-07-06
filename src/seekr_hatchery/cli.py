@@ -3,6 +3,7 @@
 import importlib.metadata
 import json
 import logging
+import logging.handlers
 import os
 import re
 import shutil
@@ -17,6 +18,7 @@ import click
 from click.shell_completion import CompletionItem
 
 import seekr_hatchery.agents as agent
+import seekr_hatchery.constants as constants
 import seekr_hatchery.docker as docker
 import seekr_hatchery.git as git
 import seekr_hatchery.seeded_volumes as seeded_volumes
@@ -28,23 +30,76 @@ from seekr_hatchery.constants import DEFAULT_BASE, DOCKER_CONFIG
 from seekr_hatchery.includes import IncludeEntry, load_include_entries
 from seekr_hatchery.utils import open_for_editing
 
-logger = logging.getLogger("hatchery")
+logger = logging.getLogger(__name__)
+
+# Parent logger for the whole package.  Child modules use
+# ``logging.getLogger(__name__)`` (e.g. ``seekr_hatchery.proxy``) which
+# propagate to this logger.  configure_logging attaches handlers and sets
+# the level here so every child is covered.
+_pkg_logger = logging.getLogger("seekr_hatchery")
+
+# Global log file: always-on rotating file handler at ~/.hatchery/hatchery.log.
+# Captures INFO (or DEBUG when --log-level DEBUG) regardless of console level.
+_LOG_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
+_LOG_BACKUP_COUNT = 3
+
+_LOG_FMT = "%(asctime)s  %(levelname)-8s  %(name)-20s  %(message)s"
+_LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
 
 
-def configure_logging(level: str, log_file: str | None = None) -> None:
-    numeric = getattr(logging, level.upper(), logging.WARNING)
-    fmt = logging.Formatter("%(asctime)s  %(levelname)-8s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+class _HatcheryFormatter(ui._MillisFormatter):
+    """File handler formatter: strips the ``seekr_hatchery.`` prefix from logger names."""
 
-    handler: logging.Handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(ui.ColorFormatter("%(asctime)s  %(levelname)-8s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
-    logger.addHandler(handler)
+    def format(self, record: logging.LogRecord) -> str:
+        if record.name.startswith("seekr_hatchery."):
+            record.name = record.name[len("seekr_hatchery.") :]
+        return super().format(record)
 
-    if log_file:
-        fh = logging.FileHandler(log_file)
-        fh.setFormatter(fmt)
-        logger.addHandler(fh)
 
-    logger.setLevel(numeric)
+def _log_file_path() -> Path:
+    """Resolve the log file path at call time from constants.HATCHERY_DIR.
+
+    Resolved at call time (not import time) so a patched HATCHERY_DIR
+    is honored — important for tests.
+    """
+    return constants.HATCHERY_DIR / "hatchery.log"
+
+
+def configure_logging(level: str) -> None:
+    """Configure the package logger with a console handler and an always-on file handler.
+
+    Console (stderr) handler respects *level* (default WARNING).  The file handler
+    always captures at least INFO, so debuggable signal is on disk even when the
+    console is quiet.  When ``level="DEBUG"``, both handlers get DEBUG.
+
+    The file is ``~/.hatchery/hatchery.log`` (rotating, 5 MB × 3 backups).
+    """
+    console_level = getattr(logging, level.upper(), logging.WARNING)
+
+    # File handler always captures at least INFO — this is the whole point.
+    file_level = min(logging.INFO, console_level)
+
+    # Console handler (stderr) — colored when TTY.
+    console = logging.StreamHandler(sys.stderr)
+    console.setLevel(console_level)
+    console.setFormatter(ui.ColorFormatter(_LOG_FMT, datefmt=_LOG_DATEFMT))
+    _pkg_logger.addHandler(console)
+
+    # File handler — always on, rotating.
+    try:
+        constants.HATCHERY_DIR.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.handlers.RotatingFileHandler(
+            _log_file_path(), maxBytes=_LOG_MAX_BYTES, backupCount=_LOG_BACKUP_COUNT
+        )
+        file_handler.setLevel(file_level)
+        file_handler.setFormatter(_HatcheryFormatter(_LOG_FMT, datefmt=_LOG_DATEFMT))
+        _pkg_logger.addHandler(file_handler)
+    except OSError:
+        # Non-fatal: console logging still works.
+        pass
+
+    # Logger level must be the min so both handlers get messages.
+    _pkg_logger.setLevel(min(console_level, file_level))
 
 
 try:
@@ -430,10 +485,9 @@ class AliasedGroup(click.Group):
     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"]),
     help="Set log verbosity (default: WARNING)",
 )
-@click.option("--log-file", type=click.Path(), default=None, help="Also write logs to this file")
-def cli(log_level: str, log_file: str | None) -> None:
+def cli(log_level: str) -> None:
     """AI coding agent task orchestration."""
-    configure_logging(log_level, log_file)
+    configure_logging(log_level)
     sessions.migrate_db()
     if not os.environ.get("_HATCHERY_COMPLETE"):
         update = _check_for_update()
@@ -958,6 +1012,44 @@ def cmd_shell(name: str) -> None:
     shell = os.environ.get("SHELL", "bash")
     ui.note(f"Opening shell in {meta.worktree_path}  (exit with Ctrl-D or 'exit')")
     subprocess.run([shell], cwd=meta.worktree_path)
+
+
+# ---------------------------------------------------------------------------
+# Logs command
+# ---------------------------------------------------------------------------
+
+
+@cli.command("logs")
+@click.option("-n", "--lines", default=50, help="Number of lines to show (default: 50)")
+@click.option("-f", "--follow", is_flag=True, help="Follow the log file (like tail -f)")
+def cmd_logs(lines: int, follow: bool) -> None:
+    """View or follow the hatchery log file."""
+    log_path = _log_file_path()
+    if not log_path.exists() or log_path.stat().st_size == 0:
+        ui.info(f"No log file found at {log_path}")
+        ui.note("Logs are created on the next hatchery command — run any command first.")
+        return
+
+    if follow:
+        ui.note(f"Following {log_path}  (Ctrl-C to stop)")
+        try:
+            subprocess.run(["tail", "-n", str(lines), "-f", str(log_path)])
+        except KeyboardInterrupt:
+            pass
+    else:
+        try:
+            result = subprocess.run(
+                ["tail", "-n", str(lines), str(log_path)],
+                capture_output=True,
+                text=True,
+            )
+            click.echo(result.stdout, nl=False)
+        except FileNotFoundError:
+            # Fallback if tail isn't available
+            with open(log_path) as f:
+                all_lines = f.readlines()
+            for line in all_lines[-lines:]:
+                click.echo(line, nl=False)
 
 
 # ---------------------------------------------------------------------------

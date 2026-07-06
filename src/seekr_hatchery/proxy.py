@@ -37,7 +37,7 @@ import urllib3
 
 _UPSTREAM_TIMEOUT = urllib3.Timeout(connect=10, read=60)
 
-logger = logging.getLogger("hatchery")
+logger = logging.getLogger(__name__)
 
 _CHUNK_SIZE = 8192
 
@@ -155,6 +155,7 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
         # token.  This prevents other containers (which share the host gateway
         # and can discover open ports) from routing through this proxy.
         if not self._validate_token():
+            logger.info("proxy: 401 rejected — token mismatch on %s %s", self.command, self.path)
             self._send_simple(401, "Unauthorized")
             return
 
@@ -213,7 +214,7 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
                     self.wfile.write(chunk)
                     self.wfile.flush()
             except Exception as exc:
-                logger.debug("proxy: upstream error: %s", exc)
+                logger.warning("proxy: upstream error (websocket): %s", exc)
                 try:
                     self._send_simple(502, f"Bad Gateway: {exc}")
                 except Exception:
@@ -224,6 +225,7 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         # Normal request — use the shared connection pool.
         url = f"https://{self.target_host}{self.path_prefix}{self.path}"
+        logger.info("proxy: %s %s → %s", self.command, self.path, self.target_host)
         try:
             resp = self.pool.urlopen(
                 self.command,
@@ -236,7 +238,7 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
                 timeout=_UPSTREAM_TIMEOUT,
             )
         except Exception as exc:
-            logger.debug("proxy: upstream error: %s", exc)
+            logger.warning("proxy: upstream error: %s", exc)
             try:
                 self._send_simple(502, f"Bad Gateway: {exc}")
             except Exception:
@@ -245,6 +247,9 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         # ── 3a. 401 retry — refresh credentials once ─────────────────────────
         if resp.status == 401 and not _retried:
+            logger.info(
+                "proxy: 401 from upstream on %s %s, retrying with refreshed credentials", self.command, self.path
+            )
             try:
                 resp.drain_conn()
             except Exception:
@@ -263,7 +268,7 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
                     timeout=_UPSTREAM_TIMEOUT,
                 )
             except Exception as exc:
-                logger.debug("proxy: upstream error: %s", exc)
+                logger.warning("proxy: upstream error (retry): %s", exc)
                 try:
                     self._send_simple(502, f"Bad Gateway: {exc}")
                 except Exception:
@@ -271,6 +276,7 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
                 return
 
         # Forward status + headers (strip hop-by-hop).
+        logger.info("proxy: %s %s → %d (target=%s)", self.command, self.path, resp.status, self.target_host)
         self.send_response(resp.status)
         for key, value in resp.headers.items():
             if key.lower() in _HOP_BY_HOP:

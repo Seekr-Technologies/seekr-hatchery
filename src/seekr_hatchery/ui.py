@@ -193,10 +193,30 @@ _LEVEL_COLORS: dict[str, dict[str, object]] = {
 }
 
 
-class ColorFormatter(logging.Formatter):
-    """Colorizes the levelname when stderr is a TTY."""
+class _MillisFormatter(logging.Formatter):
+    """Formatter mixin that always appends milliseconds, even when datefmt is set.
+
+    ``logging.Formatter`` only applies ``default_msec_format`` when datefmt is
+    None.  We always want ``.456`` precision, so override ``formatTime``.
+    """
+
+    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
+        import time
+
+        ct = self.converter(record.created)
+        s = time.strftime(datefmt or self.default_time_format, ct)
+        return s + f".{int(record.msecs):03d}"
+
+
+class ColorFormatter(_MillisFormatter):
+    """Colorizes the levelname when stderr is a TTY.
+
+    Also strips the ``seekr_hatchery.`` package prefix from logger names.
+    """
 
     def format(self, record: logging.LogRecord) -> str:
+        if record.name.startswith("seekr_hatchery."):
+            record.name = record.name[len("seekr_hatchery.") :]
         formatted = super().format(record)
         if not sys.stderr.isatty():
             return formatted

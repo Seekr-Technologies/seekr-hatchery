@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from seekr_hatchery.docker import Runtime
     from seekr_hatchery.models import SessionMeta
 
-logger = logging.getLogger("hatchery")
+logger = logging.getLogger(__name__)
 
 # Provider names appear in shell ``--config model_providers.<name>.*`` flags.
 # Restrict to a safe character class so an attacker who controls the host

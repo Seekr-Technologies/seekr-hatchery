@@ -17,7 +17,7 @@ from pathlib import Path
 
 import seekr_hatchery.ui as ui
 
-logger = logging.getLogger("hatchery")
+logger = logging.getLogger(__name__)
 
 
 def run(
