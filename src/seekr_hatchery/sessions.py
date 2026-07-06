@@ -204,14 +204,37 @@ def find_task_file(worktree: Path, name: str) -> Path | None:
     return matches[-1] if matches else None
 
 
-def session_prompt(name: str, worktree: Path) -> str:
+def session_prompt(name: str, worktree: Path, extra_note: str = "") -> str:
+    """Build the initial agent prompt for a session.
+
+    When the task file is missing, emit a warning and return a fallback prompt
+    explaining the situation so the agent can recover rather than crashing.
+
+    *extra_note* is prepended verbatim when non-empty — used to surface other
+    degraded-state notes (e.g. "branch was recreated") to the agent.
+    """
     task_path = find_task_file(worktree, name)
     if task_path is None:
-        ui.error(f"task file not found for '{name}' in {worktree / '.hatchery' / 'tasks'}")
-        sys.exit(1)
-    rel_path = str(task_path.relative_to(worktree))
-    contents = task_path.read_text()
-    return f"The task file is at `{rel_path}`:\n\n{contents}\nPlease begin."
+        tasks_dir = worktree / ".hatchery" / "tasks"
+        ui.warn(
+            f"task file not found for '{name}' in {tasks_dir} — "
+            "resuming anyway (agent will be told the file is missing)."
+        )
+        body = (
+            f"The task file for '{name}' was expected at "
+            f"`.hatchery/tasks/*-{name}.md` in the worktree but is not "
+            "present. Common causes: a different branch is checked out, "
+            "or the file was deleted or renamed. Before doing further "
+            "work on this task, check `git status`, the current branch, "
+            "and recent commits, then ask the user how to proceed."
+        )
+    else:
+        rel_path = str(task_path.relative_to(worktree))
+        contents = task_path.read_text()
+        body = f"The task file is at `{rel_path}`:\n\n{contents}\nPlease begin."
+    if extra_note:
+        return f"{extra_note}\n\n{body}"
+    return body
 
 
 # ---------------------------------------------------------------------------
@@ -442,9 +465,195 @@ class SessionCancelled(Exception):
     """
 
 
+def _resolve_recreate_base(repo: Path, branch: str) -> tuple[str, bool, bool]:
+    """Pick the best ref to seed a recreated worktree from.
+
+    Preference order:
+
+    1. local ``<branch>``                   → exact prior task work
+    2. remote ``origin/<branch>`` (fetched) → prior task work pushed
+    3. local default branch                 → fall back; loses prior work
+    4. remote ``origin/<default>`` (fetched) → fall back; loses prior work
+
+    Returns ``(base_ref, branch_was_missing, remote_check_failed)``.
+    ``branch_was_missing`` is True iff neither (1) nor (2) applied — i.e. we
+    couldn't find prior work for *branch* anywhere and the caller should
+    warn the agent. ``remote_check_failed`` is True iff we fell through to a
+    fallback tier *and* couldn't actually verify absence on origin because
+    ``fetch_remote`` failed (network/auth issue) — in that case "missing on
+    origin" is unconfirmed, not established, and the caller should warn
+    accordingly instead of claiming confirmed absence.
+    """
+    if git.branch_exists(repo, branch):
+        return branch, False, False
+    # Local missing — try remote (best-effort fetch first).
+    fetched = git.fetch_remote(repo)
+    if fetched and git.remote_branch_exists(repo, branch):
+        return f"origin/{branch}", False, False
+    # Neither local nor remote (or remote couldn't be checked) — fall back
+    # to default branch.
+    remote_check_failed = not fetched
+    default = git.get_default_branch(repo)
+    if git.branch_exists(repo, default):
+        return default, True, remote_check_failed
+    if fetched and git.remote_branch_exists(repo, default):
+        return f"origin/{default}", True, False
+    # Worst case (no remote, no local default): hand the bare name back and
+    # let git.create_worktree surface the error.
+    return default, True, remote_check_failed
+
+
+def restore_worktree_if_needed(
+    meta: SessionMeta,
+    *,
+    confirm_recreate: Callable[[str], bool],
+) -> str:
+    """Ensure *meta*'s worktree exists, recreating it if missing.
+
+    Resume-time recovery for degraded session state:
+
+    - ``meta.no_worktree`` or worktree present → no-op, returns ``""``.
+    - Status ``archived`` / ``complete`` → auto-recreate (the archive
+      contract is "removable + restorable", no confirmation needed).
+    - Otherwise (``in-progress`` / ``running``) → call
+      ``confirm_recreate(base)``; if it returns False or raises
+      ``SessionCancelled``, propagate so the CLI can abort cleanly.
+
+    The base ref is resolved upfront by ``_resolve_recreate_base`` so the
+    confirmation prompt can mention the actual base (consent matches
+    action). When prior task work can't be found locally or on origin, the
+    fallback uses the default branch and a *prompt_note* is returned for
+    the agent's initial prompt.
+
+    Side effects: ``ui.info`` / ``ui.warn`` / ``ui.success`` for visibility,
+    ``git.create_worktree`` + ``git.create_include_worktrees`` to rebuild,
+    ``save(meta)`` to flip status to ``in-progress``.
+    """
+    if meta.no_worktree or meta.worktree_path.exists():
+        return ""
+
+    repo = meta.repo_path
+    base, branch_was_missing, remote_check_failed = _resolve_recreate_base(repo, meta.branch)
+
+    if remote_check_failed:
+        ui.warn(
+            f"couldn't verify branch '{meta.branch}' on origin (fetch failed) — "
+            f"recreating worktree from '{base}'; this may lose prior work if the "
+            "branch exists on origin."
+        )
+    elif branch_was_missing:
+        ui.warn(f"branch '{meta.branch}' is missing locally and on origin — recreating worktree from '{base}'.")
+
+    if meta.status in ("archived", "complete"):
+        label = "archived" if meta.status == "archived" else "completed"
+        ui.info(f"Re-creating worktree for {label} task '{meta.name}'...")
+    else:
+        if not confirm_recreate(base):
+            ui.info("Aborted.")
+            raise SessionCancelled()
+
+    git.create_worktree(repo, meta.branch, meta.worktree_path, base)
+    includes = load_include_entries({"include": meta.include})
+    if includes:
+        git.create_include_worktrees(includes, meta.name)
+    meta.status = "in-progress"
+    save(meta)
+    # The restored task file may carry a stale `**Status**: complete` from
+    # the last mark-done. Sync it so _post_exit_check doesn't loop.
+    update_task_file_status(meta.worktree_path, meta.name, "in-progress")
+    ui.success(f"Worktree restored: {meta.worktree_path}")
+
+    if remote_check_failed:
+        return (
+            f"NOTE: the branch '{meta.branch}' was missing locally and could not be "
+            f"verified on origin (fetch failed), so the worktree was recreated from "
+            f"'{base}'. If the branch actually exists on origin, this worktree may "
+            "not contain the prior work for this task, and any Dockerfile or "
+            "task-specific files may be from the base branch rather than the task "
+            "branch. Check `git log` and ask the user how to proceed before making "
+            "changes."
+        )
+    if branch_was_missing:
+        return (
+            f"NOTE: the branch '{meta.branch}' was missing (locally and on "
+            f"origin) and has been recreated from '{base}'. The worktree "
+            "may not contain the prior work for this task, and any "
+            "Dockerfile or task-specific files are likely from the base "
+            "branch rather than the task branch. Check `git log` and ask "
+            "the user how to proceed before making changes."
+        )
+    return ""
+
+
+def restore_dockerfile_if_needed(
+    meta: SessionMeta,
+    backend: "AgentBackend",
+    repo: Path,
+    *,
+    no_docker: bool,
+) -> None:
+    """Restore a missing Dockerfile into *meta*'s worktree, if applicable.
+
+    Resume-time recovery: Dockerfiles are intentionally kept out of task
+    branches (so they don't show up in PRs), so a worktree recreated by
+    ``restore_worktree_if_needed`` — or one whose Dockerfile was otherwise
+    deleted — needs it regenerated. No-op when ``no_docker`` or
+    ``meta.no_worktree``, or when the Dockerfile is already present.
+    """
+    if no_docker or meta.no_worktree:
+        return
+    agent_df = docker.dockerfile_path(meta.worktree_path, backend)
+    if agent_df.exists():
+        return
+    ui.note("Dockerfile missing from worktree — restoring from repo root (will not be committed to the task branch).")
+    docker.ensure_docker_files_uncommitted(repo, meta.worktree_path, backend)
+
+
+def resolve_resume_kind(meta: SessionMeta) -> tuple[Literal["new", "resume"], str]:
+    """Decide whether resume falls back to ``kind='new'`` (missing session).
+
+    Returns ``(kind, session_id)``. When ``meta.session_id`` is empty, emit a
+    warning, generate a fresh uuid, persist it back to meta, and return
+    ``("new", new_id)``. Persisting the id makes the fallback idempotent:
+    every subsequent resume takes the normal ``("resume", ...)`` path
+    instead of replaying the warning and re-firing ``on_new_task``.
+    """
+    if meta.session_id:
+        return ("resume", meta.session_id)
+    ui.warn("no session ID found for this task — starting a fresh agent invocation in the existing worktree.")
+    meta.session_id = str(uuid.uuid4())
+    save(meta)
+    return ("new", meta.session_id)
+
+
 def is_task_complete(task_file_content: str) -> bool:
     """True iff the task file's front-matter status is ``complete``."""
     return bool(re.search(r"^\*\*Status\*\*:\s*complete", task_file_content, re.MULTILINE))
+
+
+def update_task_file_status(worktree: Path, name: str, new_status: str) -> None:
+    """Rewrite the task file's ``**Status**:`` line to *new_status*.
+
+    No-op when the file is absent, has no Status line, or already matches.
+    Used by ``restore_worktree_if_needed`` to keep the recreated file's
+    front-matter consistent with the in-memory meta — otherwise reviving a
+    ``complete`` task leaves the file declaring ``complete`` while meta says
+    ``in-progress``, causing ``_post_exit_check`` to re-offer 'Mark done?'
+    every session.
+    """
+    task_file = find_task_file(worktree, name)
+    if not task_file:
+        return
+    content = task_file.read_text()
+    pattern = r"^\*\*Status\*\*:\s*(.*)$"
+    match = re.search(pattern, content, re.MULTILINE)
+    if not match:
+        return
+    if match.group(1).strip() == new_status:
+        return
+    new_content = re.sub(pattern, f"**Status**: {new_status}", content, count=1, flags=re.MULTILINE)
+    task_file.write_text(new_content)
+    logger.debug("Synced task file status %s → %s in %s", match.group(1).strip(), new_status, task_file)
 
 
 def set_status(repo: Path, name: str, status: str) -> None:
@@ -872,6 +1081,7 @@ def launch(
     session_id: str,
     no_cache: bool = False,
     include_repos: list[IncludeEntry] | None = None,
+    prompt_note: str = "",
 ) -> list[str]:
     """Launch an agent session: build the agent command, run it (inside the
     container if a runtime is given, natively otherwise), and bracket the
@@ -913,7 +1123,7 @@ def launch(
             include_paths=include_repos,
         )
         system_prompt = _SESSION_SYSTEM + "\n" + env_ctx
-        initial_prompt = "" if kind == "finalize" else session_prompt(meta.name, meta.worktree_path)
+        initial_prompt = "" if kind == "finalize" else session_prompt(meta.name, meta.worktree_path, prompt_note)
 
     config, features, container_workdir = docker.launch_context(meta, runtime)
 
@@ -927,8 +1137,9 @@ def launch(
             session_id, system_prompt, initial_prompt, docker=docker_flag, workdir=container_workdir
         )
     else:  # finalize
+        wrap_up = f"{prompt_note}\n\n{_WRAP_UP_PROMPT}" if prompt_note else _WRAP_UP_PROMPT
         agent_cmd = backend.build_finalize_command(
-            session_id, system_prompt, _WRAP_UP_PROMPT, docker=docker_flag, workdir=container_workdir
+            session_id, system_prompt, wrap_up, docker=docker_flag, workdir=container_workdir
         )
 
     if is_chat:

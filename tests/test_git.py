@@ -202,6 +202,45 @@ class TestIncludeWorktreeHelpers:
         git.create_include_worktrees([_entry(repo)], "my-task", base="main")
         assert (repo / constants.WORKTREES_SUBDIR / "my-task").exists()
 
+    def test_create_preserves_existing_include_branch(self, tmp_path):
+        """If the include already has a hatchery/<name> branch with commits,
+        create_include_worktrees attaches without -B so the prior work is preserved."""
+        repo = _git_repo(tmp_path / "repo")
+        # Create the include task branch and add a unique commit on it.
+        utils.run(["git", "branch", "hatchery/my-task"], cwd=repo)
+        utils.run(["git", "checkout", "hatchery/my-task"], cwd=repo)
+        (repo / "include-work.txt").write_text("don't lose me")
+        utils.run(["git", "add", "include-work.txt"], cwd=repo)
+        utils.run(
+            ["git", "-c", "user.email=t@t.com", "-c", "user.name=T", "commit", "-m", "include work"],
+            cwd=repo,
+        )
+        task_branch_sha = utils.run(["git", "rev-parse", "hatchery/my-task"], cwd=repo).stdout.strip()
+        # Switch back to main so the include task branch isn't checked out.
+        utils.run(["git", "checkout", "main"], cwd=repo)
+
+        # Now create the include worktree — the branch should NOT be reset.
+        git.create_include_worktrees([_entry(repo)], "my-task", base="main")
+
+        after = utils.run(["git", "rev-parse", "hatchery/my-task"], cwd=repo).stdout.strip()
+        assert after == task_branch_sha, "hatchery/<name> branch must not be force-reset"
+        worktree = repo / constants.WORKTREES_SUBDIR / "my-task"
+        assert (worktree / "include-work.txt").exists(), "worktree must attach to existing branch"
+
+    def test_create_preserves_uncommitted_work_in_existing_worktree(self, tmp_path):
+        """If the include worktree already exists (branch present, dir present),
+        create_include_worktrees must leave it alone — no remove+readd, or an
+        uncommitted edit sitting in that worktree would be silently destroyed."""
+        repo = _git_repo(tmp_path / "repo")
+        worktree = repo / constants.WORKTREES_SUBDIR / "my-task"
+        utils.run(["git", "worktree", "add", "-b", "hatchery/my-task", str(worktree), "main"], cwd=repo)
+        (worktree / "scratch.txt").write_text("uncommitted work")
+
+        git.create_include_worktrees([_entry(repo)], "my-task", base="main")
+
+        assert (worktree / "scratch.txt").exists(), "existing worktree (and its uncommitted work) must survive"
+        assert (worktree / "scratch.txt").read_text() == "uncommitted work"
+
 
 # ---------------------------------------------------------------------------
 # _fetch_if_remote
@@ -300,3 +339,25 @@ class TestCreateWorktreeErrors:
         repo = _git_repo(tmp_path / "repo")
         with pytest.raises(SystemExit):
             git.create_worktree(repo, "hatchery/t", repo / "wt", "nonexistent-branch")
+
+
+# ---------------------------------------------------------------------------
+# branch_exists
+# ---------------------------------------------------------------------------
+
+
+class TestBranchExists:
+    def test_true_for_existing_branch(self, tmp_path):
+        repo = _git_repo(tmp_path / "repo")
+        utils.run(["git", "branch", "feature/x"], cwd=repo)
+        assert git.branch_exists(repo, "feature/x") is True
+
+    def test_false_for_missing_branch(self, tmp_path):
+        repo = _git_repo(tmp_path / "repo")
+        assert git.branch_exists(repo, "no-such-branch") is False
+
+    def test_false_for_tag_with_same_name(self, tmp_path):
+        """A tag named ``v1`` must not satisfy the heads-only lookup."""
+        repo = _git_repo(tmp_path / "repo")
+        utils.run(["git", "tag", "v1"], cwd=repo)
+        assert git.branch_exists(repo, "v1") is False
