@@ -13,6 +13,8 @@ Two-tier file logging:
 
 import logging
 import logging.handlers
+import sys
+import time
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
@@ -47,8 +49,6 @@ def _format_time(record: logging.LogRecord, datefmt: str | None = None) -> str:
     We always want ``.456`` precision, so call this from a Formatter's
     ``formatTime`` override.
     """
-    import time
-
     ct = logging.Formatter.converter(record.created)
     s = time.strftime(datefmt or logging.Formatter().default_time_format, ct)
     return s + f".{int(record.msecs):03d}"
@@ -81,8 +81,6 @@ def configure_logging(level: str) -> None:
 
     The file is ``~/.hatchery/hatchery.log`` (rotating, 5 MB × 3 backups).
     """
-    import sys
-
     log_level = getattr(logging, level.upper(), logging.INFO)
 
     # File handler always captures at least INFO — this is the whole point.
