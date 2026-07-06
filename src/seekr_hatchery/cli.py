@@ -10,6 +10,8 @@ import shutil
 import subprocess
 import sys
 import urllib.request
+from collections.abc import Generator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
@@ -100,6 +102,46 @@ def configure_logging(level: str) -> None:
 
     # Logger level must be the min so both handlers get messages.
     _pkg_logger.setLevel(min(console_level, file_level))
+
+
+def _get_file_handlers() -> list[logging.handlers.RotatingFileHandler]:
+    """Return the RotatingFileHandler(s) currently on the package logger."""
+    return [h for h in _pkg_logger.handlers if isinstance(h, logging.handlers.RotatingFileHandler)]
+
+
+@contextmanager
+def task_log(session_dir: Path, level: int = logging.INFO) -> Generator[None, None, None]:
+    """Route hatchery file logs to the task's own log for the duration of a run.
+
+    Swaps the global file handler (~/.hatchery/hatchery.log) for a per-task
+    handler at ``session_dir / "hatchery.log"``.  Because a hatchery process
+    is single-task, the per-task file is clean and complete for that task —
+    no cross-task interleaving even if two hatchery spawns run concurrently.
+
+    The global handler is restored on exit so non-task commands continue
+    logging to the global file.
+    """
+    session_dir.mkdir(parents=True, exist_ok=True)
+    task_fh = logging.handlers.RotatingFileHandler(
+        session_dir / "hatchery.log",
+        maxBytes=_LOG_MAX_BYTES,
+        backupCount=_LOG_BACKUP_COUNT,
+    )
+    task_fh.setLevel(level)
+    task_fh.setFormatter(_HatcheryFormatter(_LOG_FMT, datefmt=_LOG_DATEFMT))
+
+    global_handlers = _get_file_handlers()
+    for gh in global_handlers:
+        _pkg_logger.removeHandler(gh)
+
+    _pkg_logger.addHandler(task_fh)
+    try:
+        yield
+    finally:
+        _pkg_logger.removeHandler(task_fh)
+        task_fh.close()
+        for gh in global_handlers:
+            _pkg_logger.addHandler(gh)
 
 
 try:
@@ -278,16 +320,17 @@ def _launch(
     the user. The post-exit interaction ("did the task complete?",
     "mark done?", "wrap up?") is CLI-domain and lives here.
     """
-    features = sessions.launch(
-        meta,
-        kind=kind,
-        backend=backend,
-        runtime=runtime,
-        main_branch=main_branch,
-        session_id=session_id,
-        no_cache=no_cache,
-        include_repos=include_repos,
-    )
+    with task_log(meta.session_dir):
+        features = sessions.launch(
+            meta,
+            kind=kind,
+            backend=backend,
+            runtime=runtime,
+            main_branch=main_branch,
+            session_id=session_id,
+            no_cache=no_cache,
+            include_repos=include_repos,
+        )
     if meta.is_chat:
         _chat_post_exit(meta.name, meta.repo_path)
     else:
@@ -1020,11 +1063,23 @@ def cmd_shell(name: str) -> None:
 
 
 @cli.command("logs")
+@click.argument("name", required=False, type=TASK_NAME)
 @click.option("-n", "--lines", default=50, help="Number of lines to show (default: 50)")
 @click.option("-f", "--follow", is_flag=True, help="Follow the log file (like tail -f)")
-def cmd_logs(lines: int, follow: bool) -> None:
-    """View or follow the hatchery log file."""
-    log_path = _log_file_path()
+def cmd_logs(name: str | None, lines: int, follow: bool) -> None:
+    """View or follow the hatchery log file.
+
+    With a task name, shows that task's log (per-task log at
+    ~/.hatchery/tasks/<repo-id>/<name>/hatchery.log).  Without a name,
+    falls back to the global log at ~/.hatchery/hatchery.log.
+    """
+    if name:
+        repo, _ = git.git_root_or_cwd()
+        meta = sessions.load(repo, name)
+        log_path = meta.session_dir / "hatchery.log"
+    else:
+        log_path = _log_file_path()
+
     if not log_path.exists() or log_path.stat().st_size == 0:
         ui.info(f"No log file found at {log_path}")
         ui.note("Logs are created on the next hatchery command — run any command first.")

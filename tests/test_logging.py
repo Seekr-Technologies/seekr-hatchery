@@ -132,3 +132,69 @@ class TestLogsCommand:
         result = runner.invoke(cli.cli, ["logs"])
         assert result.exit_code == 0
         assert "test-message-1" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Per-task file logging (task_log context manager)
+# ---------------------------------------------------------------------------
+
+
+class TestTaskLog:
+    """task_log context manager routes file logs to the task's session dir."""
+
+    @pytest.fixture()
+    def clean_logger(self, monkeypatch: pytest.MonkeyPatch):
+        """Reset the hatchery logger to a pristine state before each test."""
+        logger = logging.getLogger("seekr_hatchery")
+        saved_handlers = logger.handlers[:]
+        saved_level = logger.level
+        logger.handlers = []
+        yield logger
+        logger.handlers = saved_handlers
+        logger.setLevel(saved_level)
+
+    def test_task_log_writes_to_session_dir(self, clean_logger, tmp_path, monkeypatch):
+        """During task_log, file output goes to session_dir/hatchery.log, not the global file."""
+        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path / ".hatchery")
+        cli.configure_logging("INFO")
+        logger = logging.getLogger("seekr_hatchery.proxy")
+
+        session_dir = tmp_path / "session"
+        with cli.task_log(session_dir):
+            logger.info("task-log-message")
+
+        task_log = session_dir / "hatchery.log"
+        assert task_log.exists()
+        assert "task-log-message" in task_log.read_text()
+
+    def test_task_log_restores_global_handler(self, clean_logger, tmp_path, monkeypatch):
+        """After task_log exits, the global file handler is restored."""
+        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path / ".hatchery")
+        cli.configure_logging("INFO")
+        logger = logging.getLogger("seekr_hatchery.proxy")
+
+        global_handlers_before = cli._get_file_handlers()
+        session_dir = tmp_path / "session"
+        with cli.task_log(session_dir):
+            logger.info("during-task")
+
+        global_handlers_after = cli._get_file_handlers()
+        assert global_handlers_before == global_handlers_after
+        # Global handler should be functional again
+        logger.info("after-task")
+        global_log = tmp_path / ".hatchery" / "hatchery.log"
+        assert "after-task" in global_log.read_text()
+
+    def test_task_log_does_not_write_to_global(self, clean_logger, tmp_path, monkeypatch):
+        """Logs emitted inside task_log don't appear in the global file."""
+        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path / ".hatchery")
+        cli.configure_logging("INFO")
+        logger = logging.getLogger("seekr_hatchery.proxy")
+
+        session_dir = tmp_path / "session"
+        with cli.task_log(session_dir):
+            logger.info("should-not-be-global")
+
+        global_log = tmp_path / ".hatchery" / "hatchery.log"
+        global_content = global_log.read_text()
+        assert "should-not-be-global" not in global_content

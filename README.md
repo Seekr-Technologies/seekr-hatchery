@@ -270,6 +270,7 @@ Then output `"$top\n$hatchery_line\n$bottom"` when `$hatchery_line` is non-empty
   tasks/                   # all per-task state, namespaced by repository
     <repo-id>/             # stable hash of the repo path
       <task-name>/         # one directory per task
+        hatchery.log        # per-task log file (during runs)
         meta.json          # task metadata
         codex_auth.json    # Docker session: proxy-token auth config
         proxy_token        # Docker session: stable API proxy UUID
@@ -280,9 +281,20 @@ Then output `"$top\n$hatchery_line\n$bottom"` when `$hatchery_line` is non-empty
 
 ## Logging
 
-Hatchery always writes logs to `~/.hatchery/hatchery.log` (rotating, 5 MB × 3 backups).
-The file captures **INFO** level by default, so proxy requests, RBAC decisions, and
-session lifecycle events are on disk even when the console is quiet.
+Hatchery always writes logs to disk — no flags needed. The file handler captures
+**INFO** level by default, so proxy requests, RBAC decisions, and session lifecycle
+events are on disk even when the console is quiet.
+
+**Two-tier file logging:**
+
+- **Global fallback** — `~/.hatchery/hatchery.log` (rotating, 5 MB × 3 backups).
+  Catches startup, taskless commands (`list`, `status`, `config`), and anything
+  outside a task run.
+- **Per-task** — when a task launches, the file handler switches to
+  `~/.hatchery/tasks/<repo-id>/<name>/hatchery.log` for the duration of the run,
+  then restores the global handler. Because each hatchery process is single-task,
+  the per-task file is clean and complete for that task — no cross-task interleaving
+  even if two hatchery spawns run concurrently.
 
 Use `--log-level DEBUG` to see verbose output on the console **and** capture DEBUG
 in the log file:
@@ -296,9 +308,10 @@ Available levels: `DEBUG`, `INFO`, `WARNING` (default), `ERROR`.
 ### Viewing logs
 
 ```
-hatchery logs              # show last 50 lines
-hatchery logs -n 100       # show last 100 lines
-hatchery logs -f           # follow the log file (tail -f)
+hatchery logs              # global log (last 50 lines)
+hatchery logs my-task      # per-task log
+hatchery logs -n 100       # last 100 lines
+hatchery logs my-task -f   # follow a task's log (tail -f)
 ```
 
 ## Development
