@@ -40,14 +40,28 @@ def log_file_path() -> Path:
     return constants.HATCHERY_DIR / "hatchery.log"
 
 
+def _format_time(record: logging.LogRecord, datefmt: str | None = None) -> str:
+    """Format a record's timestamp with millisecond precision.
+
+    ``logging.Formatter`` only appends milliseconds when ``datefmt`` is None.
+    We always want ``.456`` precision, so call this from a Formatter's
+    ``formatTime`` override.
+    """
+    import time
+
+    ct = logging.Formatter.converter(record.created)
+    s = time.strftime(datefmt or logging.Formatter().default_time_format, ct)
+    return s + f".{int(record.msecs):03d}"
+
+
 class _HatcheryFormatter(logging.Formatter):
     """File handler formatter: strips the ``seekr_hatchery.`` prefix from logger names.
 
-    Uses millisecond-precision timestamps via :func:`ui._format_time`.
+    Uses millisecond-precision timestamps via :func:`_format_time`.
     """
 
     def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
-        return ui._format_time(record, datefmt)
+        return _format_time(record, datefmt)
 
     def format(self, record: logging.LogRecord) -> str:
         if record.name.startswith("seekr_hatchery."):

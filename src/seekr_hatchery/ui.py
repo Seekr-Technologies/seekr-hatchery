@@ -193,29 +193,11 @@ _LEVEL_COLORS: dict[str, dict[str, object]] = {
 }
 
 
-def _format_time(record: logging.LogRecord, datefmt: str | None = None) -> str:
-    """Format a record's timestamp with millisecond precision.
-
-    ``logging.Formatter`` only appends milliseconds when ``datefmt`` is None.
-    We always want ``.456`` precision, so call this from a Formatter's
-    ``formatTime`` override.
-    """
-    import time
-
-    ct = logging.Formatter.converter(record.created)
-    s = time.strftime(datefmt or logging.Formatter().default_time_format, ct)
-    return s + f".{int(record.msecs):03d}"
-
-
 class ColorFormatter(logging.Formatter):
     """Colorizes the levelname when stderr is a TTY.
 
-    Also strips the ``seekr_hatchery.`` package prefix from logger names
-    and uses millisecond-precision timestamps.
+    Also strips the ``seekr_hatchery.`` package prefix from logger names.
     """
-
-    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
-        return _format_time(record, datefmt)
 
     def format(self, record: logging.LogRecord) -> str:
         if record.name.startswith("seekr_hatchery."):
