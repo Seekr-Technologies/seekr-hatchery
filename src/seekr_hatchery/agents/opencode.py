@@ -8,7 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlparse
 
-from seekr_hatchery.agents.agent_backend import CONTAINER_HOME, AgentBackend
+from seekr_hatchery.agents.agent_backend import CONTAINER_HOME, AgentBackend, ProxyEndpoint
 from seekr_hatchery.mount import BindMount, Mount, VolumeMount
 
 logger = logging.getLogger("hatchery")
@@ -35,6 +35,34 @@ _BUILTIN_PROVIDER_IDS: frozenset[str] = frozenset(
         "lmstudio",
     }
 )
+
+# Default endpoints and env-var names for well-known builtin providers, extracted
+# from the opencode-ai binary.  Providers not in this map (e.g. amazon-bedrock,
+# azure, vertex) use cloud-specific auth that doesn't fit the simple API-key
+# proxy model; users must configure those as custom providers with explicit
+# baseURL and apiKey.
+_BUILTIN_DEFAULTS: dict[str, tuple[str, str, str, str]] = {
+    # provider_id: (host, scheme, path, env_var_name)
+    "openai": ("api.openai.com", "https", "/v1", "OPENAI_API_KEY"),
+    "anthropic": ("api.anthropic.com", "https", "/v1", "ANTHROPIC_API_KEY"),
+    "google": ("generativelanguage.googleapis.com", "https", "/v1beta", "GOOGLE_GENERATIVE_AI_API_KEY"),
+    "mistral": ("api.mistral.ai", "https", "/v1", "MISTRAL_API_KEY"),
+    "groq": ("api.groq.com", "https", "/openai/v1", "GROQ_API_KEY"),
+    "cohere": ("api.cohere.com", "https", "/v2", "COHERE_API_KEY"),
+    "deepseek": ("api.deepseek.com", "https", "/v1", "DEEPSEEK_API_KEY"),
+    "xai": ("api.x.ai", "https", "/v1", "XAI_API_KEY"),
+    "cerebras": ("api.cerebras.ai", "https", "/v1", "CEREBRAS_API_KEY"),
+}
+
+# Auth header format per provider.  Most use ``Authorization: Bearer``;
+# Anthropic uses ``x-api-key`` and Google uses ``x-goog-api-key``.  All are
+# stripped on the inbound side and re-injected with the real key.
+_AUTH_HEADER_STRIP: frozenset[str] = frozenset({"authorization", "x-api-key", "x-goog-api-key"})
+_AUTH_FORMATS: dict[str, tuple[str, str]] = {
+    # provider_id → (header_name, value_template) where {} is replaced by the key
+    "anthropic": ("x-api-key", "{}"),
+    "google": ("x-goog-api-key", "{}"),
+}
 
 
 class OpenCodeBackend(AgentBackend):
@@ -213,125 +241,158 @@ class OpenCodeBackend(AgentBackend):
         return OpenCodeBackend._resolve_file_ref(OpenCodeBackend._resolve_env_ref(value))
 
     @staticmethod
-    def _find_primary_provider(config: dict) -> tuple[str, dict] | None:
-        """Return (provider_id, provider_dict) for the first custom provider.
+    def _resolve_provider_key(provider_id: str, provider_data: dict) -> str | None:
+        """Resolve the API key for a provider.
 
-        Iterates the ``provider`` map and skips IDs in ``_BUILTIN_PROVIDER_IDS``.
-        Returns None when no custom provider is found.
+        Checks explicit ``apiKey`` in options first (with {env:} and {file:}
+        refs), then falls back to the standard env var for builtin providers.
         """
-        providers = config.get("provider", {})
-        for pid, pdata in providers.items():
-            if pid not in _BUILTIN_PROVIDER_IDS:
-                return pid, pdata
+        opts = provider_data.get("options", {})
+        raw_key = opts.get("apiKey", "")
+        if raw_key:
+            key = OpenCodeBackend._resolve_config_ref(raw_key)
+            return key if key else None
+        defaults = _BUILTIN_DEFAULTS.get(provider_id)
+        if defaults:
+            return os.environ.get(defaults[3]) or None
         return None
 
     @staticmethod
-    def _read_credentials() -> str | None:
-        """Return the resolved API key from the host's opencode config.
+    def _proxyable_providers(config: dict) -> list[tuple[str, dict]]:
+        """Return ``[(provider_id, provider_data), ...]`` for providers with resolvable keys.
 
-        Resolves {env:VAR} and {file:PATH} references in the provider's
-        ``apiKey``.  Returns None when no custom provider is configured or no
-        API key is set.
+        Includes both custom providers (with explicit baseURL+apiKey) and
+        builtin providers (with keys from env vars or explicit apiKey).
+        Excludes providers whose API key cannot be resolved.
         """
-        config = OpenCodeBackend._read_opencode_config()
-        result = OpenCodeBackend._find_primary_provider(config)
-        if result is None:
-            return None
+        result: list[tuple[str, dict]] = []
+        for pid, pdata in config.get("provider", {}).items():
+            if OpenCodeBackend._resolve_provider_key(pid, pdata):
+                result.append((pid, pdata))
+        return result
 
-        _, pdata = result
-        opts = pdata.get("options", {})
+    @staticmethod
+    def _provider_host_scheme(provider_id: str, provider_data: dict) -> tuple[str, str]:
+        """Return ``(host, scheme)`` for a provider's upstream endpoint."""
+        opts = provider_data.get("options", {})
+        raw_url = opts.get("baseURL", "")
+        if raw_url:
+            resolved = OpenCodeBackend._resolve_config_ref(raw_url)
+            parsed = urlparse(resolved)
+            return parsed.netloc, parsed.scheme or "https"
+        defaults = _BUILTIN_DEFAULTS.get(provider_id)
+        if defaults:
+            return defaults[0], defaults[1]
+        return "", "https"
 
-        raw_key = opts.get("apiKey", "")
-        api_key = OpenCodeBackend._resolve_config_ref(raw_key) if raw_key else None
-        if not api_key:
-            return None
-        return api_key
+    @staticmethod
+    def _provider_path(provider_id: str, provider_data: dict) -> str:
+        """Return the URL path component for a provider (e.g. ``/v1``)."""
+        opts = provider_data.get("options", {})
+        raw_url = opts.get("baseURL", "")
+        if raw_url:
+            resolved = OpenCodeBackend._resolve_config_ref(raw_url)
+            parsed = urlparse(resolved)
+            return parsed.path or ""
+        defaults = _BUILTIN_DEFAULTS.get(provider_id)
+        if defaults:
+            return defaults[2]
+        return "/v1"
+
+    @staticmethod
+    def _make_key_mutator(api_key: str, provider_id: str) -> Callable[..., dict[str, str]]:
+        """Return a header mutator that injects the real API key for this provider."""
+        header_name, value_template = _AUTH_FORMATS.get(provider_id, ("Authorization", "Bearer {}"))
+        header_value = value_template.format(api_key)
+
+        def _mutate(headers: dict[str, str], *, refresh: bool = False) -> dict[str, str]:
+            out = {k: v for k, v in headers.items() if k.lower() not in _AUTH_HEADER_STRIP}
+            out[header_name] = header_value
+            return out
+
+        return _mutate
 
     @staticmethod
     def _resolve_model(host_config: dict) -> str | None:
-        """Return the model string to pass via ``opencode run -m``.
+        """Return the model string to pass via ``opencode run -m``, or None.
 
-        ``opencode run`` ignores the ``model`` field in config files and always
-        defaults to ``openai/gpt-5.2-codex``.  The model must be passed on the
-        CLI with ``-m provider/model``.  We prefer the host's explicit ``model``
-        setting, but only if it belongs to the primary (custom) provider — a
-        stale ``model`` pointing at a builtin provider (e.g. ``openai/...``)
-        would crash with ``ProviderModelNotFoundError`` once ``enabled_providers``
-        restricts the sandbox to the custom provider alone.  Otherwise we fall
-        back to the first model listed under the primary provider.  Raises
-        ``RuntimeError`` when a custom provider is configured but has no
-        ``models`` — the sandbox would have no selectable model.
+        Pure function on the config dict — no key resolution or filesystem
+        access.  Prefers the host's explicit ``model`` setting (if its provider
+        is in the config), then falls back to the first model from any
+        provider.  Returns None when a builtin provider is present (opencode's
+        default model will be available) or when no providers are configured
+        (native mode).  Raises RuntimeError only when custom providers are
+        present but none have models.
         """
-        result = OpenCodeBackend._find_primary_provider(host_config)
-        if result is None:
+        providers = host_config.get("provider", {})
+        if not providers:
             return host_config.get("model")
-        provider_id, provider_data = result
-        models = provider_data.get("models", {})
+
+        # 1. If config has `model` and its provider is in the config, return it
         host_model = host_config.get("model")
-        if host_model and host_model.startswith(f"{provider_id}/"):
-            model_id = host_model.removeprefix(f"{provider_id}/")
-            if model_id in models:
-                return host_model
-        if models:
-            return f"{provider_id}/{next(iter(models))}"
+        if host_model and "/" in host_model:
+            provider_id = host_model.split("/")[0]
+            if provider_id in providers:
+                pdata = providers[provider_id]
+                if provider_id in _BUILTIN_PROVIDER_IDS:
+                    return host_model
+                models = pdata.get("models", {})
+                model_id = host_model.removeprefix(f"{provider_id}/")
+                if model_id in models:
+                    return host_model
+
+        # 2. Look for any provider with models
+        for pid, pdata in providers.items():
+            models = pdata.get("models", {})
+            if models:
+                return f"{pid}/{next(iter(models))}"
+
+        # 3. If any builtin exists, return None (opencode's default will work)
+        for pid in providers:
+            if pid in _BUILTIN_PROVIDER_IDS:
+                return None
+
+        # 4. Custom providers present but none have models — can't resolve a model
         raise RuntimeError(
-            f"custom provider '{provider_id}' has no models configured; add at "
-            f"least one entry under provider.{provider_id}.models in "
-            f"~/.config/opencode/opencode.json"
+            "no models configured; add models to your custom provider in "
+            "~/.config/opencode/opencode.json or set the appropriate API key "
+            "env var (e.g. OPENAI_API_KEY) to use a builtin provider"
         )
 
     @staticmethod
-    def _build_inline_config(proxy_url: str, proxy_token: str, host_config: dict) -> dict:
+    def _build_inline_config(proxy_urls: dict[str, str], proxy_token: str, host_config: dict) -> dict:
         """Build the JSON dict to inject as OPENCODE_CONFIG_CONTENT.
 
-        Replaces the real provider's baseURL and apiKey with the proxy
-        equivalents (literal values, not {env:} references).  The provider
-        ID, name, npm SDK package, and models are copied from the host
-        config so the agent can use the same model names inside the sandbox.
+        Each provider in ``proxy_urls`` gets its own ``baseURL`` pointing to
+        its dedicated proxy port, with the ``apiKey`` replaced by the proxy
+        token.  The provider ID, name, npm SDK package, and models are copied
+        from the host config so the agent can use the same model names inside
+        the sandbox.
 
-        SECURITY: proxy_token is a random UUID used only to authenticate
-        against this task's proxy instance.  The real API key never appears.
+        SECURITY: proxy_token is a random UUID used only to authenticate against
+        this task's proxy instances.  The real API keys never appear.
         """
-        result = OpenCodeBackend._find_primary_provider(host_config)
-        if result is None:
-            return {
-                "permission": "allow",
-                "provider": {
-                    "proxy": {
-                        "npm": "@ai-sdk/openai",
-                        "name": "Hatchery Proxy",
-                        "options": {
-                            "baseURL": proxy_url,
-                            "apiKey": proxy_token,
-                        },
-                    }
-                },
-            }
+        providers = host_config.get("provider", {})
 
-        provider_id, provider_data = result
-        inline_provider = {**provider_data}
-        inline_provider["options"] = {
-            **provider_data.get("options", {}),
-            "baseURL": proxy_url,
-            "apiKey": proxy_token,
-        }
+        inline_providers: dict[str, dict] = {}
+        enabled: list[str] = []
+        for pid in proxy_urls:
+            pdata = providers.get(pid, {})
+            inline_provider = {**pdata}
+            inline_provider["options"] = {
+                **pdata.get("options", {}),
+                "baseURL": proxy_urls[pid],
+                "apiKey": proxy_token,
+            }
+            inline_providers[pid] = inline_provider
+            enabled.append(pid)
 
         config: dict = {
-            # Restrict to only this provider so opencode's free/builtin models
-            # don't appear in the model picker inside the sandbox.
-            "enabled_providers": [provider_id],
-            "provider": {provider_id: inline_provider},
-            # Auto-approve all permission prompts inside the sandbox.
-            # Equivalent to --dangerously-skip-permissions on `opencode run`.
-            # The container is already isolated, so interactive approval adds
-            # no security value and breaks the autonomous workflow.
+            "enabled_providers": enabled,
+            "provider": inline_providers,
             "permission": "allow",
         }
 
-        # Keep the `model` field in the config for the interactive TUI path
-        # (hatchery chat launches `opencode` without `run`, and the TUI *does*
-        # honour the config `model` field).  `opencode run` ignores it — the
-        # build_*_command methods pass the same model via -m instead.
         model = OpenCodeBackend._resolve_model(host_config)
         if model:
             config["model"] = model
@@ -412,78 +473,62 @@ class OpenCodeBackend(AgentBackend):
         return mounts
 
     @staticmethod
-    def proxy_kwargs() -> dict:
+    def proxy_endpoints() -> list[ProxyEndpoint]:
+        """Return one :class:`ProxyEndpoint` per provider with resolvable credentials.
+
+        Each endpoint gets its own proxy on its own ephemeral port.  Custom
+        providers need an explicit ``baseURL`` and ``apiKey``; builtin
+        providers (openai, anthropic, …) are auto-discovered via their
+        standard env vars when no explicit ``apiKey`` is set.
+        """
         config = OpenCodeBackend._read_opencode_config()
-        result = OpenCodeBackend._find_primary_provider(config)
-        if result is None:
-            raise RuntimeError(
-                "no opencode provider configured; add a custom provider with "
-                "a baseURL to ~/.config/opencode/opencode.json"
+        proxied = OpenCodeBackend._proxyable_providers(config)
+
+        endpoints: list[ProxyEndpoint] = []
+        for pid, pdata in proxied:
+            api_key = OpenCodeBackend._resolve_provider_key(pid, pdata)
+            if not api_key:
+                continue
+            host, scheme = OpenCodeBackend._provider_host_scheme(pid, pdata)
+            if not host:
+                continue
+            mutator = OpenCodeBackend._make_key_mutator(api_key, pid)
+            endpoints.append(
+                ProxyEndpoint(
+                    key=pid,
+                    header_mutator=mutator,
+                    target_host=host,
+                    target_scheme=scheme,
+                )
             )
-        _, pdata = result
-        raw_url = pdata.get("options", {}).get("baseURL", "")
-        if not raw_url:
+
+        if not endpoints:
             raise RuntimeError(
-                "no opencode provider configured; add a custom provider with "
-                "a baseURL to ~/.config/opencode/opencode.json"
+                "no opencode provider configured; add a custom provider with a "
+                "baseURL and apiKey to ~/.config/opencode/opencode.json, or set "
+                "the appropriate API key env var (e.g. OPENAI_API_KEY)"
             )
-        parsed = urlparse(OpenCodeBackend._resolve_config_ref(raw_url))
-        target_host = parsed.netloc or None
-        if not target_host:
-            raise RuntimeError(
-                "no opencode provider configured; add a custom provider with "
-                "a baseURL to ~/.config/opencode/opencode.json"
-            )
-        # path_prefix is intentionally omitted: OPENCODE_CONFIG_CONTENT sets the
-        # provider's baseURL to the full proxy URL (including the path component),
-        # so the proxy receives requests at that path and forwards them unchanged.
-        return {
-            "target_host": target_host,
-            "target_scheme": parsed.scheme or "https",
-        }
+
+        return endpoints
 
     @staticmethod
-    def make_header_mutator() -> Callable[..., dict[str, str]]:
-        api_key = OpenCodeBackend._read_credentials()
-        if not api_key:
-            raise RuntimeError(
-                "no API key found for opencode; ensure apiKey is set in your "
-                "custom provider in ~/.config/opencode/opencode.json "
-                "(supports {env:VAR} and {file:PATH} references)"
-            )
-
-        def _mutate(headers: dict[str, str], *, refresh: bool = False) -> dict[str, str]:
-            # refresh=True is a no-op for static API-key sources.
-            out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")}
-            out["Authorization"] = f"Bearer {api_key}"
-            return out
-
-        return _mutate
-
-    @staticmethod
-    def container_env(proxy_token: str, proxy_port: int) -> dict[str, str]:
+    def container_env(proxy_token: str, proxy_ports: dict[str, int]) -> dict[str, str]:
         """Inject the proxy-backed provider config as OPENCODE_CONFIG_CONTENT.
 
-        The full proxy URL (including the path component from the real baseURL,
-        e.g. /v1) is constructed here where proxy_port is known.  The inline
+        Each provider's ``baseURL`` points to its own proxy port.  The inline
         config JSON uses literal values — no {env:} references — because
         OPENCODE_CONFIG_CONTENT bypasses opencode's env-var substitution.
         """
         config = OpenCodeBackend._read_opencode_config()
-        result = OpenCodeBackend._find_primary_provider(config)
+        proxied = OpenCodeBackend._proxyable_providers(config)
 
-        path = "/v1"
-        if result is not None:
-            _, pdata = result
-            raw_url = pdata.get("options", {}).get("baseURL", "")
-            if raw_url:
-                resolved = OpenCodeBackend._resolve_config_ref(raw_url)
-                parsed = urlparse(resolved)
-                if parsed.path:
-                    path = parsed.path
+        proxy_urls: dict[str, str] = {}
+        for pid, pdata in proxied:
+            port = proxy_ports[pid]
+            path = OpenCodeBackend._provider_path(pid, pdata)
+            proxy_urls[pid] = f"http://host.docker.internal:{port}{path}"
 
-        proxy_url = f"http://host.docker.internal:{proxy_port}{path}"
-        inline_config = OpenCodeBackend._build_inline_config(proxy_url, proxy_token, config)
+        inline_config = OpenCodeBackend._build_inline_config(proxy_urls, proxy_token, config)
 
         return {
             "OPENCODE_CONFIG_CONTENT": json.dumps(inline_config),

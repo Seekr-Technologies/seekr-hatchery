@@ -4,7 +4,7 @@ import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from seekr_hatchery.mount import Mount
 
@@ -14,6 +14,22 @@ if TYPE_CHECKING:
 
 # Home directory of the non-root user inside every sandbox container.
 CONTAINER_HOME = "/home/hatchery"
+
+
+class ProxyEndpoint(NamedTuple):
+    """One upstream API endpoint that needs its own proxy instance.
+
+    Each endpoint starts a dedicated ``proxy.api_server`` on its own ephemeral
+    port.  ``key`` is an opaque string the backend uses to match the port
+    (yielded from ``_maybe_api_server`` as ``{key: port}``) back to the
+    provider it belongs to inside ``container_env``.
+    """
+
+    key: str
+    header_mutator: Callable[..., dict[str, str]]
+    target_host: str
+    target_scheme: str = "https"
+    path_prefix: str = ""
 
 
 class AgentBackend(ABC):
@@ -104,22 +120,15 @@ class AgentBackend(ABC):
 
     @staticmethod
     @abstractmethod
-    def make_header_mutator() -> Callable[..., dict[str, str]]:
-        """Return a callable that transforms outbound request headers.
+    def proxy_endpoints() -> list[ProxyEndpoint]:
+        """Return one :class:`ProxyEndpoint` per upstream that needs proxying.
 
-        Called once at proxy startup. The returned function is invoked for every
-        proxied request with the inbound headers (hop-by-hop already stripped).
-        It must strip inbound auth headers, inject the real API key in the
-        correct format, and return the modified dict.
+        Each endpoint gets its own proxy instance on its own ephemeral port.
+        Backends with a single upstream (codex) return a one-element list;
+        backends with multiple upstreams (opencode) return one per provider.
 
-        The returned callable accepts an optional ``refresh: bool = False``
-        keyword argument.  When ``refresh=True`` the backend should attempt to
-        obtain a fresh credential (e.g. by firing a short test query for OAuth
-        sources) before injecting the token into the returned headers.  For
-        ``API_KEY`` sources, ``refresh=True`` is a no-op.
-
-        Raises RuntimeError (with a human-readable message) if no credentials
-        are available.
+        Raises RuntimeError (with a human-readable message) if credentials
+        are missing.
         """
 
     @staticmethod
@@ -138,17 +147,13 @@ class AgentBackend(ABC):
 
     @staticmethod
     @abstractmethod
-    def proxy_kwargs() -> dict:
-        """Return keyword arguments to pass to ``proxy.api_server()``.
+    def container_env(proxy_token: str, proxy_ports: dict[str, int]) -> dict[str, str]:
+        """Return environment variables to inject into the container.
 
-        Note: does not include ``header_mutator`` — that is provided separately
-        via ``make_header_mutator()``.
+        *proxy_ports* maps the ``key`` from each :class:`ProxyEndpoint` to the
+        ephemeral port its proxy is listening on.  Backends use this to
+        construct per-provider proxy URLs inside the container config.
         """
-
-    @staticmethod
-    @abstractmethod
-    def container_env(proxy_token: str, proxy_port: int) -> dict[str, str]:
-        """Return environment variables to inject into the container."""
 
     # ── Lifecycle hooks ───────────────────────────────────────────────────────
     #

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlsplit
 
-from seekr_hatchery.agents.agent_backend import CONTAINER_HOME, AgentBackend
+from seekr_hatchery.agents.agent_backend import CONTAINER_HOME, AgentBackend, ProxyEndpoint
 from seekr_hatchery.locks import hatchery_lock
 from seekr_hatchery.mount import BindMount, Mount, SeedContext, VolumeMount
 
@@ -596,49 +596,36 @@ class CodexBackend(AgentBackend):
         return {"auth.json": json.dumps(fake_auth).encode()}
 
     @staticmethod
-    def proxy_kwargs() -> dict:
-        # Custom-provider mode wins over OAuth / API-key — the user
-        # explicitly configured a different upstream in config.toml.
-        #
-        # The provider's URL path (e.g. ``/v1``) lives in the container's
-        # ``OPENAI_BASE_URL`` — see ``container_env`` — not in
-        # ``path_prefix``.  Putting it in both would forward to
-        # ``<host>/v1/v1/responses`` and yield a 404 from the upstream.
-        # This mirrors the OpenAI API-key path (target_host=api.openai.com,
-        # container sees ``…/v1``).
-        #
-        # TLS verification uses the OS trust store via
-        # ``truststore.SSLContext`` in ``proxy.api_server``, so any
-        # non-public CA the user has installed system-wide is trusted
-        # automatically — no hatchery-specific CA config needed.
+    def proxy_endpoints() -> list[ProxyEndpoint]:
+        """Return exactly one proxy endpoint for codex's single upstream.
+
+        Merges the former ``proxy_kwargs`` + ``make_header_mutator`` into a
+        single call so the auth-source detection runs once.
+
+        The provider's URL path (e.g. ``/v1``) lives in the container's
+        ``OPENAI_BASE_URL`` — see ``container_env`` — not in ``path_prefix``.
+        Putting it in both would forward to ``<host>/v1/v1/responses`` and
+        yield a 404 from the upstream.
+
+        TLS verification uses the OS trust store via
+        ``truststore.SSLContext`` in ``proxy.api_server``, so any
+        non-public CA the user has installed system-wide is trusted
+        automatically — no hatchery-specific CA config needed.
+        """
         custom = CodexBackend._read_custom_provider()
         if custom is not None:
-            _provider, base_url, _bearer = custom
+            _provider, base_url, bearer = custom
             host = urlsplit(base_url).netloc
             if not host:
                 raise RuntimeError(f"codex provider base_url {base_url!r} has no host component")
-            return {"target_host": host}
 
-        if CodexBackend._detect_auth_source() == "OAUTH":
-            return {"target_host": "chatgpt.com", "path_prefix": "/backend-api/codex"}
-        return {"target_host": "api.openai.com"}
-
-    @staticmethod
-    def make_header_mutator() -> Callable[..., dict[str, str]]:
-        custom = CodexBackend._read_custom_provider()
-        if custom is not None:
-            _provider, _base_url, bearer = custom
-
-            def _custom_provider_mutate(headers: dict[str, str], *, refresh: bool = False) -> dict[str, str]:
-                # refresh is a no-op: the bearer comes from the host
-                # config.toml and is rotated out-of-band by whatever
-                # workflow populates that file.
+            def _custom_mutate(headers: dict[str, str], *, refresh: bool = False) -> dict[str, str]:
                 _ = refresh
                 out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")}
                 out["Authorization"] = f"Bearer {bearer}"
                 return out
 
-            return _custom_provider_mutate
+            return [ProxyEndpoint(key="default", header_mutator=_custom_mutate, target_host=host)]
 
         token, source = CodexBackend._read_codex_creds()
         if not token:
@@ -690,10 +677,17 @@ class CodexBackend(AgentBackend):
             out["Authorization"] = f"Bearer {state['token']}"
             return out
 
-        return _mutate
+        if source == "OAUTH":
+            return [
+                ProxyEndpoint(
+                    key="default", header_mutator=_mutate, target_host="chatgpt.com", path_prefix="/backend-api/codex"
+                )
+            ]
+        return [ProxyEndpoint(key="default", header_mutator=_mutate, target_host="api.openai.com")]
 
     @staticmethod
-    def container_env(proxy_token: str, proxy_port: int) -> dict[str, str]:
+    def container_env(proxy_token: str, proxy_ports: dict[str, int]) -> dict[str, str]:
+        port = proxy_ports["default"]
         custom = CodexBackend._read_custom_provider()
         if custom is not None:
             provider, base_url, _bearer = custom
@@ -706,17 +700,17 @@ class CodexBackend(AgentBackend):
             # to the host proxy, which substitutes the real bearer.
             return {
                 "OPENAI_API_KEY": proxy_token,
-                "OPENAI_BASE_URL": f"http://host.docker.internal:{proxy_port}{path}",
+                "OPENAI_BASE_URL": f"http://host.docker.internal:{port}{path}",
                 "HATCHERY_CODEX_PROVIDER": provider,
             }
         if CodexBackend._detect_auth_source() == "OAUTH":
             # OAuth mode: proxy forwards to chatgpt.com/backend-api/codex/responses.
             # Codex appends /responses to OPENAI_BASE_URL, so no /v1 suffix here.
-            base = f"http://host.docker.internal:{proxy_port}"
+            base = f"http://host.docker.internal:{port}"
         else:
             # API key mode: proxy forwards to api.openai.com/v1/responses.
             # OpenAI SDK expects /v1 in the base URL.
-            base = f"http://host.docker.internal:{proxy_port}/v1"
+            base = f"http://host.docker.internal:{port}/v1"
         return {"OPENAI_API_KEY": proxy_token, "OPENAI_BASE_URL": base}
 
     @staticmethod

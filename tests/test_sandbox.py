@@ -17,6 +17,7 @@ import seekr_hatchery.agents as agent
 import seekr_hatchery.docker as docker
 import seekr_hatchery.proxy as proxy_mod
 import seekr_hatchery.sessions as sessions
+from seekr_hatchery.agents.agent_backend import ProxyEndpoint
 from seekr_hatchery.mount import Mount, VolumeMount
 
 pytestmark = pytest.mark.integration
@@ -129,22 +130,21 @@ def no_wt_run(
     def run(
         command: list[str],
         *,
-        mutator: Callable[[dict], dict] | None = None,
+        endpoints=None,
         proxy_token: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        with docker._maybe_api_server(mutator, proxy_token, agent.CODEX) as api_proxy:
+        with docker._maybe_api_server(endpoints, proxy_token) as proxy_ports:
             result = docker._run_container(
                 image=no_wt_image,
                 mounts=mounts,
                 workdir=container_cwd,
                 hatchery_repo=container_cwd,
                 name="test-no-wt",
-                mutator=mutator,
                 proxy_token=proxy_token,
                 agent_cmd=[],
                 runtime=runtime,
                 _command_override=command,
-                proxy_port=api_proxy.port if api_proxy else None,
+                proxy_ports=proxy_ports,
             )
         assert result is not None
         return result
@@ -265,7 +265,6 @@ def wt_run(
             workdir=container_worktree,
             hatchery_repo=container_repo,
             name=task_name,
-            mutator=None,
             proxy_token=None,
             agent_cmd=[],
             runtime=runtime,
@@ -364,7 +363,6 @@ class TestSandboxShell:
             workdir="/",
             hatchery_repo="/",
             name="test-sandbox",
-            mutator=None,
             proxy_token=None,
             agent_cmd=[],
             runtime=runtime,
@@ -462,7 +460,7 @@ class TestContainerProxy:
                 'wget -qO - -T 10 --header "Authorization: Bearer $OPENAI_API_KEY" '
                 '"http://host.docker.internal:$PORT/v1/responses" 2>&1 || true',
             ],
-            mutator=_mutator,
+            endpoints=[ProxyEndpoint(key="default", header_mutator=_mutator, target_host="api.openai.com")],
             proxy_token="test-proxy-token",
         )
         assert result.returncode == 0, f"Container command failed:\n{result.stderr}"
@@ -633,7 +631,6 @@ class TestDinD:
             workdir="/",
             hatchery_repo="/",
             name="test-dind",
-            mutator=None,
             proxy_token=None,
             agent_cmd=[],
             dind=True,
@@ -701,7 +698,6 @@ class TestDinD:
             workdir="/",
             hatchery_repo="/",
             name="test-cap",
-            mutator=None,
             proxy_token=None,
             agent_cmd=[],
             dind=True,
@@ -782,7 +778,6 @@ class TestFileMountSymlink:
             workdir="/",
             hatchery_repo="/",
             name="test-file-mount",
-            mutator=None,
             proxy_token=None,
             agent_cmd=[],
             runtime=runtime,
@@ -814,7 +809,6 @@ class TestFileMountSymlink:
             workdir="/",
             hatchery_repo="/",
             name="test-file-mount-write",
-            mutator=None,
             proxy_token=None,
             agent_cmd=[],
             runtime=runtime,
@@ -830,7 +824,6 @@ class TestFileMountSymlink:
             workdir="/",
             hatchery_repo="/",
             name="test-file-mount-read",
-            mutator=None,
             proxy_token=None,
             agent_cmd=[],
             runtime=runtime,

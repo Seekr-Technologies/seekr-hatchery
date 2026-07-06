@@ -240,17 +240,6 @@ class TestResolveRuntime:
 # ---------------------------------------------------------------------------
 
 
-def _make_mutator(key: str = "real-secret-key"):
-    """Return a simple header mutator for tests."""
-
-    def _mutate(headers):
-        out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")}
-        out["Authorization"] = f"Bearer {key}"
-        return out
-
-    return _mutate
-
-
 class TestRunContainerRuntime:
     """Verify _run_container injects correct flags for each runtime."""
 
@@ -258,12 +247,11 @@ class TestRunContainerRuntime:
         self,
         monkeypatch,
         runtime: docker.Runtime = docker.Runtime.DOCKER,
-        mutator=None,
         proxy_token: str = "proxy-uuid-token",
-        proxy_port: int = 9999,
+        proxy_ports: dict[str, int] | None = None,
     ) -> list[str]:
-        if mutator is None:
-            mutator = _make_mutator()
+        if proxy_ports is None:
+            proxy_ports = {"default": 9999}
         captured: list[list[str]] = []
 
         def _mock_run(cmd, **kw):
@@ -277,12 +265,11 @@ class TestRunContainerRuntime:
             workdir="/workspace",
             hatchery_repo="/repo",
             name="test-task",
-            mutator=mutator,
             proxy_token=proxy_token,
             agent_cmd=["codex"],
             backend=agent.CODEX,
             runtime=runtime,
-            proxy_port=proxy_port,
+            proxy_ports=proxy_ports,
         )
         return captured[0]
 
@@ -348,8 +335,7 @@ class TestRunContainerRuntime:
 
     def test_real_api_key_absent_from_cmd(self, monkeypatch):
         """The real API key must never appear in the docker command."""
-        mutator = _make_mutator("real-secret-key")
-        cmd = self._capture_cmd(monkeypatch, mutator=mutator, proxy_token="proxy-uuid-token")
+        cmd = self._capture_cmd(monkeypatch, proxy_token="proxy-uuid-token")
         assert "real-secret-key" not in " ".join(cmd)
 
     def test_proxy_token_present_as_api_key(self, monkeypatch):
@@ -360,7 +346,7 @@ class TestRunContainerRuntime:
 
     def test_base_url_points_to_proxy(self, monkeypatch):
         """OPENAI_BASE_URL must point to the host proxy port."""
-        cmd = self._capture_cmd(monkeypatch, proxy_port=12345)
+        cmd = self._capture_cmd(monkeypatch, proxy_ports={"default": 12345})
         cmd_str = " ".join(cmd)
         assert "OPENAI_BASE_URL" in cmd_str
         assert "host.docker.internal:12345" in cmd_str
@@ -383,8 +369,8 @@ class TestRunContainerRuntime:
         cmd_str = " ".join(cmd)
         assert "OPENAI_API_KEY=stable-token" in cmd_str
 
-    def test_no_api_key_env_when_mutator_is_none(self, monkeypatch):
-        """When mutator is None, no API key or base URL env vars should appear."""
+    def test_no_api_key_env_when_no_proxy(self, monkeypatch):
+        """When proxy_ports is None, no API key or base URL env vars should appear."""
         captured: list[list[str]] = []
 
         def _mock_run(cmd, **kw):
@@ -398,7 +384,6 @@ class TestRunContainerRuntime:
             workdir="/workspace",
             hatchery_repo="/repo",
             name="test-task",
-            mutator=None,
             proxy_token=None,
             agent_cmd=["codex"],
             backend=agent.CODEX,
@@ -431,7 +416,6 @@ class TestRunContainerInteractive:
             workdir="/workspace",
             hatchery_repo="/repo",
             name="test-task",
-            mutator=None,
             proxy_token=None,
             agent_cmd=[],
             runtime=docker.Runtime.DOCKER,
@@ -457,7 +441,6 @@ class TestRunContainerInteractive:
             workdir="/workspace",
             hatchery_repo="/repo",
             name="test-task",
-            mutator=None,
             proxy_token=None,
             agent_cmd=[],
             runtime=docker.Runtime.DOCKER,
@@ -475,7 +458,6 @@ class TestRunContainerInteractive:
             workdir="/workspace",
             hatchery_repo="/repo",
             name="test-task",
-            mutator=None,
             proxy_token=None,
             agent_cmd=[],
             runtime=docker.Runtime.DOCKER,
@@ -499,7 +481,6 @@ class TestRunContainerInteractive:
             workdir="/workspace",
             hatchery_repo="/repo",
             name="test-task",
-            mutator=None,
             proxy_token=None,
             agent_cmd=[],
             runtime=docker.Runtime.DOCKER,
@@ -522,7 +503,6 @@ class TestRunContainerInteractive:
             workdir="/workspace",
             hatchery_repo="/repo",
             name="test-task",
-            mutator=None,
             proxy_token=None,
             agent_cmd=[],
             runtime=docker.Runtime.DOCKER,
@@ -1404,24 +1384,3 @@ class TestRemoveClipboardDir:
         # No clipboard subdir was ever created.
         docker.remove_clipboard_dir(tmp_path)  # must not raise
         assert not docker.clipboard_image_dir(tmp_path).exists()
-
-
-class TestMaybeApiServerErrorPath:
-    """``_maybe_api_server`` must surface ``backend.proxy_kwargs()`` errors
-    as ``ui.error`` + ``sys.exit(1)`` so users see a clean message rather
-    than a stack trace.  Mirrors the existing handling for
-    ``make_header_mutator``.
-    """
-
-    def test_runtime_error_from_proxy_kwargs_exits_cleanly(self, monkeypatch, capsys):
-        class BadBackend:
-            def proxy_kwargs(self):
-                raise RuntimeError("clean message for the user")
-
-        with pytest.raises(SystemExit) as excinfo:
-            with docker._maybe_api_server(lambda h: h, "tok", BadBackend()):
-                pass
-        assert excinfo.value.code == 1
-        captured = capsys.readouterr()
-        # ui.error writes to stderr by default.
-        assert "clean message for the user" in (captured.err + captured.out)

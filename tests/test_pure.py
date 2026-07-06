@@ -12,18 +12,6 @@ import seekr_hatchery.docker as docker
 import seekr_hatchery.sessions as sessions
 import seekr_hatchery.utils as utils
 
-
-def _make_mutator(key: str = "test-key"):
-    """Return a simple header mutator for tests."""
-
-    def _mutate(headers):
-        out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")}
-        out["Authorization"] = f"Bearer {key}"
-        return out
-
-    return _mutate
-
-
 # ---------------------------------------------------------------------------
 # find_task_file
 # ---------------------------------------------------------------------------
@@ -686,16 +674,16 @@ class TestDindCapMerge:
         workdir="/repo/.hatchery/worktrees/task",
         hatchery_repo="/repo",
         name="task",
-        mutator=_make_mutator("test-key"),
         proxy_token="test-proxy-token",
         agent_cmd=["codex"],
         backend=agent.CODEX,
+        proxy_ports={"default": 9999},
     )
 
     def _run(self, **kwargs) -> list[str]:
         args = {**self._COMMON, **kwargs}
         with patch("seekr_hatchery.docker.subprocess.run") as mock_run:
-            docker._run_container(**args, proxy_port=9999)
+            docker._run_container(**args)
         return mock_run.call_args[0][0]
 
     def test_user_caps_merged(self):
@@ -761,17 +749,17 @@ class TestRunContainerDindFlags:
         workdir="/repo/.hatchery/worktrees/task",
         hatchery_repo="/repo",
         name="task",
-        mutator=_make_mutator("test-key"),
         proxy_token="test-proxy-token",
         agent_cmd=["codex"],
         backend=agent.CODEX,
+        proxy_ports={"default": 9999},
     )
 
     def _run(self, **kwargs) -> list[str]:
         """Call _run_container with mock subprocess and return the captured cmd."""
         args = {**self._COMMON, **kwargs}
         with patch("seekr_hatchery.docker.subprocess.run") as mock_run:
-            docker._run_container(**args, proxy_port=9999)
+            docker._run_container(**args)
         return mock_run.call_args[0][0]
 
     def test_dind_false_no_extra_flags(self):
@@ -848,7 +836,6 @@ class TestRunContainerName:
         workdir="/repo/.hatchery/worktrees/task",
         hatchery_repo="/repo",
         name="my-task",
-        mutator=None,
         proxy_token=None,
         agent_cmd=["codex"],
         backend=agent.CODEX,

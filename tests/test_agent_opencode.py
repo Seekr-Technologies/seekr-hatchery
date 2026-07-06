@@ -190,6 +190,7 @@ class TestBuildFinalizeCommand:
 
     def test_passes_model_flag_when_config_present(self, home, monkeypatch):
         _write_opencode_config(home, _ONPREM_CONFIG)
+        _write_api_key_file(home)
         cmd = agent.OPENCODE.build_finalize_command("sid-ignored", "sys", "wrap up")
         assert "-m" in cmd
         assert "my-provider/vendor-a/model-one" in cmd
@@ -205,13 +206,9 @@ class TestBuildFinalizeCommand:
         assert "--print-logs" not in cmd
 
     def test_raises_when_custom_provider_has_no_models(self, home):
-        # A custom provider with a baseURL but no `models` is unusable: opencode
-        # run would fall back to its default model while enabled_providers
-        # restricts the sandbox to the custom provider alone — no model works.
-        # Must fail loudly instead of emitting a silently-broken command.
         config = {
             "provider": {
-                "my-provider": {"options": {"baseURL": "https://api.example.com/v1"}},
+                "my-provider": {"options": {"baseURL": "https://api.example.com/v1", "apiKey": "literal-key"}},
             }
         }
         _write_opencode_config(home, config)
@@ -310,34 +307,53 @@ class TestResolveConfigRef:
 
 
 # ---------------------------------------------------------------------------
-# _find_primary_provider
+# _proxyable_providers
 # ---------------------------------------------------------------------------
 
 
-class TestFindPrimaryProvider:
-    def test_returns_first_custom_provider(self):
-        result = agent.OpenCodeBackend._find_primary_provider(_ONPREM_CONFIG)
-        assert result is not None
-        pid, pdata = result
-        assert pid == "my-provider"
-        assert pdata["name"] == "My On-Prem Provider"
+class TestProxyableProviders:
+    def test_finds_custom_provider_with_api_key(self, home):
+        _write_opencode_config(home, _ONPREM_CONFIG)
+        _write_api_key_file(home)
+        result = agent.OpenCodeBackend._proxyable_providers(_ONPREM_CONFIG)
+        assert len(result) == 1
+        assert result[0][0] == "my-provider"
 
-    def test_none_when_only_builtins(self):
-        assert agent.OpenCodeBackend._find_primary_provider(_BUILTIN_ONLY_CONFIG) is None
+    def test_finds_builtin_provider_with_explicit_api_key(self, home):
+        result = agent.OpenCodeBackend._proxyable_providers(_BUILTIN_ONLY_CONFIG)
+        assert len(result) == 1
+        assert result[0][0] == "openai"
 
-    def test_none_when_no_provider_key(self):
-        assert agent.OpenCodeBackend._find_primary_provider({}) is None
+    def test_finds_builtin_provider_with_env_var(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        config = {"provider": {"openai": {"options": {}}}}
+        result = agent.OpenCodeBackend._proxyable_providers(config)
+        assert len(result) == 1
+        assert result[0][0] == "openai"
 
-    def test_skips_builtin_ids(self):
+    def test_finds_multiple_providers(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
         config = {
             "provider": {
                 "openai": {"options": {}},
-                "my-custom": {"options": {"baseURL": "https://custom.example.com/v1"}},
+                "my-provider": {
+                    "options": {"baseURL": "http://custom.example.com/v1", "apiKey": "literal-key"},
+                },
             }
         }
-        result = agent.OpenCodeBackend._find_primary_provider(config)
-        assert result is not None
-        assert result[0] == "my-custom"
+        result = agent.OpenCodeBackend._proxyable_providers(config)
+        assert len(result) == 2
+        pids = [pid for pid, _ in result]
+        assert "openai" in pids
+        assert "my-provider" in pids
+
+    def test_excludes_provider_without_key(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        config = {"provider": {"openai": {"options": {}}}}
+        assert agent.OpenCodeBackend._proxyable_providers(config) == []
+
+    def test_empty_when_no_config(self):
+        assert agent.OpenCodeBackend._proxyable_providers({}) == []
 
 
 # ---------------------------------------------------------------------------
@@ -353,94 +369,35 @@ class TestResolveModel:
     def test_falls_back_to_first_model_when_no_explicit_model(self, home):
         assert agent.OpenCodeBackend._resolve_model(_ONPREM_CONFIG) == "my-provider/vendor-a/model-one"
 
-    def test_ignores_stale_model_pointing_at_other_provider(self, home):
-        # A stale `model` referencing a builtin provider must not propagate —
-        # enabled_providers restricts the sandbox to the custom provider alone.
+    def test_ignores_stale_model_pointing_at_unproxied_provider(self, home):
         config = {**_ONPREM_CONFIG, "model": "openai/gpt-5.2-codex"}
         assert agent.OpenCodeBackend._resolve_model(config) == "my-provider/vendor-a/model-one"
 
-    def test_returns_host_model_when_no_primary_provider(self, home):
+    def test_returns_host_model_when_no_providers(self, home):
         config = {"model": "openai/gpt-5.2-codex"}
         assert agent.OpenCodeBackend._resolve_model(config) == "openai/gpt-5.2-codex"
-
-    def test_raises_when_custom_provider_has_no_models(self, home):
-        # A custom provider without models is unusable in the sandbox: the only
-        # selectable model would be a builtin (openai/...) which enabled_providers
-        # disables. Raise instead of silently returning None (which would make
-        # opencode run fall back to the openai default and then crash).
-        config = {"provider": {"my-custom": {"options": {"baseURL": "https://x.example.com/v1"}}}}
-        with pytest.raises(RuntimeError, match="no models configured"):
-            agent.OpenCodeBackend._resolve_model(config)
 
     def test_returns_none_when_no_config(self, home):
         assert agent.OpenCodeBackend._resolve_model({}) is None
 
     def test_validates_model_is_in_provider_models(self, home):
-        # host_model prefix matches provider but the model id isn't listed → fall back
         config = {**_ONPREM_CONFIG, "model": "my-provider/nonexistent-model"}
         assert agent.OpenCodeBackend._resolve_model(config) == "my-provider/vendor-a/model-one"
 
+    def test_returns_none_when_builtin_proxied(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        config = {"provider": {"openai": {"options": {}}}}
+        assert agent.OpenCodeBackend._resolve_model(config) is None
 
-# ---------------------------------------------------------------------------
-# _read_credentials
-# ---------------------------------------------------------------------------
+    def test_returns_host_model_when_builtin_proxied(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        config = {"provider": {"openai": {"options": {}}}, "model": "openai/gpt-5.2-codex"}
+        assert agent.OpenCodeBackend._resolve_model(config) == "openai/gpt-5.2-codex"
 
-
-class TestReadCredentials:
-    def test_resolves_api_key_from_file(self, home):
-        _write_opencode_config(home, _ONPREM_CONFIG)
-        _write_api_key_file(home, "real-token-xyz")
-        assert agent.OpenCodeBackend._read_credentials() == "real-token-xyz"
-
-    def test_resolves_api_key_from_env(self, home, monkeypatch):
-        config = {
-            "provider": {
-                "my-provider": {
-                    "options": {
-                        "baseURL": "http://example.com/v1",
-                        "apiKey": "{env:MY_API_KEY}",
-                    }
-                }
-            }
-        }
-        monkeypatch.setenv("MY_API_KEY", "env-token-xyz")
-        _write_opencode_config(home, config)
-        assert agent.OpenCodeBackend._read_credentials() == "env-token-xyz"
-
-    def test_returns_none_when_config_missing(self, home):
-        assert agent.OpenCodeBackend._read_credentials() is None
-
-    def test_returns_none_when_only_builtins(self, home):
-        _write_opencode_config(home, _BUILTIN_ONLY_CONFIG)
-        assert agent.OpenCodeBackend._read_credentials() is None
-
-    def test_api_key_none_when_file_missing(self, home):
-        _write_opencode_config(home, _ONPREM_CONFIG)
-        # api-key file not written — should return None
-        assert agent.OpenCodeBackend._read_credentials() is None
-
-    def test_literal_api_key(self, home):
-        config = {
-            "provider": {
-                "my-provider": {
-                    "options": {
-                        "baseURL": "https://api.example.com/v1",
-                        "apiKey": "literal-key-abc",
-                    }
-                }
-            }
-        }
-        _write_opencode_config(home, config)
-        assert agent.OpenCodeBackend._read_credentials() == "literal-key-abc"
-
-    def test_returns_only_api_key(self, home):
-        # _read_credentials must return a single value (the api key), not a
-        # (api_key, target_host) tuple — target_host was unused at the call site
-        # and was resolved inconsistently (_resolve_env_ref vs _resolve_config_ref).
-        _write_opencode_config(home, _ONPREM_CONFIG)
-        _write_api_key_file(home, "real-token-xyz")
-        result = agent.OpenCodeBackend._read_credentials()
-        assert isinstance(result, str)
+    def test_raises_when_custom_provider_has_no_models(self, home):
+        config = {"provider": {"my-custom": {"options": {"baseURL": "https://x.example.com/v1", "apiKey": "key"}}}}
+        with pytest.raises(RuntimeError, match="no models configured"):
+            agent.OpenCodeBackend._resolve_model(config)
 
 
 # ---------------------------------------------------------------------------
@@ -450,165 +407,185 @@ class TestReadCredentials:
 
 class TestBuildInlineConfig:
     def test_replaces_base_url(self, home):
-        inline = agent.OpenCodeBackend._build_inline_config("http://proxy:9999/v1", "tok", _ONPREM_CONFIG)
+        inline = agent.OpenCodeBackend._build_inline_config(
+            {"my-provider": "http://proxy:9999/v1/inference"}, "tok", _ONPREM_CONFIG
+        )
         opts = inline["provider"]["my-provider"]["options"]
-        assert opts["baseURL"] == "http://proxy:9999/v1"
+        assert opts["baseURL"] == "http://proxy:9999/v1/inference"
 
     def test_replaces_api_key(self, home):
-        inline = agent.OpenCodeBackend._build_inline_config("http://proxy:9999/v1", "my-token", _ONPREM_CONFIG)
+        inline = agent.OpenCodeBackend._build_inline_config(
+            {"my-provider": "http://proxy:9999/v1"}, "my-token", _ONPREM_CONFIG
+        )
         opts = inline["provider"]["my-provider"]["options"]
         assert opts["apiKey"] == "my-token"
 
     def test_preserves_provider_id(self, home):
-        inline = agent.OpenCodeBackend._build_inline_config("http://proxy/v1", "tok", _ONPREM_CONFIG)
+        inline = agent.OpenCodeBackend._build_inline_config({"my-provider": "http://proxy/v1"}, "tok", _ONPREM_CONFIG)
         assert "my-provider" in inline["provider"]
 
     def test_preserves_npm_and_name(self, home):
-        inline = agent.OpenCodeBackend._build_inline_config("http://proxy/v1", "tok", _ONPREM_CONFIG)
+        inline = agent.OpenCodeBackend._build_inline_config({"my-provider": "http://proxy/v1"}, "tok", _ONPREM_CONFIG)
         provider = inline["provider"]["my-provider"]
         assert provider.get("npm") == "@ai-sdk/openai-compatible"
         assert provider.get("name") == "My On-Prem Provider"
 
     def test_preserves_models(self, home):
-        inline = agent.OpenCodeBackend._build_inline_config("http://proxy/v1", "tok", _ONPREM_CONFIG)
+        inline = agent.OpenCodeBackend._build_inline_config({"my-provider": "http://proxy/v1"}, "tok", _ONPREM_CONFIG)
         provider = inline["provider"]["my-provider"]
         assert "models" in provider
         assert "vendor-a/model-one" in provider["models"]
 
     def test_real_api_key_not_in_inline_config(self, home, monkeypatch):
         monkeypatch.setenv("MY_API_KEY", "super-secret-real-key")
-        inline = agent.OpenCodeBackend._build_inline_config("http://proxy/v1", "proxy-tok", _ONPREM_CONFIG)
+        inline = agent.OpenCodeBackend._build_inline_config(
+            {"my-provider": "http://proxy/v1"}, "proxy-tok", _ONPREM_CONFIG
+        )
         serialised = json.dumps(inline)
         assert "super-secret-real-key" not in serialised
         assert "{env:MY_API_KEY}" not in serialised
 
-    def test_enabled_providers_restricts_to_custom_provider(self, home):
-        inline = agent.OpenCodeBackend._build_inline_config("http://proxy/v1", "tok", _ONPREM_CONFIG)
+    def test_enabled_providers_lists_all_proxied(self, home):
+        inline = agent.OpenCodeBackend._build_inline_config({"my-provider": "http://proxy/v1"}, "tok", _ONPREM_CONFIG)
         assert inline.get("enabled_providers") == ["my-provider"]
 
     def test_permission_allow_set(self, home):
-        inline = agent.OpenCodeBackend._build_inline_config("http://proxy/v1", "tok", _ONPREM_CONFIG)
+        inline = agent.OpenCodeBackend._build_inline_config({"my-provider": "http://proxy/v1"}, "tok", _ONPREM_CONFIG)
         assert inline.get("permission") == "allow"
 
     def test_auto_defaults_to_first_model(self, home):
-        inline = agent.OpenCodeBackend._build_inline_config("http://proxy/v1", "tok", _ONPREM_CONFIG)
+        inline = agent.OpenCodeBackend._build_inline_config({"my-provider": "http://proxy/v1"}, "tok", _ONPREM_CONFIG)
         assert inline.get("model") == "my-provider/vendor-a/model-one"
 
     def test_host_model_override_propagated(self, home):
         config_with_model = {**_ONPREM_CONFIG, "model": "my-provider/vendor-b/model-two"}
-        inline = agent.OpenCodeBackend._build_inline_config("http://proxy/v1", "tok", config_with_model)
+        inline = agent.OpenCodeBackend._build_inline_config(
+            {"my-provider": "http://proxy/v1"}, "tok", config_with_model
+        )
         assert inline.get("model") == "my-provider/vendor-b/model-two"
 
-    def test_fallback_when_no_provider(self, home):
-        inline = agent.OpenCodeBackend._build_inline_config("http://proxy/v1", "tok", {})
-        assert "provider" in inline
-        assert len(inline["provider"]) == 1
-        pid = next(iter(inline["provider"]))
-        opts = inline["provider"][pid]["options"]
-        assert opts["baseURL"] == "http://proxy/v1"
-        assert opts["apiKey"] == "tok"
-
-    def test_raises_when_custom_provider_has_no_models(self, home):
-        # enabled_providers restricts the sandbox to the custom provider, but
-        # with no models listed there is no selectable model — building the
-        # inline config must fail loudly rather than produce a broken sandbox.
+    def test_multiple_providers_each_get_own_proxy_url(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
         config = {
             "provider": {
-                "my-provider": {"options": {"baseURL": "https://api.example.com/v1"}},
+                "openai": {"options": {}},
+                "my-provider": {
+                    "options": {"baseURL": "http://custom.example.com/v1", "apiKey": "literal-key"},
+                    "models": {"model-a": {"name": "Model A"}},
+                },
             }
         }
+        proxy_urls = {
+            "openai": "http://host.docker.internal:1111/v1",
+            "my-provider": "http://host.docker.internal:2222/v1",
+        }
+        inline = agent.OpenCodeBackend._build_inline_config(proxy_urls, "tok", config)
+        assert inline["provider"]["openai"]["options"]["baseURL"] == "http://host.docker.internal:1111/v1"
+        assert inline["provider"]["my-provider"]["options"]["baseURL"] == "http://host.docker.internal:2222/v1"
+        assert set(inline["enabled_providers"]) == {"openai", "my-provider"}
+
+    def test_raises_when_custom_provider_has_no_models(self, home):
+        config = {"provider": {"my-provider": {"options": {"baseURL": "https://api.example.com/v1", "apiKey": "key"}}}}
         with pytest.raises(RuntimeError, match="no models configured"):
-            agent.OpenCodeBackend._build_inline_config("http://proxy/v1", "tok", config)
+            agent.OpenCodeBackend._build_inline_config({"my-provider": "http://proxy/v1"}, "tok", config)
 
 
 # ---------------------------------------------------------------------------
-# proxy_kwargs
+# proxy_endpoints
 # ---------------------------------------------------------------------------
 
 
-class TestProxyKwargs:
-    def test_returns_target_host_and_scheme(self, home):
+class TestProxyEndpoints:
+    def test_returns_one_endpoint_per_provider(self, home):
         _write_opencode_config(home, _ONPREM_CONFIG)
         _write_api_key_file(home)
-        kwargs = agent.OPENCODE.proxy_kwargs()
-        assert kwargs["target_host"] == "on-prem.example.com"
-        assert kwargs["target_scheme"] == "http"
+        endpoints = agent.OPENCODE.proxy_endpoints()
+        assert len(endpoints) == 1
+        ep = endpoints[0]
+        assert ep.key == "my-provider"
+        assert ep.target_host == "on-prem.example.com"
+        assert ep.target_scheme == "http"
 
-    def test_https_scheme_for_https_endpoint(self, home):
+    def test_builtin_provider_with_env_var(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        config = {"provider": {"openai": {"options": {}}}}
+        _write_opencode_config(Path.home(), config)
+        endpoints = agent.OPENCODE.proxy_endpoints()
+        assert len(endpoints) == 1
+        assert endpoints[0].key == "openai"
+        assert endpoints[0].target_host == "api.openai.com"
+        assert endpoints[0].target_scheme == "https"
+
+    def test_multiple_providers(self, monkeypatch, home):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
         config = {
             "provider": {
+                "openai": {"options": {}},
                 "my-provider": {
-                    "options": {
-                        "baseURL": "https://api.example.com/v1",
-                        "apiKey": "key",
-                    }
-                }
+                    "options": {"baseURL": "http://custom.example.com/v1", "apiKey": "literal-key"},
+                    "models": {"model-a": {"name": "Model A"}},
+                },
             }
         }
         _write_opencode_config(home, config)
-        assert agent.OPENCODE.proxy_kwargs()["target_scheme"] == "https"
+        endpoints = agent.OPENCODE.proxy_endpoints()
+        assert len(endpoints) == 2
+        keys = {ep.key for ep in endpoints}
+        assert keys == {"openai", "my-provider"}
 
-    def test_no_path_prefix(self, home):
-        _write_opencode_config(home, _ONPREM_CONFIG)
-        _write_api_key_file(home)
-        assert "path_prefix" not in agent.OPENCODE.proxy_kwargs()
-
-    def test_raises_when_no_config(self, home):
-        with pytest.raises(RuntimeError, match="no opencode provider configured"):
-            agent.OPENCODE.proxy_kwargs()
-
-    def test_raises_when_only_builtins(self, home):
-        _write_opencode_config(home, _BUILTIN_ONLY_CONFIG)
-        with pytest.raises(RuntimeError, match="no opencode provider configured"):
-            agent.OPENCODE.proxy_kwargs()
-
-
-# ---------------------------------------------------------------------------
-# make_header_mutator
-# ---------------------------------------------------------------------------
-
-
-class TestMakeHeaderMutator:
-    def test_injects_bearer_token(self, home):
+    def test_mutator_injects_bearer_for_default_provider(self, home):
         _write_opencode_config(home, _ONPREM_CONFIG)
         _write_api_key_file(home, "real-api-key")
-        mutator = agent.OPENCODE.make_header_mutator()
-        result = mutator({})
-        assert result.get("Authorization") == "Bearer real-api-key"
+        endpoints = agent.OPENCODE.proxy_endpoints()
+        result = endpoints[0].header_mutator({})
+        assert result["Authorization"] == "Bearer real-api-key"
 
-    def test_strips_inbound_auth_headers(self, home):
-        _write_opencode_config(home, _ONPREM_CONFIG)
-        _write_api_key_file(home, "real-key")
-        mutator = agent.OPENCODE.make_header_mutator()
-        result = mutator(
-            {
-                "x-api-key": "proxy-tok",
-                "authorization": "Bearer proxy-tok",
-                "content-type": "application/json",
+    def test_mutator_injects_x_api_key_for_anthropic(self, home):
+        config = {
+            "provider": {
+                "anthropic": {"options": {"apiKey": "anthropic-key"}},
             }
-        )
-        assert result.get("Authorization") == "Bearer real-key"
-        assert result.get("content-type") == "application/json"
-        lower_keys = {k.lower() for k in result}
-        assert "x-api-key" not in lower_keys
+        }
+        _write_opencode_config(home, config)
+        endpoints = agent.OPENCODE.proxy_endpoints()
+        assert endpoints[0].key == "anthropic"
+        result = endpoints[0].header_mutator({})
+        assert result["x-api-key"] == "anthropic-key"
+        assert "Authorization" not in result
 
-    def test_refresh_is_noop(self, home):
+    def test_mutator_strips_inbound_auth(self, home):
         _write_opencode_config(home, _ONPREM_CONFIG)
         _write_api_key_file(home, "real-key")
-        mutator = agent.OPENCODE.make_header_mutator()
-        result1 = mutator({})
-        result2 = mutator({}, refresh=True)
-        assert result1 == result2
+        endpoints = agent.OPENCODE.proxy_endpoints()
+        result = endpoints[0].header_mutator(
+            {"x-api-key": "proxy-tok", "authorization": "Bearer proxy-tok", "content-type": "application/json"}
+        )
+        assert result["Authorization"] == "Bearer real-key"
+        assert result["content-type"] == "application/json"
+        lower = {k.lower() for k in result}
+        assert "x-api-key" not in lower
 
-    def test_raises_when_no_api_key(self, home):
+    def test_mutator_refresh_is_noop(self, home):
         _write_opencode_config(home, _ONPREM_CONFIG)
-        # api-key file not written — should raise
-        with pytest.raises(RuntimeError, match="no API key found"):
-            agent.OPENCODE.make_header_mutator()
+        _write_api_key_file(home, "real-key")
+        endpoints = agent.OPENCODE.proxy_endpoints()
+        r1 = endpoints[0].header_mutator({})
+        r2 = endpoints[0].header_mutator({}, refresh=True)
+        assert r1 == r2
 
     def test_raises_when_no_config(self, home):
-        with pytest.raises(RuntimeError, match="no API key found"):
-            agent.OPENCODE.make_header_mutator()
+        with pytest.raises(RuntimeError, match="no opencode provider configured"):
+            agent.OPENCODE.proxy_endpoints()
+
+    def test_raises_when_no_resolvable_keys(self, monkeypatch, home):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        _write_opencode_config(home, _BUILTIN_ONLY_CONFIG)
+        _BUILTIN_ONLY_CONFIG  # has apiKey="sk-oai" so this should actually work
+        # Remove the apiKey to make it unresolvable
+        config = {"provider": {"openai": {"options": {}}}}
+        _write_opencode_config(home, config)
+        with pytest.raises(RuntimeError, match="no opencode provider configured"):
+            agent.OPENCODE.proxy_endpoints()
 
 
 # ---------------------------------------------------------------------------
@@ -620,69 +597,86 @@ class TestContainerEnv:
     def test_sets_dangerously_skip_permissions_env(self, home):
         _write_opencode_config(home, _ONPREM_CONFIG)
         _write_api_key_file(home)
-        env = agent.OPENCODE.container_env("proxy-tok", 9999)
+        env = agent.OPENCODE.container_env("proxy-tok", {"my-provider": 9999})
         assert env.get("OPENCODE_DANGEROUSLY_SKIP_PERMISSIONS") == "true"
 
     def test_sets_config_content(self, home):
         _write_opencode_config(home, _ONPREM_CONFIG)
         _write_api_key_file(home)
-        env = agent.OPENCODE.container_env("proxy-tok", 9999)
+        env = agent.OPENCODE.container_env("proxy-tok", {"my-provider": 9999})
         assert "OPENCODE_CONFIG_CONTENT" in env
 
     def test_config_content_is_valid_json(self, home):
         _write_opencode_config(home, _ONPREM_CONFIG)
         _write_api_key_file(home)
-        env = agent.OPENCODE.container_env("proxy-tok", 9999)
+        env = agent.OPENCODE.container_env("proxy-tok", {"my-provider": 9999})
         config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
         assert "provider" in config
 
     def test_proxy_url_uses_correct_port(self, home):
         _write_opencode_config(home, _ONPREM_CONFIG)
         _write_api_key_file(home)
-        env = agent.OPENCODE.container_env("proxy-tok", 12345)
+        env = agent.OPENCODE.container_env("proxy-tok", {"my-provider": 12345})
         config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
-        provider = next(iter(config["provider"].values()))
+        provider = config["provider"]["my-provider"]
         assert "12345" in provider["options"]["baseURL"]
         assert "host.docker.internal" in provider["options"]["baseURL"]
 
     def test_proxy_url_preserves_path_from_real_base_url(self, home):
         _write_opencode_config(home, _ONPREM_CONFIG)
         _write_api_key_file(home)
-        env = agent.OPENCODE.container_env("proxy-tok", 9999)
+        env = agent.OPENCODE.container_env("proxy-tok", {"my-provider": 9999})
         config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
-        provider = next(iter(config["provider"].values()))
+        provider = config["provider"]["my-provider"]
         assert provider["options"]["baseURL"].endswith("/v1/inference")
 
     def test_proxy_token_used_as_api_key(self, home):
         _write_opencode_config(home, _ONPREM_CONFIG)
         _write_api_key_file(home)
-        env = agent.OPENCODE.container_env("my-proxy-uuid", 9999)
+        env = agent.OPENCODE.container_env("my-proxy-uuid", {"my-provider": 9999})
         config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
-        provider = next(iter(config["provider"].values()))
+        provider = config["provider"]["my-provider"]
         assert provider["options"]["apiKey"] == "my-proxy-uuid"
 
     def test_real_api_key_not_in_container_env(self, home):
-        """SECURITY: the real API key must never appear in any container env var."""
         _write_opencode_config(home, _ONPREM_CONFIG)
         _write_api_key_file(home, "super-secret-real-key")
-        env = agent.OPENCODE.container_env("proxy-tok", 9999)
+        env = agent.OPENCODE.container_env("proxy-tok", {"my-provider": 9999})
         serialised = json.dumps(env)
-        assert "super-secret-real-key" not in serialised, "real API key leaked into container env!"
+        assert "super-secret-real-key" not in serialised
 
     def test_real_base_url_not_in_container_env(self, home):
-        """SECURITY: the real upstream URL must not appear in the container env."""
         _write_opencode_config(home, _ONPREM_CONFIG)
         _write_api_key_file(home)
-        env = agent.OPENCODE.container_env("proxy-tok", 9999)
+        env = agent.OPENCODE.container_env("proxy-tok", {"my-provider": 9999})
         serialised = json.dumps(env)
-        assert "on-prem.example.com" not in serialised, "real endpoint URL leaked into container env!"
+        assert "on-prem.example.com" not in serialised
 
-    def test_default_path_v1_when_no_config(self, home):
-        env = agent.OPENCODE.container_env("proxy-tok", 9999)
-        assert "OPENCODE_CONFIG_CONTENT" in env
+    def test_builtin_provider_uses_default_path(self, monkeypatch, home):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        config = {"provider": {"openai": {"options": {}}}}
+        _write_opencode_config(home, config)
+        env = agent.OPENCODE.container_env("proxy-tok", {"openai": 9999})
         config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
-        provider = next(iter(config["provider"].values()))
+        provider = config["provider"]["openai"]
         assert provider["options"]["baseURL"] == "http://host.docker.internal:9999/v1"
+
+    def test_multiple_providers_get_own_ports(self, monkeypatch, home):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        config = {
+            "provider": {
+                "openai": {"options": {}},
+                "my-provider": {
+                    "options": {"baseURL": "http://custom.example.com/v1", "apiKey": "literal-key"},
+                    "models": {"model-a": {"name": "Model A"}},
+                },
+            }
+        }
+        _write_opencode_config(home, config)
+        env = agent.OPENCODE.container_env("proxy-tok", {"openai": 1111, "my-provider": 2222})
+        config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+        assert config["provider"]["openai"]["options"]["baseURL"] == "http://host.docker.internal:1111/v1"
+        assert config["provider"]["my-provider"]["options"]["baseURL"] == "http://host.docker.internal:2222/v1"
 
 
 # ---------------------------------------------------------------------------
@@ -892,7 +886,7 @@ class TestConfigDelivery:
         _write_opencode_config(home, _ONPREM_CONFIG)
         _write_api_key_file(home, "real-key")
         cmd = agent.OPENCODE.build_new_command("sid", "sys", "task", docker=True)
-        env = agent.OPENCODE.container_env("proxy-tok", 9999)
+        env = agent.OPENCODE.container_env("proxy-tok", {"my-provider": 9999})
         return cmd, env
 
     def test_wrapper_writes_to_global_config_path(self, home):
@@ -955,7 +949,7 @@ class TestConfigDelivery:
         started.  A stale port means all LLM requests hit the wrong target."""
         _write_opencode_config(home, _ONPREM_CONFIG)
         _write_api_key_file(home, "real-key")
-        env = agent.OPENCODE.container_env("proxy-tok", 54321)
+        env = agent.OPENCODE.container_env("proxy-tok", {"my-provider": 54321})
         config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
         provider = config["provider"]["my-provider"]
         assert "54321" in provider["options"]["baseURL"]

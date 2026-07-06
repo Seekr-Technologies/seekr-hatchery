@@ -9,8 +9,8 @@ import sys
 import tempfile
 import uuid
 from collections import deque
-from collections.abc import Callable, Generator
-from contextlib import contextmanager
+from collections.abc import Generator
+from contextlib import ExitStack, contextmanager
 from enum import Enum
 from pathlib import Path
 from typing import Literal
@@ -27,6 +27,7 @@ import seekr_hatchery.kubectl_proxy as _kubectl_proxy
 import seekr_hatchery.proxy as proxy
 import seekr_hatchery.pty_proxy as pty_proxy
 import seekr_hatchery.ui as ui
+from seekr_hatchery.agents.agent_backend import ProxyEndpoint
 from seekr_hatchery.constants import (
     DOCKER_CONFIG,
     WORKTREES_SUBDIR,
@@ -258,31 +259,37 @@ def parse_docker_include_entry(entry: str | IncludeItem) -> tuple[str, str]:
 
 @contextmanager
 def _maybe_api_server(
-    mutator: Callable[[dict[str, str]], dict[str, str]] | None,
+    endpoints: list[ProxyEndpoint] | None,
     proxy_token: str | None,
-    backend: agent.AgentBackend,
-) -> Generator[proxy.APIServer | None, None, None]:
-    """Conditionally start the API proxy and yield the server handle (or ``None``).
+) -> Generator[dict[str, int] | None, None, None]:
+    """Conditionally start API proxy(ies) and yield ``{key: port}`` (or ``None``).
 
-    *mutator* is the gate: a non-``None`` mutator means the caller has a real
-    API key to inject, so a proxy is needed.  When ``None`` (e.g. sandbox shell
-    sessions which don't run an agent), no proxy is started and ``None`` is
-    yielded so call sites can use this unconditionally with a uniform pattern::
+    *endpoints* is the gate: a non-empty list means the caller has real
+    credentials, so one proxy per endpoint is started.  When ``None`` or empty
+    (e.g. sandbox shell sessions which don't run an agent), no proxy is
+    started and ``None`` is yielded so call sites can use this unconditionally::
 
-        with _maybe_api_server(mutator, token, backend) as api_proxy, \\
+        with _maybe_api_server(endpoints, token) as proxy_ports, \\
              _kubectl_context(config, session_dir) as kubectl_mounts:
-            _run_container(..., proxy_port=api_proxy.port if api_proxy else None)
+            _run_container(..., proxy_ports=proxy_ports)
     """
-    if mutator is None:
+    if not endpoints:
         yield None
         return
-    try:
-        kwargs = backend.proxy_kwargs()
-    except RuntimeError as exc:
-        ui.error(str(exc))
-        sys.exit(1)
-    with proxy.api_server(mutator, proxy_token or "", **kwargs) as server:
-        yield server
+    ports: dict[str, int] = {}
+    with ExitStack() as stack:
+        for ep in endpoints:
+            server = stack.enter_context(
+                proxy.api_server(
+                    ep.header_mutator,
+                    proxy_token or "",
+                    target_host=ep.target_host,
+                    target_scheme=ep.target_scheme,
+                    path_prefix=ep.path_prefix,
+                )
+            )
+            ports[ep.key] = server.port
+        yield ports
 
 
 @contextmanager
@@ -1091,7 +1098,6 @@ def _run_container(
     workdir: str,
     hatchery_repo: str,
     name: str,
-    mutator: Callable[[dict[str, str]], dict[str, str]] | None,
     proxy_token: str | None,
     agent_cmd: list[str],
     backend: agent.AgentBackend = agent.CODEX,
@@ -1101,7 +1107,7 @@ def _run_container(
     _interactive: bool = False,
     cap_add: list[str] | None = None,
     container_name: str | None = None,
-    proxy_port: int | None = None,
+    proxy_ports: dict[str, int] | None = None,
     add_host_gateway: bool = False,
     paste_interceptor: clipboard_image.PasteInterceptor | None = None,
 ) -> subprocess.CompletedProcess[str] | None:
@@ -1112,11 +1118,12 @@ def _run_container(
     ``backend.build_*_command(docker=True, ...)``).
 
     *proxy_token* is a stable per-task UUID used as the API key env var inside
-    the container.  It must be provided whenever *mutator* is set.
+    the container.  It must be provided whenever *proxy_ports* is set.
     The same token is reused on resume.
 
-    *proxy_port* is the port of the host-side API proxy, managed externally via
-    ``_maybe_api_server``.  When ``None`` no API proxy env vars are injected.
+    *proxy_ports* maps provider keys to ephemeral proxy ports, managed
+    externally via ``_maybe_api_server``.  When ``None`` no API proxy env vars
+    are injected.
 
     *add_host_gateway* forces the ``--add-host=host.docker.internal:host-gateway``
     flag on Linux even when the API proxy is not active (e.g. when the kubectl
@@ -1133,14 +1140,14 @@ def _run_container(
     for m in mounts:
         cmd += mount_to_docker_args(m)
 
-    if mutator is not None and proxy_port is not None:
-        for key, val in backend.container_env(proxy_token, proxy_port).items():
+    if proxy_ports is not None:
+        for key, val in backend.container_env(proxy_token, proxy_ports).items():
             cmd += ["-e", f"{key}={val}"]
 
     # On Linux, Docker doesn't automatically expose host.docker.internal;
     # --add-host maps it to the host gateway so the container can reach any
     # host-side proxy (API proxy and/or kubectl RBAC proxy).
-    if (proxy_port is not None or add_host_gateway) and sys.platform == "linux":
+    if (proxy_ports is not None or add_host_gateway) and sys.platform == "linux":
         cmd += ["--add-host=host.docker.internal:host-gateway"]
 
     cmd += ["-e", f"HATCHERY_TASK={name}"]
@@ -1276,7 +1283,7 @@ def run_session(
     owns.
     """
     try:
-        mutator = backend.make_header_mutator()
+        endpoints = backend.proxy_endpoints()
     except RuntimeError as e:
         ui.error(str(e))
         sys.exit(1)
@@ -1341,7 +1348,7 @@ def run_session(
     mode_label = "no-worktree mode" if meta.no_worktree else "worktree mode"
     logger.debug(f"Launching {runtime.binary} container for session '{meta.name}' ({mode_label})")
     with (
-        _maybe_api_server(mutator, proxy_token, backend) as api_proxy,
+        _maybe_api_server(endpoints, proxy_token) as proxy_ports,
         _kubectl_context(config, session_dir, kubectl_proxy_token or "") as kubectl_mounts,
     ):
         mounts.extend(kubectl_mounts)
@@ -1351,7 +1358,6 @@ def run_session(
             container_workdir,
             container_repo,
             meta.name,
-            mutator,
             proxy_token,
             agent_cmd,
             backend=backend,
@@ -1359,7 +1365,7 @@ def run_session(
             runtime=runtime,
             cap_add=config.cap_add,
             container_name=meta.container_name,
-            proxy_port=api_proxy.port if api_proxy else None,
+            proxy_ports=proxy_ports,
             add_host_gateway=bool(kubectl_mounts),
             paste_interceptor=_make_paste_interceptor(backend, session_dir, config),
         )
@@ -1399,7 +1405,7 @@ def launch_sandbox_shell(
     sandbox_session_dir.mkdir(parents=True, exist_ok=True)
     try:
         with (
-            _maybe_api_server(None, None, backend) as api_proxy,
+            _maybe_api_server(None, None) as proxy_ports,
             _kubectl_context(config, sandbox_session_dir, kubectl_proxy_token) as kubectl_mounts,
         ):
             mounts = list(mounts) + kubectl_mounts
@@ -1409,13 +1415,12 @@ def launch_sandbox_shell(
                 workdir=str(repo),
                 hatchery_repo=str(repo),
                 name="sandbox",
-                mutator=None,
                 proxy_token=None,
                 agent_cmd=[],
                 runtime=runtime,
                 _command_override=[shell],
                 _interactive=True,
-                proxy_port=api_proxy.port if api_proxy else None,
+                proxy_ports=proxy_ports,
                 add_host_gateway=bool(kubectl_mounts),
             )
     finally:

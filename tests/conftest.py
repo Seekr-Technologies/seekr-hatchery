@@ -76,21 +76,20 @@ class SpyBackend(agent.AgentBackend):
 
     # ── Docker infrastructure ─────────────────────────────────────────────
 
-    def make_header_mutator(self):
+    def proxy_endpoints(self):
         def _mutate(headers):
             out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")}
             out["x-api-key"] = "spy-key"
             return out
 
-        return _mutate
+        from seekr_hatchery.agents.agent_backend import ProxyEndpoint
+
+        return [ProxyEndpoint(key="default", header_mutator=_mutate, target_host="api.spy.com")]
 
     def construct_mounts(self, session_dir: Path | None) -> list[mount.Mount]:
         return []
 
-    def proxy_kwargs(self) -> dict:
-        return {}
-
-    def container_env(self, proxy_token: str, proxy_port: int) -> dict[str, str]:
+    def container_env(self, proxy_token: str, proxy_ports: dict[str, int]) -> dict[str, str]:
         return {}
 
     # ── Lifecycle hooks ───────────────────────────────────────────────────
