@@ -6,13 +6,13 @@ parent logger.  :func:`configure_logging` attaches handlers and sets the level o
 the parent so every child is covered.
 
 Two-tier file logging:
-  - Global fallback: ``~/.hatchery/hatchery.log`` (always on)
-  - Per-task: ``session_dir / "hatchery.log"`` (swapped in by :func:`task_log`)
+  - Global: ``~/.hatchery/hatchery.log`` (always on, accumulates everything)
+  - Per-task: ``session_dir / "hatchery.log"`` (added by :func:`task_log`
+    during a task run, alongside the global handler)
 """
 
 import logging
 import logging.handlers
-import sys
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
@@ -72,20 +72,27 @@ class _HatcheryFormatter(logging.Formatter):
 def configure_logging(level: str) -> None:
     """Configure the package logger with a console handler and an always-on file handler.
 
-    Console (stderr) handler respects *level* (default WARNING).  The file handler
+    Console (stderr) handler respects *level* (default INFO).  The file handler
     always captures at least INFO, so debuggable signal is on disk even when the
     console is quiet.  When ``level="DEBUG"``, both handlers get DEBUG.
 
+    Call :func:`detach_console_handler` before launching the agent sandbox —
+    console output after that point corrupts the agent's TUI.
+
     The file is ``~/.hatchery/hatchery.log`` (rotating, 5 MB × 3 backups).
     """
-    console_level = getattr(logging, level.upper(), logging.WARNING)
+    import sys
+
+    log_level = getattr(logging, level.upper(), logging.INFO)
 
     # File handler always captures at least INFO — this is the whole point.
-    file_level = min(logging.INFO, console_level)
+    file_level = min(logging.INFO, log_level)
 
-    # Console handler (stderr) — colored when TTY.
+    # Console handler (stderr) — colored when TTY.  Useful for pre-launch
+    # diagnostics (Docker build, volume creation, proxy start).  Must be
+    # detached before the agent sandbox launches.
     console = logging.StreamHandler(sys.stderr)
-    console.setLevel(console_level)
+    console.setLevel(log_level)
     console.setFormatter(ui.ColorFormatter(_LOG_FMT, datefmt=_LOG_DATEFMT))
     _pkg_logger.addHandler(console)
 
@@ -102,8 +109,18 @@ def configure_logging(level: str) -> None:
         # Non-fatal: console logging still works.
         pass
 
-    # Logger level must be the min so both handlers get messages.
-    _pkg_logger.setLevel(min(console_level, file_level))
+    _pkg_logger.setLevel(min(log_level, file_level))
+
+
+def detach_console_handler() -> None:
+    """Remove all console (StreamHandler) handlers from the package logger.
+
+    Call this right before launching the agent sandbox so logging output
+    doesn't corrupt the agent's TUI.  File handlers are untouched.
+    """
+    for h in list(_pkg_logger.handlers):
+        if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.handlers.RotatingFileHandler):
+            _pkg_logger.removeHandler(h)
 
 
 def get_file_handlers() -> list[logging.handlers.RotatingFileHandler]:
@@ -113,15 +130,16 @@ def get_file_handlers() -> list[logging.handlers.RotatingFileHandler]:
 
 @contextmanager
 def task_log(session_dir: Path, level: int = logging.INFO) -> Generator[None, None, None]:
-    """Route hatchery file logs to the task's own log for the duration of a run.
+    """Add a per-task file handler for the duration of a run.
 
-    Swaps the global file handler (~/.hatchery/hatchery.log) for a per-task
-    handler at ``session_dir / "hatchery.log"``.  Because a hatchery process
-    is single-task, the per-task file is clean and complete for that task —
-    no cross-task interleaving even if two hatchery spawns run concurrently.
+    Adds ``session_dir / "hatchery.log"`` alongside the global file handler.
+    Both files receive all messages during the run.  The per-task file is a
+    clean, complete record for that task alone — no cross-task interleaving
+    even if two hatchery spawns run concurrently.  The global file accumulates
+    everything across all commands and tasks.
 
-    The global handler is restored on exit so non-task commands continue
-    logging to the global file.
+    The per-task handler is removed on exit; the global handler is never
+    touched.
     """
     session_dir.mkdir(parents=True, exist_ok=True)
     task_fh = logging.handlers.RotatingFileHandler(
@@ -131,16 +149,9 @@ def task_log(session_dir: Path, level: int = logging.INFO) -> Generator[None, No
     )
     task_fh.setLevel(level)
     task_fh.setFormatter(_HatcheryFormatter(_LOG_FMT, datefmt=_LOG_DATEFMT))
-
-    global_handlers = get_file_handlers()
-    for gh in global_handlers:
-        _pkg_logger.removeHandler(gh)
-
     _pkg_logger.addHandler(task_fh)
     try:
         yield
     finally:
         _pkg_logger.removeHandler(task_fh)
         task_fh.close()
-        for gh in global_handlers:
-            _pkg_logger.addHandler(gh)

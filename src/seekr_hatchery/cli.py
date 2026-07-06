@@ -208,6 +208,10 @@ def _launch(
     "mark done?", "wrap up?") is CLI-domain and lives here.
     """
     with logging_.task_log(meta.session_dir):
+        # Detach the console handler before the agent launches — console
+        # output after this point corrupts the agent's TUI.  File handlers
+        # (global + per-task) continue logging.
+        logging_.detach_console_handler()
         features = sessions.launch(
             meta,
             kind=kind,
@@ -411,9 +415,9 @@ class AliasedGroup(click.Group):
 @click.version_option(version=_version, prog_name="hatchery")
 @click.option(
     "--log-level",
-    default="WARNING",
+    default="INFO",
     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"]),
-    help="Set log verbosity (default: WARNING)",
+    help="Set log verbosity (default: INFO)",
 )
 def cli(log_level: str) -> None:
     """AI coding agent task orchestration."""

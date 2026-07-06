@@ -285,25 +285,28 @@ Hatchery always writes logs to disk — no flags needed. The file handler captur
 **INFO** level by default, so proxy requests, RBAC decisions, and session lifecycle
 events are on disk even when the console is quiet.
 
+Console output (stderr) is shown during startup (Docker build, volume creation,
+proxy start) and automatically detached before the agent sandbox launches so it
+doesn't corrupt the agent's TUI.
+
 **Two-tier file logging:**
 
-- **Global fallback** — `~/.hatchery/hatchery.log` (rotating, 5 MB × 3 backups).
-  Catches startup, taskless commands (`list`, `status`, `config`), and anything
-  outside a task run.
-- **Per-task** — when a task launches, the file handler switches to
-  `~/.hatchery/tasks/<repo-id>/<name>/hatchery.log` for the duration of the run,
-  then restores the global handler. Because each hatchery process is single-task,
-  the per-task file is clean and complete for that task — no cross-task interleaving
-  even if two hatchery spawns run concurrently.
+- **Global** — `~/.hatchery/hatchery.log` (rotating, 5 MB × 3 backups).
+  Accumulates everything across all commands and tasks.
+- **Per-task** — when a task launches, a per-task handler is added alongside
+  the global one at `~/.hatchery/tasks/<repo-id>/<name>/hatchery.log`. Both files
+  receive all messages during the run. The per-task file is a clean, complete
+  record for that task alone — no cross-task interleaving even if two hatchery
+  spawns run concurrently.
 
-Use `--log-level DEBUG` to see verbose output on the console **and** capture DEBUG
-in the log file:
+Use `--log-level DEBUG` to see verbose output on the console (pre-launch) **and**
+capture DEBUG in the log file:
 
 ```
 hatchery --log-level DEBUG new my-task
 ```
 
-Available levels: `DEBUG`, `INFO`, `WARNING` (default), `ERROR`.
+Available levels: `DEBUG`, `INFO` (default), `WARNING`, `ERROR`.
 
 ### Viewing logs
 

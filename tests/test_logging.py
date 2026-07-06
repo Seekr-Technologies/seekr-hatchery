@@ -2,12 +2,38 @@
 
 import logging
 import logging.handlers
+from pathlib import Path
 
 import pytest
 
 import seekr_hatchery.cli as cli
 import seekr_hatchery.constants as constants
 import seekr_hatchery.logging_ as logging_
+
+# ---------------------------------------------------------------------------
+# Shared fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def clean_logger(monkeypatch: pytest.MonkeyPatch):
+    """Reset the seekr_hatchery logger to a pristine state before each test."""
+    logger = logging.getLogger("seekr_hatchery")
+    saved_handlers = logger.handlers[:]
+    saved_level = logger.level
+    logger.handlers = []
+    yield logger
+    logger.handlers = saved_handlers
+    logger.setLevel(saved_level)
+
+
+@pytest.fixture()
+def hatchery_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Patch constants.HATCHERY_DIR to a temp dir and return it."""
+    d = tmp_path / ".hatchery"
+    monkeypatch.setattr(constants, "HATCHERY_DIR", d)
+    return d
+
 
 # ---------------------------------------------------------------------------
 # configure_logging
@@ -17,75 +43,58 @@ import seekr_hatchery.logging_ as logging_
 class TestConfigureLogging:
     """Tests for the always-on file handler and console level behavior."""
 
-    @pytest.fixture()
-    def clean_logger(self, monkeypatch: pytest.MonkeyPatch):
-        """Reset the hatchery logger to a pristine state before each test."""
-        logger = logging.getLogger("seekr_hatchery")
-        saved_handlers = logger.handlers[:]
-        saved_level = logger.level
-        logger.handlers = []
-        yield logger
-        logger.handlers = saved_handlers
-        logger.setLevel(saved_level)
-
-    def test_file_handler_always_created(self, clean_logger, tmp_path, monkeypatch):
+    def test_file_handler_always_created(self, clean_logger, hatchery_dir):
         """configure_logging always adds a RotatingFileHandler, even at WARNING."""
-        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path / ".hatchery")
         logging_.configure_logging("WARNING")
         logger = logging.getLogger("seekr_hatchery")
         file_handlers = [h for h in logger.handlers if isinstance(h, logging.handlers.RotatingFileHandler)]
         assert len(file_handlers) == 1
 
-    def test_file_handler_captures_info_at_warning_console(self, clean_logger, tmp_path, monkeypatch):
+    def test_file_handler_captures_info_at_warning_console(self, clean_logger, hatchery_dir):
         """File handler captures INFO even when console is at WARNING."""
-        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path / ".hatchery")
         logging_.configure_logging("WARNING")
         logger = logging.getLogger("seekr_hatchery")
         logger.info("test-info-message")
 
-        log_file = tmp_path / ".hatchery" / "hatchery.log"
+        log_file = hatchery_dir / "hatchery.log"
         assert log_file.exists()
         content = log_file.read_text()
         assert "test-info-message" in content
 
-    def test_console_does_not_show_info_at_warning(self, clean_logger, tmp_path, monkeypatch, capsys):
+    def test_console_does_not_show_info_at_warning(self, clean_logger, hatchery_dir, capsys):
         """Console handler at WARNING does not emit INFO to stderr."""
-        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path / ".hatchery")
         logging_.configure_logging("WARNING")
         logger = logging.getLogger("seekr_hatchery")
         logger.info("should-not-appear-on-console")
         captured = capsys.readouterr()
         assert "should-not-appear-on-console" not in captured.err
 
-    def test_debug_level_enables_debug_in_file(self, clean_logger, tmp_path, monkeypatch):
+    def test_debug_level_enables_debug_in_file(self, clean_logger, hatchery_dir):
         """At --log-level DEBUG, the file handler captures DEBUG messages."""
-        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path / ".hatchery")
         logging_.configure_logging("DEBUG")
         logger = logging.getLogger("seekr_hatchery")
         logger.debug("test-debug-message")
 
-        log_file = tmp_path / ".hatchery" / "hatchery.log"
+        log_file = hatchery_dir / "hatchery.log"
         content = log_file.read_text()
         assert "test-debug-message" in content
 
-    def test_log_file_location(self, clean_logger, tmp_path, monkeypatch):
+    def test_log_file_location(self, clean_logger, hatchery_dir):
         """Log file lives at ~/.hatchery/hatchery.log."""
-        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path / ".hatchery")
         logging_.configure_logging("INFO")
         logger = logging.getLogger("seekr_hatchery")
         logger.info("trigger")
 
-        assert (tmp_path / ".hatchery" / "hatchery.log").exists()
+        assert (hatchery_dir / "hatchery.log").exists()
 
-    def test_file_handler_appends_across_calls(self, clean_logger, tmp_path, monkeypatch):
+    def test_file_handler_appends_across_calls(self, clean_logger, hatchery_dir):
         """Successive log writes append to the same file."""
-        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path / ".hatchery")
         logging_.configure_logging("INFO")
         logger = logging.getLogger("seekr_hatchery")
         logger.info("first-message")
         logger.info("second-message")
 
-        content = (tmp_path / ".hatchery" / "hatchery.log").read_text()
+        content = (hatchery_dir / "hatchery.log").read_text()
         assert "first-message" in content
         assert "second-message" in content
 
@@ -143,20 +152,8 @@ class TestLogsCommand:
 class TestTaskLog:
     """task_log context manager routes file logs to the task's session dir."""
 
-    @pytest.fixture()
-    def clean_logger(self, monkeypatch: pytest.MonkeyPatch):
-        """Reset the hatchery logger to a pristine state before each test."""
-        logger = logging.getLogger("seekr_hatchery")
-        saved_handlers = logger.handlers[:]
-        saved_level = logger.level
-        logger.handlers = []
-        yield logger
-        logger.handlers = saved_handlers
-        logger.setLevel(saved_level)
-
-    def test_task_log_writes_to_session_dir(self, clean_logger, tmp_path, monkeypatch):
+    def test_task_log_writes_to_session_dir(self, clean_logger, hatchery_dir, tmp_path):
         """During task_log, file output goes to session_dir/hatchery.log, not the global file."""
-        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path / ".hatchery")
         logging_.configure_logging("INFO")
         logger = logging.getLogger("seekr_hatchery.proxy")
 
@@ -168,9 +165,8 @@ class TestTaskLog:
         assert task_log.exists()
         assert "task-log-message" in task_log.read_text()
 
-    def test_task_log_restores_global_handler(self, clean_logger, tmp_path, monkeypatch):
-        """After task_log exits, the global file handler is restored."""
-        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path / ".hatchery")
+    def test_task_log_restores_global_handler(self, clean_logger, hatchery_dir, tmp_path):
+        """After task_log exits, the task handler is removed and the global handler remains."""
         logging_.configure_logging("INFO")
         logger = logging.getLogger("seekr_hatchery.proxy")
 
@@ -178,24 +174,79 @@ class TestTaskLog:
         session_dir = tmp_path / "session"
         with logging_.task_log(session_dir):
             logger.info("during-task")
+            task_handlers = [
+                h
+                for h in logging_.get_file_handlers()
+                if str(getattr(h, "baseFilename", "")) == str(session_dir / "hatchery.log")
+            ]
+            assert len(task_handlers) == 1
 
+        # After exit, task handler is gone, global handler still there
         global_handlers_after = logging_.get_file_handlers()
         assert global_handlers_before == global_handlers_after
-        # Global handler should be functional again
+        # Global handler still works
         logger.info("after-task")
-        global_log = tmp_path / ".hatchery" / "hatchery.log"
+        global_log = hatchery_dir / "hatchery.log"
         assert "after-task" in global_log.read_text()
 
-    def test_task_log_does_not_write_to_global(self, clean_logger, tmp_path, monkeypatch):
-        """Logs emitted inside task_log don't appear in the global file."""
-        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path / ".hatchery")
+    def test_task_log_writes_to_both_global_and_task(self, clean_logger, hatchery_dir, tmp_path):
+        """During task_log, logs go to both the global file and the per-task file."""
         logging_.configure_logging("INFO")
         logger = logging.getLogger("seekr_hatchery.proxy")
 
         session_dir = tmp_path / "session"
         with logging_.task_log(session_dir):
-            logger.info("should-not-be-global")
+            logger.info("dual-write-message")
 
-        global_log = tmp_path / ".hatchery" / "hatchery.log"
-        global_content = global_log.read_text()
-        assert "should-not-be-global" not in global_content
+        task_log_file = session_dir / "hatchery.log"
+        global_log = hatchery_dir / "hatchery.log"
+        assert "dual-write-message" in task_log_file.read_text()
+        assert "dual-write-message" in global_log.read_text()
+
+
+# ---------------------------------------------------------------------------
+# detach_console_handler
+# ---------------------------------------------------------------------------
+
+
+class TestDetachConsoleHandler:
+    """detach_console_handler removes console handlers but keeps file handlers."""
+
+    def test_removes_console_keeps_file(self, clean_logger, hatchery_dir):
+        """After detach, console is gone but file handler remains."""
+        logging_.configure_logging("INFO")
+
+        handlers = logging.getLogger("seekr_hatchery").handlers
+        # StreamHandler but NOT RotatingFileHandler = console handler
+        console_handlers = [
+            h
+            for h in handlers
+            if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.handlers.RotatingFileHandler)
+        ]
+        file_handlers = [h for h in handlers if isinstance(h, logging.handlers.RotatingFileHandler)]
+        assert len(console_handlers) == 1
+        assert len(file_handlers) == 1
+
+        logging_.detach_console_handler()
+
+        handlers = logging.getLogger("seekr_hatchery").handlers
+        console_handlers = [
+            h
+            for h in handlers
+            if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.handlers.RotatingFileHandler)
+        ]
+        file_handlers = [h for h in handlers if isinstance(h, logging.handlers.RotatingFileHandler)]
+        assert len(console_handlers) == 0
+        assert len(file_handlers) == 1
+
+    def test_file_still_works_after_detach(self, clean_logger, hatchery_dir, capsys):
+        """File logging continues to work after console is detached."""
+        logging_.configure_logging("INFO")
+        logger = logging.getLogger("seekr_hatchery.proxy")
+
+        logging_.detach_console_handler()
+        logger.info("after-detach")
+
+        captured = capsys.readouterr()
+        assert "after-detach" not in captured.err
+        assert "after-detach" in (hatchery_dir / "hatchery.log").read_text()
