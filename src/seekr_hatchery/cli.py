@@ -20,6 +20,7 @@ from click.shell_completion import CompletionItem
 import seekr_hatchery.agents as agent
 import seekr_hatchery.docker as docker
 import seekr_hatchery.git as git
+import seekr_hatchery.logging_ as logging_
 import seekr_hatchery.seeded_volumes as seeded_volumes
 import seekr_hatchery.sessions as sessions
 import seekr_hatchery.ui as ui
@@ -29,24 +30,7 @@ from seekr_hatchery.constants import DEFAULT_BASE, DOCKER_CONFIG
 from seekr_hatchery.includes import IncludeEntry, load_include_entries
 from seekr_hatchery.utils import open_for_editing
 
-logger = logging.getLogger("hatchery")
-
-
-def configure_logging(level: str, log_file: str | None = None) -> None:
-    numeric = getattr(logging, level.upper(), logging.WARNING)
-    fmt = logging.Formatter("%(asctime)s  %(levelname)-8s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-
-    handler: logging.Handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(ui.ColorFormatter("%(asctime)s  %(levelname)-8s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
-    logger.addHandler(handler)
-
-    if log_file:
-        fh = logging.FileHandler(log_file)
-        fh.setFormatter(fmt)
-        logger.addHandler(fh)
-
-    logger.setLevel(numeric)
-
+logger = logging.getLogger(__name__)
 
 try:
     _version = importlib.metadata.version("seekr-hatchery")
@@ -225,17 +209,22 @@ def _launch(
     the user. The post-exit interaction ("did the task complete?",
     "mark done?", "wrap up?") is CLI-domain and lives here.
     """
-    features = sessions.launch(
-        meta,
-        kind=kind,
-        backend=backend,
-        runtime=runtime,
-        main_branch=main_branch,
-        session_id=session_id,
-        no_cache=no_cache,
-        include_repos=include_repos,
-        prompt_note=prompt_note,
-    )
+    with logging_.task_log(meta.session_dir):
+        # Detach the console handler before the agent launches — console
+        # output after this point corrupts the agent's TUI.  File handlers
+        # (global + per-task) continue logging.
+        logging_.detach_console_handler()
+        features = sessions.launch(
+            meta,
+            kind=kind,
+            backend=backend,
+            runtime=runtime,
+            main_branch=main_branch,
+            session_id=session_id,
+            no_cache=no_cache,
+            include_repos=include_repos,
+            prompt_note=prompt_note,
+        )
     if meta.is_chat:
         _chat_post_exit(meta.name, meta.repo_path)
     else:
@@ -432,14 +421,13 @@ class AliasedGroup(click.Group):
 @click.version_option(version=_version, prog_name="hatchery")
 @click.option(
     "--log-level",
-    default="WARNING",
+    default="INFO",
     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"]),
-    help="Set log verbosity (default: WARNING)",
+    help="Set log verbosity (default: INFO)",
 )
-@click.option("--log-file", type=click.Path(), default=None, help="Also write logs to this file")
-def cli(log_level: str, log_file: str | None) -> None:
+def cli(log_level: str) -> None:
     """AI coding agent task orchestration."""
-    configure_logging(log_level, log_file)
+    logging_.configure_logging(log_level)
     sessions.migrate_db()
     if not os.environ.get("_HATCHERY_COMPLETE"):
         update = _check_for_update()
@@ -970,6 +958,56 @@ def cmd_shell(name: str) -> None:
     shell = os.environ.get("SHELL", "bash")
     ui.note(f"Opening shell in {meta.worktree_path}  (exit with Ctrl-D or 'exit')")
     subprocess.run([shell], cwd=meta.worktree_path)
+
+
+# ---------------------------------------------------------------------------
+# Logs command
+# ---------------------------------------------------------------------------
+
+
+@cli.command("logs")
+@click.argument("name", required=False, type=TASK_NAME)
+@click.option("-n", "--lines", default=50, help="Number of lines to show (default: 50)")
+@click.option("-f", "--follow", is_flag=True, help="Follow the log file (like tail -f)")
+def cmd_logs(name: str | None, lines: int, follow: bool) -> None:
+    """View or follow the hatchery log file.
+
+    With a task name, shows that task's log (per-task log at
+    ~/.hatchery/tasks/<repo-id>/<name>/hatchery.log).  Without a name,
+    falls back to the global log at ~/.hatchery/hatchery.log.
+    """
+    if name:
+        repo, _ = git.git_root_or_cwd()
+        meta = sessions.load(repo, name)
+        log_path = meta.session_dir / "hatchery.log"
+    else:
+        log_path = logging_.log_file_path()
+
+    if not log_path.exists() or log_path.stat().st_size == 0:
+        ui.info(f"No log file found at {log_path}")
+        ui.note("Logs are created on the next hatchery command — run any command first.")
+        return
+
+    if follow:
+        ui.note(f"Following {log_path}  (Ctrl-C to stop)")
+        try:
+            subprocess.run(["tail", "-n", str(lines), "-f", str(log_path)])
+        except KeyboardInterrupt:
+            pass
+    else:
+        try:
+            result = subprocess.run(
+                ["tail", "-n", str(lines), str(log_path)],
+                capture_output=True,
+                text=True,
+            )
+            click.echo(result.stdout, nl=False)
+        except FileNotFoundError:
+            # Fallback if tail isn't available
+            with open(log_path) as f:
+                all_lines = f.readlines()
+            for line in all_lines[-lines:]:
+                click.echo(line, nl=False)
 
 
 # ---------------------------------------------------------------------------

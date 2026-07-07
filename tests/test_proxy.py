@@ -1,6 +1,7 @@
 """Unit tests for the host-side API key proxy."""
 
 import http.client
+import logging
 import threading
 import time
 from urllib.parse import urlparse
@@ -541,3 +542,63 @@ class TestProxyWebSocketRelay:
             headers_lower = {k.lower(): v for k, v in resp.getheaders()}
             assert headers_lower.get("upgrade", "").lower() == "websocket"
             assert headers_lower.get("sec-websocket-accept") == "abc123=="
+
+
+# ---------------------------------------------------------------------------
+# test_proxy_logging
+# ---------------------------------------------------------------------------
+
+
+class TestProxyLogging:
+    """Proxy logs requests, responses, and errors at appropriate levels."""
+
+    def test_401_rejection_logged_at_info(self, caplog):
+        """Token mismatch emits an INFO log with method and path."""
+
+        with caplog.at_level(logging.INFO, logger="seekr_hatchery"):
+            with proxy.api_server(_make_api_key_mutator("real-key"), _TOKEN) as server:
+                port = server.port
+                _wait_for_port(port)
+                conn = http.client.HTTPConnection("localhost", port)
+                conn.request("GET", "/v1/models", headers={"x-api-key": "wrong-token"})
+                conn.getresponse().read()
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("401" in m and "rejected" in m for m in messages)
+
+    def test_request_and_response_logged_at_info(self, caplog):
+        """A successful proxied request emits INFO logs for request and response."""
+
+        pool = _MockPool()
+        with caplog.at_level(logging.INFO, logger="seekr_hatchery"):
+            with proxy.api_server(_make_api_key_mutator("real-key"), _TOKEN, _pool=pool) as server:
+                port = server.port
+                _wait_for_port(port)
+                conn = http.client.HTTPConnection("localhost", port)
+                conn.request("GET", "/v1/models", headers={"x-api-key": _TOKEN})
+                conn.getresponse().read()
+
+        messages = [r.getMessage() for r in caplog.records]
+        # Request log
+        assert any("proxy:" in m and "/v1/models" in m and "→" in m for m in messages)
+        # Response log (200)
+        assert any("proxy:" in m and "200" in m for m in messages)
+
+    def test_upstream_error_logged_at_warning(self, caplog):
+        """An upstream connection error emits a WARNING log."""
+
+        # Pool that raises on urlopen
+        class _ErrorPool:
+            def urlopen(self, *a, **kw):
+                raise ConnectionError("upstream unreachable")
+
+        with caplog.at_level(logging.WARNING, logger="seekr_hatchery"):
+            with proxy.api_server(_make_api_key_mutator("real-key"), _TOKEN, _pool=_ErrorPool()) as server:
+                port = server.port
+                _wait_for_port(port)
+                conn = http.client.HTTPConnection("localhost", port)
+                conn.request("GET", "/v1/models", headers={"x-api-key": _TOKEN})
+                conn.getresponse().read()
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("upstream error" in m for m in messages)

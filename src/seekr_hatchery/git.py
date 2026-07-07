@@ -11,7 +11,7 @@ from seekr_hatchery.constants import WORKTREES_SUBDIR
 from seekr_hatchery.includes import IncludeEntry
 from seekr_hatchery.utils import run
 
-logger = logging.getLogger("hatchery")
+logger = logging.getLogger(__name__)
 
 
 def _resolve_main_repo(repo: Path) -> Path:

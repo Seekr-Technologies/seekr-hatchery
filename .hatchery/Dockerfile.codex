@@ -35,8 +35,8 @@ RUN npm config set prefix '/home/hatchery/.npm-global' \
 # =============================================================================
 
 # ── Python / uv ───────────────────────────────────────────────────────────────
-# COPY --from=ghcr.io/astral-sh/uv:0.10.7 /uv /uvx /bin/
-# ENV UV_PROJECT_ENVIRONMENT=/home/hatchery/.venv
+COPY --from=ghcr.io/astral-sh/uv:0.10.7 /uv /uvx /bin/
+ENV UV_PROJECT_ENVIRONMENT=/home/hatchery/.venv
 
 # ── Go ────────────────────────────────────────────────────────────────────────
 # COPY --from=golang:1.24 /usr/local/go /usr/local/go
@@ -56,29 +56,27 @@ RUN npm config set prefix '/home/hatchery/.npm-global' \
 #     && rm -rf /var/lib/apt/lists/*
 # USER hatchery
 
-# ── kubectl ───────────────────────────────────────────────────────────────────
-# Uncomment to enable kubectl inside the sandbox.
-# Required when using the `kubernetes:` feature in .hatchery/docker.yaml.
-# Bump the version tag to match your cluster's minor version (±1 is supported).
-# COPY --from=bitnami/kubectl:1.32.3 /opt/bitnami/kubectl/bin/kubectl /usr/local/bin/kubectl
-
 # ── Podman-in-Podman (DinD) ──────────────────────────────────────────────────
 # Uncomment this section AND set `dind: true` in .hatchery/docker.yaml.
-# USER root
-# RUN apt-get update && apt-get install -y --no-install-recommends \
-#     podman podman-docker sudo fuse-overlayfs uidmap \
-#     && rm -rf /var/lib/apt/lists/*
-# RUN printf 'hatchery:1001:64535\n' > /etc/subuid \
-#     && printf 'hatchery:1001:64535\n' > /etc/subgid
-# RUN mkdir -p /root/.config/containers \
-#     && printf '[storage]\ndriver = "overlay"\n\n[storage.options.overlay]\nmount_program = "/usr/bin/fuse-overlayfs"\n' \
-#         > /root/.config/containers/storage.conf \
-#     && printf '[containers]\nnetns = "host"\ncgroups = "disabled"\ndefault_sysctls = []\n[engine]\ncgroup_manager = "cgroupfs"\nevents_logger = "file"\n' \
-#         > /root/.config/containers/containers.conf
-# RUN echo 'hatchery ALL=(root) NOPASSWD: /usr/bin/podman' \
-#         > /etc/sudoers.d/hatchery-podman \
-#     && chmod 440 /etc/sudoers.d/hatchery-podman
-# RUN printf '#!/bin/sh\nexec sudo -n /usr/bin/podman "$@"\n' \
-#         > /usr/local/bin/podman \
-#     && chmod +x /usr/local/bin/podman
-# USER hatchery
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    podman podman-docker sudo fuse-overlayfs uidmap \
+    && rm -rf /var/lib/apt/lists/*
+RUN printf 'hatchery:1001:64535\n' > /etc/subuid \
+    && printf 'hatchery:1001:64535\n' > /etc/subgid
+RUN mkdir -p /root/.config/containers \
+    && printf '[storage]\ndriver = "overlay"\n\n[storage.options.overlay]\nmount_program = "/usr/bin/fuse-overlayfs"\n' \
+        > /root/.config/containers/storage.conf \
+    && printf '[containers]\nnetns = "host"\ncgroups = "disabled"\ndefault_sysctls = []\n[engine]\ncgroup_manager = "cgroupfs"\nevents_logger = "file"\n' \
+        > /root/.config/containers/containers.conf
+RUN echo 'hatchery ALL=(root) NOPASSWD: /usr/bin/podman' \
+        > /etc/sudoers.d/hatchery-podman \
+    && chmod 440 /etc/sudoers.d/hatchery-podman
+RUN printf '#!/bin/sh\nexec sudo -n /usr/bin/podman "$@"\n' \
+        > /usr/local/bin/podman \
+    && chmod +x /usr/local/bin/podman
+USER hatchery
+
+# =============================================================================
+
+WORKDIR /repo

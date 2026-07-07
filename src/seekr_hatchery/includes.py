@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-logger = logging.getLogger("hatchery")
+logger = logging.getLogger(__name__)
 
 IncludeMode = Literal["worktree", "rw", "ro"]
 

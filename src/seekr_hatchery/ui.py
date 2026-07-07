@@ -194,9 +194,14 @@ _LEVEL_COLORS: dict[str, dict[str, object]] = {
 
 
 class ColorFormatter(logging.Formatter):
-    """Colorizes the levelname when stderr is a TTY."""
+    """Colorizes the levelname when stderr is a TTY.
+
+    Also strips the ``seekr_hatchery.`` package prefix from logger names.
+    """
 
     def format(self, record: logging.LogRecord) -> str:
+        if record.name.startswith("seekr_hatchery."):
+            record.name = record.name[len("seekr_hatchery.") :]
         formatted = super().format(record)
         if not sys.stderr.isatty():
             return formatted

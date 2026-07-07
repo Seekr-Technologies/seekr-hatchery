@@ -33,7 +33,7 @@ import time
 import tty
 from typing import Callable, Protocol, runtime_checkable
 
-logger = logging.getLogger("hatchery")
+logger = logging.getLogger(__name__)
 
 # Default chunk size for os.read calls.  Big enough that OSC 5522 frames
 # (≤4096 bytes pre-base64) usually arrive whole, small enough that the

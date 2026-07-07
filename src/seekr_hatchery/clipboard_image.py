@@ -32,7 +32,7 @@ from typing import Callable
 
 import seekr_hatchery.ui as ui
 
-logger = logging.getLogger("hatchery")
+logger = logging.getLogger(__name__)
 
 
 # ── Magic-byte sniff ──────────────────────────────────────────────────────────

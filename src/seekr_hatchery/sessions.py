@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from seekr_hatchery.agents.agent_backend import AgentBackend
     from seekr_hatchery.docker import Runtime
 
-logger = logging.getLogger("hatchery")
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "IncludeEntry",

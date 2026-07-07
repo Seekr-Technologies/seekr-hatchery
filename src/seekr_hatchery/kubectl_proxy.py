@@ -51,7 +51,7 @@ from typing import Any
 
 from pydantic import BaseModel, field_validator
 
-logger = logging.getLogger("hatchery")
+logger = logging.getLogger(__name__)
 
 _CHUNK_SIZE = 8192
 
@@ -313,6 +313,14 @@ class _RBACProxyHandler(http.server.BaseHTTPRequestHandler):
             if not check_rbac(self.rules, verbs, resource, namespace):
                 verb_str = "/".join(verbs)
                 ns_str = namespace if namespace else "<cluster-scoped>"
+                logger.info(
+                    "kubectl RBAC: 403 denied — %s %s (%s '%s' in '%s')",
+                    self.command,
+                    self.path,
+                    verb_str,
+                    resource,
+                    ns_str,
+                )
                 self._send_json(
                     403,
                     f"kubectl: {verb_str} '{resource}' in namespace '{ns_str}' is not permitted",
@@ -320,8 +328,8 @@ class _RBACProxyHandler(http.server.BaseHTTPRequestHandler):
                 return
 
         # ── 4. Forward to kubectl proxy ───────────────────────────────────────
-        logger.debug(
-            "kubectl RBAC proxy: %s %s → kubectl-proxy:%d",
+        logger.info(
+            "kubectl RBAC: %s %s → kubectl-proxy:%d (allowed)",
             self.command,
             self.path,
             self.kubectl_proxy_port,
@@ -341,8 +349,8 @@ class _RBACProxyHandler(http.server.BaseHTTPRequestHandler):
             conn.request(self.command, self.path, body=body, headers=forward_headers)
             resp = conn.getresponse()
 
-            logger.debug(
-                "kubectl RBAC proxy: upstream returned %d for %s %s",
+            logger.info(
+                "kubectl RBAC: upstream returned %d for %s %s",
                 resp.status,
                 self.command,
                 self.path,
@@ -382,7 +390,7 @@ class _RBACProxyHandler(http.server.BaseHTTPRequestHandler):
                 self.wfile.flush()
 
         except Exception as exc:
-            logger.debug("kubectl rbac proxy: upstream error: %s", exc)
+            logger.warning("kubectl RBAC: upstream error: %s", exc)
             try:
                 self._send_json(502, f"Bad Gateway: {exc}")
             except Exception:

@@ -21,7 +21,7 @@ from pydantic import BaseModel, ValidationError
 import seekr_hatchery.agents as agent
 import seekr_hatchery.ui as ui
 
-logger = logging.getLogger("hatchery")
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------

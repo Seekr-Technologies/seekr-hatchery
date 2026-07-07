@@ -75,6 +75,7 @@ class TestHelp:
             "done",
             "exec",
             "ls | list",
+            "logs",
             "new",
             "resume",
             "sandbox",

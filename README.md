@@ -88,6 +88,7 @@ When the agent starts a new task it is given a task file at `.hatchery/tasks/YYY
 | `status <name>` | Show task metadata and the full task file |
 | `self update` | Upgrade hatchery to the latest release |
 | `config edit` | Open `~/.hatchery/config.json` in `$EDITOR` with validation |
+| `logs` | View or follow the hatchery log file (`~/.hatchery/hatchery.log`) |
 
 All `new` / `resume` commands accept:
 - `--no-docker` — skip the container even if a Dockerfile is present
@@ -265,15 +266,55 @@ Then output `"$top\n$hatchery_line\n$bottom"` when `$hatchery_line` is non-empty
 
 ~/.hatchery/
   meta.json                # DB schema version
+  hatchery.log             # always-on rotating log file (5 MB × 3 backups)
   tasks/                   # all per-task state, namespaced by repository
     <repo-id>/             # stable hash of the repo path
       <task-name>/         # one directory per task
+        hatchery.log        # per-task log file (during runs)
         meta.json          # task metadata
         codex_auth.json    # Docker session: proxy-token auth config
         proxy_token        # Docker session: stable API proxy UUID
         COMMIT_EDITMSG     # Docker session: git sentinel file
         ORIG_HEAD          # Docker session: git sentinel file
         git_ptr            # Docker session: container-path .git pointer
+```
+
+## Logging
+
+Hatchery always writes logs to disk — no flags needed. The file handler captures
+**INFO** level by default, so proxy requests, RBAC decisions, and session lifecycle
+events are on disk even when the console is quiet.
+
+Console output (stderr) is shown during startup (Docker build, volume creation,
+proxy start) and automatically detached before the agent sandbox launches so it
+doesn't corrupt the agent's TUI.
+
+**Two-tier file logging:**
+
+- **Global** — `~/.hatchery/hatchery.log` (rotating, 5 MB × 3 backups).
+  Accumulates everything across all commands and tasks.
+- **Per-task** — when a task launches, a per-task handler is added alongside
+  the global one at `~/.hatchery/tasks/<repo-id>/<name>/hatchery.log`. Both files
+  receive all messages during the run. The per-task file is a clean, complete
+  record for that task alone — no cross-task interleaving even if two hatchery
+  spawns run concurrently.
+
+Use `--log-level DEBUG` to see verbose output on the console (pre-launch) **and**
+capture DEBUG in the log file:
+
+```
+hatchery --log-level DEBUG new my-task
+```
+
+Available levels: `DEBUG`, `INFO` (default), `WARNING`, `ERROR`.
+
+### Viewing logs
+
+```
+hatchery logs              # global log (last 50 lines)
+hatchery logs my-task      # per-task log
+hatchery logs -n 100       # last 100 lines
+hatchery logs my-task -f   # follow a task's log (tail -f)
 ```
 
 ## Development
