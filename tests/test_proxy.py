@@ -602,3 +602,168 @@ class TestProxyLogging:
 
         messages = [r.getMessage() for r in caplog.records]
         assert any("upstream error" in m for m in messages)
+
+
+# ---------------------------------------------------------------------------
+# test_sse_filter
+# ---------------------------------------------------------------------------
+
+
+class TestSSEFilterUnit:
+    """Unit tests for the _SSEFilter class."""
+
+    def test_drops_empty_object_event(self):
+        f = proxy._SSEFilter()
+        out = f.feed(b"data: {}\n\n")
+        assert out == b""
+
+    def test_keeps_valid_chunk(self):
+        f = proxy._SSEFilter()
+        event = b'data: {"choices":[]}\n\n'
+        assert f.feed(event) == event
+
+    def test_keeps_done_sentinel(self):
+        f = proxy._SSEFilter()
+        event = b"data: [DONE]\n\n"
+        assert f.feed(event) == event
+
+    def test_keeps_error_event(self):
+        f = proxy._SSEFilter()
+        event = b'data: {"error":{"message":"oops"}}\n\n'
+        assert f.feed(event) == event
+
+    def test_keeps_non_json_data(self):
+        f = proxy._SSEFilter()
+        event = b"data: not-json-at-all\n\n"
+        assert f.feed(event) == event
+
+    def test_keeps_event_without_data_line(self):
+        f = proxy._SSEFilter()
+        event = b"event: ping\n\n"
+        assert f.feed(event) == event
+
+    def test_event_split_across_chunks(self):
+        f = proxy._SSEFilter()
+        # First chunk has half the event
+        assert f.feed(b"data: {") == b""
+        # Second chunk completes it
+        out = f.feed(b"}\n\n")
+        assert out == b""
+
+    def test_valid_event_split_across_chunks(self):
+        f = proxy._SSEFilter()
+        assert f.feed(b'data: {"choi') == b""
+        out = f.feed(b'ces":[]}\n\n')
+        assert out == b'data: {"choices":[]}\n\n'
+
+    def test_multiple_events_one_chunk(self):
+        f = proxy._SSEFilter()
+        out = f.feed(b'data: {}\n\ndata: {"choices":[]}\n\ndata: [DONE]\n\n')
+        assert out == b'data: {"choices":[]}\n\ndata: [DONE]\n\n'
+
+    def test_mixed_valid_and_empty_events(self):
+        f = proxy._SSEFilter()
+        out = f.feed(
+            b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+            b"data: {}\n\n"
+            b'data: {"choices":[{"delta":{"content":"there"}}]}\n\n'
+            b"data: {}\n\n"
+            b"data: [DONE]\n\n"
+        )
+        assert out == (
+            b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+            b'data: {"choices":[{"delta":{"content":"there"}}]}\n\n'
+            b"data: [DONE]\n\n"
+        )
+
+    def test_flush_forwards_remaining(self):
+        f = proxy._SSEFilter()
+        f.feed(b"data: incomplete")
+        assert f.flush() == b"data: incomplete\n\n"
+
+    def test_flush_drops_trailing_empty_object_without_terminator(self):
+        """A trailing data: {} without a \\n\\n terminator must still be
+        filtered on flush — vLLM may close the stream right after the error."""
+        f = proxy._SSEFilter()
+        # Feed a valid event (gets split out), then the empty object with NO terminator
+        f.feed(b'data: {"choices":[]}\n\n')
+        f.feed(b"data: {}")
+        assert f.flush() == b""
+
+    def test_whitespace_variants_filtered(self):
+        f = proxy._SSEFilter()
+        assert f.feed(b"data:  {}\n\n") == b""
+        assert f.feed(b"data:{}\n\n") == b""
+
+    def test_crlf_event_terminator(self):
+        """SSE spec permits CRLF line endings; ``\\r\\n\\r\\n`` must split events."""
+        f = proxy._SSEFilter()
+        # Empty object with CRLF terminator must be dropped
+        assert f.feed(b"data: {}\r\n\r\n") == b""
+        # Valid event with CRLF terminator must pass through (normalized to \n\n)
+        out = f.feed(b'data: {"choices":[]}\r\n\r\n')
+        assert out == b'data: {"choices":[]}\n\n'
+
+    def test_mixed_crlf_and_lf_events(self):
+        """A stream mixing CRLF and LF terminators must split both correctly."""
+        f = proxy._SSEFilter()
+        out = f.feed(
+            b'data: {}\r\n\r\ndata: {"choices":[{"delta":{"content":"x"}}]}\n\ndata: {}\r\n\r\ndata: [DONE]\n\n'
+        )
+        assert out == (b'data: {"choices":[{"delta":{"content":"x"}}]}\n\ndata: [DONE]\n\n')
+
+
+class TestSSEFilterIntegration:
+    """End-to-end: SSE with data: {} events through the proxy."""
+
+    def test_empty_object_filtered_from_sse_stream(self):
+        """The proxy must strip data: {} events from SSE responses so the
+        AI SDK's Zod schema doesn't reject them."""
+        sse_body = (
+            b'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n'
+            b"data: {}\n\n"
+            b'data: {"choices":[{"delta":{"content":" world"}}]}\n\n'
+            b"data: {}\n\n"
+            b"data: [DONE]\n\n"
+        )
+        pool = _MockPool(
+            responses=[
+                _MockPoolResp(
+                    headers={"content-type": "text/event-stream"},
+                    body=sse_body,
+                )
+            ]
+        )
+        with proxy.api_server(_make_bearer_mutator("real-key"), _TOKEN, _pool=pool) as server:
+            port = server.port
+            _wait_for_port(port)
+            conn = http.client.HTTPConnection("localhost", port)
+            conn.request("POST", "/v1/chat/completions", headers={"Authorization": f"Bearer {_TOKEN}"})
+            resp = conn.getresponse()
+            body = resp.read()
+
+        assert b"data: {}\n\n" not in body
+        assert b'{"choices":[{"delta":{"content":"hello"}}]}' in body
+        assert b'{"choices":[{"delta":{"content":" world"}}]}' in body
+        assert b"[DONE]" in body
+
+    def test_non_sse_response_not_filtered(self):
+        """Non-SSE responses must pass through untouched (no event boundary parsing)."""
+        body = b'{"not": "sse", "data": "{}"}'
+        pool = _MockPool(
+            responses=[
+                _MockPoolResp(
+                    headers={"content-type": "application/json"},
+                    body=body,
+                )
+            ]
+        )
+        with proxy.api_server(_make_bearer_mutator("real-key"), _TOKEN, _pool=pool) as server:
+            port = server.port
+            _wait_for_port(port)
+            conn = http.client.HTTPConnection("localhost", port)
+            conn.request("POST", "/v1/chat/completions", headers={"Authorization": f"Bearer {_TOKEN}"})
+            resp = conn.getresponse()
+            body_out = resp.read()
+
+        assert body_out == body

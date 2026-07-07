@@ -24,6 +24,7 @@ Public interface::
 
 import http.client
 import http.server
+import json
 import logging
 import socketserver
 import ssl
@@ -60,6 +61,83 @@ _HOP_BY_HOP = frozenset(
 def _sanitize_header(value: str) -> str:
     """Strip CR/LF to prevent HTTP response splitting."""
     return value.replace("\r", "").replace("\n", "")
+
+
+class _SSEFilter:
+    """Filter malformed SSE events from a streaming response.
+
+    Some on-prem vLLM forks emit ``data: {}`` (empty JSON object) in the SSE
+    stream when an internal error occurs mid-generation (e.g. CUDA OOM, engine
+    crash).  The AI SDK's Zod schema rejects ``{}`` because it requires either
+    ``choices`` (array) or ``error`` (object), causing the stream to die and
+    the agent to stop.
+
+    This filter buffers the stream, extracts complete SSE events (separated by
+    ``\\n\\n``), and drops any event whose ``data:`` payload JSON-parses to an
+    object with neither ``choices`` nor ``error``.  The ``[DONE]`` sentinel and
+    all valid events pass through untouched.  Non-SSE responses are not
+    affected (the filter is only instantiated for ``text/event-stream``).
+    """
+
+    def __init__(self) -> None:
+        self._buffer = b""
+
+    def feed(self, chunk: bytes) -> bytes:
+        """Add a chunk and return the filtered bytes to forward to the client."""
+        self._buffer += chunk
+        out = b""
+        while True:
+            # SSE events are terminated by a blank line.  The spec permits LF
+            # (``\n\n``) or CRLF (``\r\n\r\n``) endings; find whichever comes
+            # first so both are handled.  ``find`` returns -1 when absent.
+            lf = self._buffer.find(b"\n\n")
+            crlf = self._buffer.find(b"\r\n\r\n")
+            if lf == -1 and crlf == -1:
+                break
+            if crlf != -1 and (lf == -1 or crlf < lf):
+                event, self._buffer = self._buffer[:crlf], self._buffer[crlf + 4 :]
+            else:
+                event, self._buffer = self._buffer[:lf], self._buffer[lf + 2 :]
+            if self._should_keep(event):
+                out += event.rstrip(b"\r") + b"\n\n"
+        return out
+
+    def flush(self) -> bytes:
+        """Return any remaining buffered data, filtering if it's a complete event."""
+        if not self._buffer:
+            return b""
+        remaining = self._buffer
+        self._buffer = b""
+        # The remaining buffer may be a complete event without a trailing
+        # blank line (stream closed mid-event), or a partial event.  Try to
+        # filter it as a complete event first; if _should_keep rejects it,
+        # drop it.  If _should_keep accepts it, forward with normalized
+        # terminator.  Partial non-event data (not starting with "data:") is
+        # forwarded as-is.
+        if self._should_keep(remaining):
+            return remaining.rstrip(b"\r") + b"\n\n"
+        return b""
+
+    @staticmethod
+    def _should_keep(event: bytes) -> bool:
+        """Return True if the event should be forwarded to the client."""
+        data_parts: list[bytes] = []
+        for line in event.split(b"\n"):
+            if line.startswith(b"data:"):
+                data_parts.append(line[5:].lstrip())
+        if not data_parts:
+            return True
+        payload = b"\n".join(data_parts)
+        if payload.strip() == b"[DONE]":
+            return True
+        try:
+            obj = json.loads(payload)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return True
+        if isinstance(obj, dict) and "choices" not in obj and "error" not in obj:
+            logger.debug("proxy: dropping malformed SSE event (empty/invalid JSON object)")
+            return False
+        return True
 
 
 class _ProxyHandler(http.server.BaseHTTPRequestHandler):
@@ -290,16 +368,28 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
         # Stream response body in chunks (handles SSE correctly).
+        # For SSE responses, filter out malformed events (e.g. ``data: {}``)
+        # that some on-prem vLLM forks emit on internal errors.  The AI SDK's
+        # Zod schema rejects these, killing the stream and stopping the agent.
+        content_type = resp.headers.get("content-type", "")
+        sse_filter = _SSEFilter() if "text/event-stream" in content_type else None
         try:
             while True:
                 chunk = resp.read(_CHUNK_SIZE)
                 if not chunk:
                     break
+                if sse_filter is not None:
+                    chunk = sse_filter.feed(chunk)
                 self.wfile.write(chunk)
                 self.wfile.flush()
         except Exception:
             pass
         finally:
+            if sse_filter is not None:
+                remaining = sse_filter.flush()
+                if remaining:
+                    self.wfile.write(remaining)
+                    self.wfile.flush()
             try:
                 resp.drain_conn()
             except Exception:
