@@ -162,6 +162,17 @@ def create_include_worktrees(includes: list[IncludeEntry], name: str, base: str 
     fetched so the worktree starts from the latest upstream commit.  When *base*
     is supplied, ``_fetch_if_remote`` fetches the owning remote first if the ref
     is a remote-tracking branch (e.g. ``origin/main``).
+
+    Safety: if an include already has a local ``hatchery/<name>`` branch from a
+    prior task run, attach the worktree to that branch *without* ``-B`` so any
+    unmerged include-side work is preserved. Only fresh branches are seeded
+    from *base*. If the worktree directory is already present, it's left
+    entirely alone — it may hold uncommitted work, so we never
+    force-remove it. If the branch exists but the worktree directory is
+    gone (e.g. removed at a prior mark-done/archive), ``git worktree
+    prune`` clears any stale administrative metadata (safe — it only
+    touches bookkeeping for worktrees whose directories no longer exist)
+    before a plain ``add``.
     """
     branch = f"hatchery/{name}"
     for entry in includes:
@@ -170,6 +181,16 @@ def create_include_worktrees(includes: list[IncludeEntry], name: str, base: str 
         path = entry.path
         if (path / ".git").exists():
             worktree = path / WORKTREES_SUBDIR / name
+            if branch_exists(path, branch):
+                if worktree.exists():
+                    # Already attached — may hold uncommitted work, leave it.
+                    logger.debug("Include worktree already present for %s at %s", branch, worktree)
+                    continue
+                # Pre-existing branch, missing worktree dir — attach, don't reset.
+                run(["git", "worktree", "prune"], cwd=path, check=False)
+                run(["git", "worktree", "add", str(worktree), branch], cwd=path)
+                logger.debug("Include worktree attached to existing %s at %s", branch, worktree)
+                continue
             if base is not None:
                 repo_base = base
                 _fetch_if_remote(repo_base, path)
@@ -213,6 +234,44 @@ def delete_include_branches(includes: list[IncludeEntry], name: str) -> None:
         path = entry.path
         if (path / ".git").exists():
             delete_branch(path, branch)
+
+
+def branch_exists(repo: Path, branch: str) -> bool:
+    """Return True iff *branch* exists as a local ref in *repo*.
+
+    Qualifies the lookup with ``refs/heads/`` so a tag of the same name
+    cannot satisfy the check.
+    """
+    if not branch:
+        return False
+    result = run(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+        cwd=repo,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def remote_branch_exists(repo: Path, branch: str, remote: str = "origin") -> bool:
+    """Return True iff *branch* exists as a remote-tracking ref under *remote*.
+
+    Does NOT fetch — callers wanting fresh data should call ``fetch_remote``
+    first.
+    """
+    if not branch:
+        return False
+    result = run(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/remotes/{remote}/{branch}"],
+        cwd=repo,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def fetch_remote(repo: Path, remote: str = "origin") -> bool:
+    """Best-effort ``git fetch <remote>``. Returns True on success."""
+    result = run(["git", "fetch", remote], cwd=repo, check=False)
+    return result.returncode == 0
 
 
 def get_default_branch(repo: Path) -> str:

@@ -5,7 +5,7 @@ delete / launch / merge_include_updates."""
 import json
 import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
@@ -657,6 +657,240 @@ class TestSessionCreateChat:
         assert _git(git_repo, "rev-parse", "--verify", "hatchery/chat-1", check=False).returncode != 0
 
 
+class TestRestoreWorktreeIfNeeded:
+    """sessions.restore_worktree_if_needed — degraded-state resume recovery.
+
+    Worktree creation is patched to a stub so tests don't need a real git
+    repo; the call args carry the decisions we care about.
+    """
+
+    @staticmethod
+    def _meta(tmp_path, *, status="in-progress", no_worktree=False, worktree_exists=False):
+        wt = tmp_path / "wt"
+        if worktree_exists:
+            wt.mkdir(exist_ok=True)
+        meta = sessions.SessionMeta(
+            name="t",
+            repo=str(tmp_path),
+            worktree=str(wt),
+            branch="hatchery/t",
+            no_worktree=no_worktree,
+            type="task",
+            session_id="sid",
+            status=status,
+        )
+        sessions.save(meta)
+        return meta
+
+    def _confirm(self, value: bool):
+        return lambda base: value
+
+    def test_noop_when_worktree_exists(self, fake_tasks_db, tmp_path):
+        meta = self._meta(tmp_path, worktree_exists=True)
+        with patch("seekr_hatchery.sessions.git.create_worktree") as mock_create:
+            note = sessions.restore_worktree_if_needed(meta, confirm_recreate=self._confirm(True))
+        assert note == ""
+        assert not mock_create.called
+
+    def test_noop_when_no_worktree_flag_set(self, fake_tasks_db, tmp_path):
+        meta = self._meta(tmp_path, no_worktree=True)
+        with patch("seekr_hatchery.sessions.git.create_worktree") as mock_create:
+            note = sessions.restore_worktree_if_needed(meta, confirm_recreate=self._confirm(True))
+        assert note == ""
+        assert not mock_create.called
+
+    def test_archived_auto_recreates_without_confirm(self, fake_tasks_db, tmp_path):
+        meta = self._meta(tmp_path, status="archived")
+        confirm = MagicMock(return_value=False)
+        with (
+            patch("seekr_hatchery.sessions.git.branch_exists", return_value=True),
+            patch("seekr_hatchery.sessions.git.create_worktree") as mock_create,
+            patch("seekr_hatchery.sessions.git.create_include_worktrees"),
+        ):
+            note = sessions.restore_worktree_if_needed(meta, confirm_recreate=confirm)
+        assert note == ""
+        assert not confirm.called
+        assert mock_create.called
+        assert sessions.load(meta.repo_path, meta.name).status == "in-progress"
+
+    def test_in_progress_confirm_true_recreates(self, fake_tasks_db, tmp_path):
+        meta = self._meta(tmp_path, status="in-progress")
+        with (
+            patch("seekr_hatchery.sessions.git.branch_exists", return_value=True),
+            patch("seekr_hatchery.sessions.git.create_worktree") as mock_create,
+            patch("seekr_hatchery.sessions.git.create_include_worktrees"),
+        ):
+            note = sessions.restore_worktree_if_needed(meta, confirm_recreate=self._confirm(True))
+        assert note == ""
+        assert mock_create.called
+
+    def test_in_progress_confirm_false_raises_cancelled(self, fake_tasks_db, tmp_path):
+        meta = self._meta(tmp_path, status="in-progress")
+        with (
+            patch("seekr_hatchery.sessions.git.create_worktree") as mock_create,
+            pytest.raises(sessions.SessionCancelled),
+        ):
+            sessions.restore_worktree_if_needed(meta, confirm_recreate=self._confirm(False))
+        assert not mock_create.called
+
+    def test_missing_branch_recreates_from_default(self, fake_tasks_db, tmp_path):
+        meta = self._meta(tmp_path, status="archived")
+        with (
+            patch("seekr_hatchery.sessions.git.branch_exists", return_value=False),
+            patch("seekr_hatchery.sessions.git.fetch_remote", return_value=True),
+            patch("seekr_hatchery.sessions.git.remote_branch_exists", return_value=False),
+            patch("seekr_hatchery.sessions.git.get_default_branch", return_value="main"),
+            patch("seekr_hatchery.sessions.git.create_worktree") as mock_create,
+            patch("seekr_hatchery.sessions.git.create_include_worktrees"),
+        ):
+            note = sessions.restore_worktree_if_needed(meta, confirm_recreate=self._confirm(True))
+        args, kwargs = mock_create.call_args
+        base = kwargs.get("base") if "base" in kwargs else args[3]
+        assert base == "main"
+        assert meta.branch in note
+
+    def test_fetch_failure_warns_unconfirmed_instead_of_missing(self, fake_tasks_db, tmp_path):
+        """When fetch_remote fails, we can't confirm the branch is actually
+        absent from origin — the warning/note must say so instead of
+        claiming confirmed absence (which could otherwise mask a silent
+        recreate-from-wrong-base that loses prior work)."""
+        meta = self._meta(tmp_path, status="archived")
+        with (
+            patch("seekr_hatchery.sessions.git.branch_exists", return_value=False),
+            patch("seekr_hatchery.sessions.git.fetch_remote", return_value=False) as mock_fetch,
+            patch("seekr_hatchery.sessions.git.remote_branch_exists") as mock_remote_exists,
+            patch("seekr_hatchery.sessions.git.get_default_branch", return_value="main"),
+            patch("seekr_hatchery.sessions.git.create_worktree") as mock_create,
+            patch("seekr_hatchery.sessions.git.create_include_worktrees"),
+            patch("seekr_hatchery.sessions.ui.warn") as mock_warn,
+        ):
+            note = sessions.restore_worktree_if_needed(meta, confirm_recreate=self._confirm(True))
+        assert mock_fetch.called
+        # remote_branch_exists must not be trusted once fetch failed.
+        assert not mock_remote_exists.called
+        args, kwargs = mock_create.call_args
+        base = kwargs.get("base") if "base" in kwargs else args[3]
+        assert base == "main"
+        warn_text = mock_warn.call_args[0][0]
+        assert "fetch failed" in warn_text
+        assert "couldn't verify" in warn_text
+        assert "fetch failed" in note
+        assert "was missing (locally and on origin)" not in note  # that's the confirmed-missing wording
+
+
+class TestResolveRecreateBase:
+    """sessions._resolve_recreate_base — base-ref resolution tiers."""
+
+    def test_local_branch_exists_returns_branch(self, tmp_path):
+        with patch("seekr_hatchery.sessions.git.branch_exists", return_value=True):
+            base, missing, remote_check_failed = sessions._resolve_recreate_base(tmp_path, "hatchery/t")
+        assert (base, missing, remote_check_failed) == ("hatchery/t", False, False)
+
+    def test_missing_locally_found_on_origin(self, tmp_path):
+        with (
+            patch("seekr_hatchery.sessions.git.branch_exists", return_value=False),
+            patch("seekr_hatchery.sessions.git.fetch_remote", return_value=True),
+            patch("seekr_hatchery.sessions.git.remote_branch_exists", return_value=True),
+        ):
+            base, missing, remote_check_failed = sessions._resolve_recreate_base(tmp_path, "hatchery/t")
+        assert (base, missing, remote_check_failed) == ("origin/hatchery/t", False, False)
+
+    def test_missing_everywhere_falls_back_to_local_default(self, tmp_path):
+        with (
+            patch("seekr_hatchery.sessions.git.branch_exists", side_effect=[False, True]),
+            patch("seekr_hatchery.sessions.git.fetch_remote", return_value=True),
+            patch("seekr_hatchery.sessions.git.remote_branch_exists", return_value=False),
+            patch("seekr_hatchery.sessions.git.get_default_branch", return_value="main"),
+        ):
+            base, missing, remote_check_failed = sessions._resolve_recreate_base(tmp_path, "hatchery/t")
+        assert (base, missing, remote_check_failed) == ("main", True, False)
+
+    def test_missing_everywhere_falls_back_to_origin_default(self, tmp_path):
+        with (
+            patch("seekr_hatchery.sessions.git.branch_exists", side_effect=[False, False]),
+            patch("seekr_hatchery.sessions.git.fetch_remote", return_value=True),
+            patch("seekr_hatchery.sessions.git.remote_branch_exists", side_effect=[False, True]),
+            patch("seekr_hatchery.sessions.git.get_default_branch", return_value="main"),
+        ):
+            base, missing, remote_check_failed = sessions._resolve_recreate_base(tmp_path, "hatchery/t")
+        assert (base, missing, remote_check_failed) == ("origin/main", True, False)
+
+    def test_fetch_failure_skips_remote_checks_and_flags_unconfirmed(self, tmp_path):
+        with (
+            patch("seekr_hatchery.sessions.git.branch_exists", side_effect=[False, False]),
+            patch("seekr_hatchery.sessions.git.fetch_remote", return_value=False),
+            patch("seekr_hatchery.sessions.git.remote_branch_exists") as mock_remote_exists,
+            patch("seekr_hatchery.sessions.git.get_default_branch", return_value="main"),
+        ):
+            base, missing, remote_check_failed = sessions._resolve_recreate_base(tmp_path, "hatchery/t")
+        assert not mock_remote_exists.called
+        assert (base, missing, remote_check_failed) == ("main", True, True)
+
+
+class TestUpdateTaskFileStatus:
+    """update_task_file_status rewrites the front-matter Status line."""
+
+    def _write_task(self, worktree, name, status):
+        d = worktree / ".hatchery" / "tasks"
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / f"2026-01-01-{name}.md"
+        p.write_text(f"# Task: {name}\n\n**Status**: {status}\n**Branch**: x\n\nBody\n")
+        return p
+
+    def test_replaces_complete_with_in_progress(self, tmp_path):
+        p = self._write_task(tmp_path, "t", "complete")
+        sessions.update_task_file_status(tmp_path, "t", "in-progress")
+        assert "**Status**: in-progress" in p.read_text()
+        assert "**Status**: complete" not in p.read_text()
+
+    def test_noop_when_already_matches(self, tmp_path):
+        p = self._write_task(tmp_path, "t", "in-progress")
+        before = p.read_text()
+        sessions.update_task_file_status(tmp_path, "t", "in-progress")
+        assert p.read_text() == before
+
+    def test_noop_when_file_missing(self, tmp_path):
+        # Doesn't raise.
+        sessions.update_task_file_status(tmp_path, "no-such", "in-progress")
+
+    def test_preserves_other_lines(self, tmp_path):
+        p = self._write_task(tmp_path, "t", "complete")
+        sessions.update_task_file_status(tmp_path, "t", "in-progress")
+        text = p.read_text()
+        assert "# Task: t" in text
+        assert "**Branch**: x" in text
+        assert "Body" in text
+
+
+class TestResolveResumeKind:
+    @staticmethod
+    def _meta(tmp_path, session_id):
+        meta = sessions.SessionMeta(
+            name="t",
+            repo=str(tmp_path),
+            worktree=str(tmp_path / "wt"),
+            branch="hatchery/t",
+            type="task",
+            session_id=session_id,
+        )
+        sessions.save(meta)
+        return meta
+
+    def test_session_id_present_returns_resume(self, tmp_path, fake_tasks_db):
+        meta = self._meta(tmp_path, session_id="sid-xyz")
+        assert sessions.resolve_resume_kind(meta) == ("resume", "sid-xyz")
+
+    def test_session_id_empty_generates_and_persists(self, tmp_path, fake_tasks_db):
+        meta = self._meta(tmp_path, session_id="")
+        kind, sid = sessions.resolve_resume_kind(meta)
+        assert kind == "new"
+        assert sid  # non-empty uuid
+        assert meta.session_id == sid  # mutated in-memory
+        # And persisted to disk so subsequent resumes are idempotent.
+        reloaded = sessions.load(meta.repo_path, meta.name)
+        assert reloaded.session_id == sid
+
+
 class TestSessionLaunch:
     """sessions.launch — hook order, status transitions, prompt construction.
 
@@ -683,9 +917,17 @@ class TestSessionLaunch:
         return meta
 
     @staticmethod
-    def _drive(meta, *, kind, backend):
+    def _drive(meta, *, kind, backend, prompt_note=""):
         with patch("seekr_hatchery.sessions.subprocess.run"):
-            return sessions.launch(meta, kind=kind, backend=backend, runtime=None, main_branch="main", session_id="sid")
+            return sessions.launch(
+                meta,
+                kind=kind,
+                backend=backend,
+                runtime=None,
+                main_branch="main",
+                session_id="sid",
+                prompt_note=prompt_note,
+            )
 
     def test_new_fires_hooks_in_order(self, spy_backend, fake_tasks_db, tmp_path, no_input):
         meta = self._meta(tmp_path)
@@ -710,6 +952,39 @@ class TestSessionLaunch:
         assert names == ["build_finalize_command", "background_threads"]
         _, _sid, _sys, wrap_up, _docker, _wd = spy_backend.calls[0]
         assert wrap_up == sessions._WRAP_UP_PROMPT
+
+    def test_finalize_prepends_prompt_note(self, spy_backend, fake_tasks_db, tmp_path, no_input):
+        """When the resume produced a prompt_note (e.g. branch recreated), the
+        wrap-up agent should also see it — not just the original launch."""
+        meta = self._meta(tmp_path)
+        self._drive(meta, kind="finalize", backend=spy_backend, prompt_note="NOTE-X")
+        _, _sid, _sys, wrap_up, _docker, _wd = spy_backend.calls[0]
+        assert wrap_up.startswith("NOTE-X")
+        assert sessions._WRAP_UP_PROMPT in wrap_up
+
+    def test_resume_succeeds_when_task_file_missing(self, spy_backend, fake_tasks_db, tmp_path, no_input):
+        """Regression: resume must not crash if the task file is absent from
+        the worktree (e.g. agent switched branches or deleted it). The fallback
+        prompt should mention the task name so the agent knows what's missing.
+        """
+        meta = self._meta(tmp_path)
+        # Intentionally do NOT create .hatchery/tasks/ — file is missing.
+        self._drive(meta, kind="resume", backend=spy_backend)
+        build = next(c for c in spy_backend.calls if c[0] == "build_resume_command")
+        _, _sid, _system, initial, _docker, _wd = build
+        assert meta.name in initial
+        assert "not present" in initial or "missing" in initial
+
+    def test_resume_prompt_note_prepended(self, spy_backend, fake_tasks_db, tmp_path, no_input):
+        """prompt_note threads through launch() and ends up at the start of
+        the agent's initial prompt — used to surface branch-recreated etc."""
+        meta = self._meta(tmp_path)
+        (meta.worktree_path / ".hatchery" / "tasks").mkdir(parents=True, exist_ok=True)
+        (meta.worktree_path / ".hatchery" / "tasks" / sessions.task_file_name(meta.name)).write_text("body\n")
+        self._drive(meta, kind="resume", backend=spy_backend, prompt_note="HELLO-NOTE")
+        build = next(c for c in spy_backend.calls if c[0] == "build_resume_command")
+        _, _sid, _system, initial, _docker, _wd = build
+        assert initial.startswith("HELLO-NOTE")
 
     def test_chat_uses_empty_prompts(self, spy_backend, fake_tasks_db, tmp_path, no_input):
         meta = self._meta(tmp_path, is_chat=True, no_worktree=True)

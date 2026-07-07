@@ -1,5 +1,6 @@
 """Click CLI entry point — group + all 7 commands."""
 
+import functools
 import importlib.metadata
 import json
 import logging
@@ -216,6 +217,7 @@ def _launch(
     session_id: str,
     no_cache: bool = False,
     include_repos: list[IncludeEntry] | None = None,
+    prompt_note: str = "",
 ) -> None:
     """CLI-layer launch: ``sessions.launch`` followed by the post-exit prompts.
 
@@ -232,6 +234,7 @@ def _launch(
         session_id=session_id,
         no_cache=no_cache,
         include_repos=include_repos,
+        prompt_note=prompt_note,
     )
     if meta.is_chat:
         _chat_post_exit(meta.name, meta.repo_path)
@@ -244,6 +247,7 @@ def _launch(
             sandbox=bool(runtime),
             no_worktree=meta.no_worktree,
             features=features,
+            prompt_note=prompt_note,
         )
 
 
@@ -255,6 +259,7 @@ def _post_exit_check(
     sandbox: bool = False,
     no_worktree: bool = False,
     features: list[str] | None = None,
+    prompt_note: str = "",
 ) -> None:
     task_path = sessions.find_task_file(worktree, name)
     if task_path and task_path.exists():
@@ -296,6 +301,7 @@ def _post_exit_check(
             main_branch=main_branch,
             session_id=meta.session_id,
             include_repos=include_repos,
+            prompt_note=prompt_note,
         )
     elif choice == "x":
         _do_delete(sessions.load(repo, name))
@@ -671,6 +677,28 @@ def cmd_chat(name: str | None, agent_name: str, no_commit: bool) -> None:
     )
 
 
+def _confirm_recreate_worktree(name: str, branch: str, prev_status: str, base: str) -> bool:
+    """y/N prompt for ``restore_worktree_if_needed``'s ``confirm_recreate`` callback.
+
+    Takes every value it needs as an explicit argument (no closure over
+    ``cmd_resume``'s locals) so it's independently callable/testable.
+    Raises ``SessionCancelled`` on EOF/interrupt instead of leaking a
+    traceback (e.g. non-interactive stdin in CI).
+    """
+    if base == branch:
+        msg = f"Worktree for '{name}' is missing (task marked {prev_status}). Recreate from branch {branch}? [y/N] "
+    else:
+        msg = (
+            f"Worktree for '{name}' is missing (task marked {prev_status}); "
+            f"branch {branch} is also missing — "
+            f"recreate from {base} instead? [y/N] "
+        )
+    try:
+        return input(msg).strip().lower() == "y"
+    except (EOFError, KeyboardInterrupt):
+        raise sessions.SessionCancelled()
+
+
 @cli.command("resume")
 @click.argument("name", type=TASK_NAME)
 @click.option("--no-docker", is_flag=True, help="Run agent directly, even if a Dockerfile is present")
@@ -731,24 +759,22 @@ def cmd_resume(
 
     backend = agent.from_kind(meta.agent)
 
-    if not meta.no_worktree and not meta.worktree_path.exists():
-        if meta.status in ("archived", "complete"):
-            label = "archived" if meta.status == "archived" else "completed"
-            ui.info(f"Re-creating worktree for {label} task '{name}'...")
-            git.create_worktree(repo, meta.branch, meta.worktree_path, meta.branch)
-            archived_includes = load_include_entries({"include": meta.include})
-            if archived_includes:
-                git.create_include_worktrees(archived_includes, name)
-            meta.status = "in-progress"
-            sessions.save(meta)
-            ui.success(f"Worktree restored: {meta.worktree_path}")
-        else:
-            ui.error(f"worktree {meta.worktree_path} does not exist.")
-            sys.exit(1)
+    # Capture pre-recovery status: restore_worktree_if_needed() flips it to
+    # "in-progress" in-place when it recreates the worktree, which would
+    # otherwise mask the "running" diagnostic below and the prompt-wording
+    # decision in _confirm_recreate_worktree.
+    prev_status = meta.status
 
-    if not meta.session_id:
-        ui.error("no session ID found for this task. Cannot resume.")
+    # Recovery for degraded state (missing worktree / branch / session_id)
+    # lives in sessions.py; the CLI only owns the user-facing y/N prompt.
+    confirm_recreate = functools.partial(_confirm_recreate_worktree, name, meta.branch, prev_status)
+
+    try:
+        prompt_note = sessions.restore_worktree_if_needed(meta, confirm_recreate=confirm_recreate)
+    except sessions.SessionCancelled:
         sys.exit(1)
+
+    launch_kind, session_id = sessions.resolve_resume_kind(meta)
 
     if not backend.supports_sessions:
         ui.note(
@@ -756,42 +782,28 @@ def cmd_resume(
             "starting a fresh session with the current task file as context."
         )
 
-    if meta.status == "running":
+    if prev_status == "running":
         ui.note(f"task '{name}' was marked as running — a previous session may have exited unexpectedly.")
 
-    # Restore Docker files if they were removed from the task branch (e.g. to
-    # keep them out of a PR).  Generate in repo root if needed, then copy into
-    # the worktree — neither location is committed.
-    if not no_docker and not meta.no_worktree:
-        agent_df = docker.dockerfile_path(meta.worktree_path, backend)
-        if not agent_df.exists():
-            ui.note(
-                "Dockerfile missing from worktree — restoring from repo root "
-                "(will not be committed to the task branch)."
-            )
-            docker.ensure_docker_files_uncommitted(repo, meta.worktree_path, backend)
+    sessions.restore_dockerfile_if_needed(meta, backend, repo, no_docker=no_docker)
 
     include_repos = load_include_entries({"include": meta.include})
 
     # Apply any --include* flags passed at resume time.
-    updates = [
-        *((IncludeEntry(path=p.resolve(), mode="worktree")) for p in include),
-        *((IncludeEntry(path=p.resolve(), mode="rw")) for p in include_rw),
-        *((IncludeEntry(path=p.resolve(), mode="ro")) for p in include_ro),
-    ]
+    updates = _cli_includes_to_entries(include, include_rw, include_ro)
     include_repos = sessions.merge_include_updates(include_repos, updates, meta)
 
     runtime = docker.resolve_runtime(repo, meta.worktree_path, no_docker, backend=backend)
-    main_branch = git.get_default_branch(repo)
     _launch(
         meta,
-        kind="resume",
+        kind=launch_kind,
         backend=backend,
         runtime=runtime,
-        main_branch=main_branch,
-        session_id=meta.session_id,
+        main_branch=git.get_default_branch(repo),
+        session_id=session_id,
         no_cache=rebuild_sandbox,
         include_repos=include_repos,
+        prompt_note=prompt_note,
     )
 
 
