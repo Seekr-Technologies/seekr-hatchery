@@ -10,6 +10,7 @@ from click.testing import CliRunner
 import seekr_hatchery.constants as constants
 import seekr_hatchery.docker as docker
 import seekr_hatchery.sessions as sessions
+import seekr_hatchery.utils as utils
 from seekr_hatchery.cli import (
     TaskNameType,
     cli,
@@ -1107,6 +1108,102 @@ class TestCliResume:
             runner.invoke(cli, ["resume", "my-task", "--no-docker"])
 
         assert not mock_ensure.called
+
+    # -- Degraded-state resume scenarios --------------------------------------
+    #
+    # These exercise CLI-only behavior (the y/N prompt, EOF/cancel handling,
+    # exit codes) against a *real* git repo via the `git_repo` fixture —
+    # base-ref resolution correctness (branch missing locally/on origin,
+    # falling back to the default branch, etc.) is unit-tested directly in
+    # test_session_io.py's TestResolveRecreateBase / TestRestoreWorktreeIfNeeded
+    # and isn't re-asserted here.
+
+    def test_resume_missing_worktree_confirm_yes_recreates(self, git_repo, fake_tasks_db):
+        """In-progress + missing worktree + 'y' at the prompt → worktree
+        is recreated (via real git) and the launch proceeds."""
+        runner = CliRunner()
+        wt = git_repo / ".hatchery" / "worktrees" / "my-task"
+        utils.run(["git", "branch", "hatchery/my-task"], cwd=git_repo)
+        meta = _resume_meta(wt, repo=str(git_repo), branch="hatchery/my-task", status="in-progress")
+        sessions.save(meta)
+
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(git_repo, True)),
+            patch("seekr_hatchery.cli._launch") as mock_launch,
+        ):
+            result = runner.invoke(cli, ["resume", "my-task", "--no-docker"], input="y\n")
+
+        assert result.exit_code == 0, result.output
+        assert wt.exists()
+        assert mock_launch.called
+
+    def test_resume_missing_worktree_eof_aborts_cleanly(self, git_repo, fake_tasks_db):
+        """Non-interactive stdin (CI / nohup): input() raises EOFError; cmd_resume
+        must convert that to SessionCancelled → exit 1, not a Python traceback."""
+        runner = CliRunner()
+        wt = git_repo / ".hatchery" / "worktrees" / "my-task"
+        utils.run(["git", "branch", "hatchery/my-task"], cwd=git_repo)
+        meta = _resume_meta(wt, repo=str(git_repo), branch="hatchery/my-task", status="in-progress")
+        sessions.save(meta)
+
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(git_repo, True)),
+            patch("seekr_hatchery.cli._launch") as mock_launch,
+        ):
+            # No input= argument → CliRunner closes stdin → input() raises EOFError.
+            result = runner.invoke(cli, ["resume", "my-task"])
+
+        assert result.exit_code == 1, result.output
+        assert not wt.exists()
+        assert not mock_launch.called
+        # No Python traceback should appear.
+        assert "Traceback" not in result.output
+
+    def test_resume_missing_worktree_confirm_no_aborts(self, git_repo, fake_tasks_db):
+        """In-progress + missing worktree + 'n' → no recreate, no launch,
+        exit 1 so shell chains stop on user-cancelled resume."""
+        runner = CliRunner()
+        wt = git_repo / ".hatchery" / "worktrees" / "my-task"
+        utils.run(["git", "branch", "hatchery/my-task"], cwd=git_repo)
+        meta = _resume_meta(wt, repo=str(git_repo), branch="hatchery/my-task", status="in-progress")
+        sessions.save(meta)
+
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(git_repo, True)),
+            patch("seekr_hatchery.cli._launch") as mock_launch,
+        ):
+            result = runner.invoke(cli, ["resume", "my-task"], input="n\n")
+
+        assert result.exit_code == 1, result.output
+        assert not wt.exists()
+        assert not mock_launch.called
+        assert "Aborted" in result.output
+
+    def test_resume_missing_session_id_falls_back_to_new(self, tmp_path, fake_tasks_db):
+        """Worktree present but session_id is empty → launch with kind='new'
+        and a freshly-generated session_id that gets persisted to meta."""
+        runner = CliRunner()
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        meta = _resume_meta(wt, session_id="")
+
+        with (
+            patch("seekr_hatchery.cli.sessions.load", return_value=meta),
+            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted"),
+            patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
+            patch("seekr_hatchery.cli._launch") as mock_launch,
+        ):
+            result = runner.invoke(cli, ["resume", "my-task"])
+
+        assert result.exit_code == 0, result.output
+        assert mock_launch.called
+        assert mock_launch.call_args.kwargs["kind"] == "new"
+        # A fresh uuid was generated and threaded into _launch.
+        sid = mock_launch.call_args.kwargs["session_id"]
+        assert sid and sid != ""
+        # And the same id is now on meta (so next resume is idempotent).
+        assert meta.session_id == sid
 
 
 # ---------------------------------------------------------------------------
