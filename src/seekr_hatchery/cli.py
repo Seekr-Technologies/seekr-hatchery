@@ -32,6 +32,9 @@ from seekr_hatchery.utils import open_for_editing
 
 logger = logging.getLogger(__name__)
 
+# Valid agent choices derived from the single source of truth in agents/__init__.py
+AGENT_CHOICES: list[str] = [b.kind.lower() for b in agent.ALL_BACKENDS]
+
 try:
     _version = importlib.metadata.version("seekr-hatchery")
 except importlib.metadata.PackageNotFoundError:
@@ -463,7 +466,7 @@ def cli(log_level: str) -> None:
     "--agent",
     "agent_name",
     default=None,
-    type=click.Choice(["codex"], case_sensitive=False),
+    type=click.Choice(AGENT_CHOICES, case_sensitive=False),
     help="Agent to use (auto-detected if not specified)",
 )
 @click.option(
@@ -619,7 +622,7 @@ def cmd_new(
     "--agent",
     "agent_name",
     default=None,
-    type=click.Choice(["codex"], case_sensitive=False),
+    type=click.Choice(AGENT_CHOICES, case_sensitive=False),
     help="Agent to use (auto-detected if not specified)",
 )
 @click.option(
