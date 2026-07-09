@@ -16,6 +16,7 @@ from seekr_hatchery.agents.codex import CodexBackend
 
 __all__ = [
     "AgentBackend",
+    "ALL_BACKENDS",
     "CONTAINER_HOME",
     "CodexBackend",
     "CODEX",
