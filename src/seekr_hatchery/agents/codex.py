@@ -19,7 +19,7 @@ from seekr_hatchery.locks import hatchery_lock
 from seekr_hatchery.mount import BindMount, Mount, SeedContext, VolumeMount
 
 if TYPE_CHECKING:
-    from seekr_hatchery.docker import Runtime
+    from seekr_hatchery.docker import ContainerRuntime
     from seekr_hatchery.models import SessionMeta
 
 logger = logging.getLogger(__name__)
@@ -95,7 +95,7 @@ def _probe_session_id(
     meta: "SessionMeta",
     *,
     docker: bool,
-    runtime: "Runtime | None",
+    runtime: "ContainerRuntime | None",
     launch_start: float,
 ) -> str | None:
     """Return codex's session UUID for this launch, or ``None`` if not yet visible.
@@ -114,7 +114,7 @@ def _probe_session_id(
 
 def _probe_session_id_docker(
     meta: "SessionMeta",
-    runtime: "Runtime",
+    runtime: "ContainerRuntime",
     launch_start: float,
 ) -> str | None:
     cmd = [runtime.binary, "exec", meta.container_name, "sh", "-c", _STAT_NEWEST_ROLLOUT_SH]
@@ -187,7 +187,7 @@ def _make_session_id_poller(
     meta: "SessionMeta",
     *,
     docker: bool,
-    runtime: "Runtime | None",
+    runtime: "ContainerRuntime | None",
     launch_start: float,
     stop: threading.Event,
 ) -> Callable[[], None]:
@@ -815,7 +815,7 @@ class CodexBackend(AgentBackend):
         meta: "SessionMeta",
         *,
         docker: bool,
-        runtime: "Runtime | None",
+        runtime: "ContainerRuntime | None",
         launch_start: float,
         stop: threading.Event,
     ) -> list[Callable[[], None]]:

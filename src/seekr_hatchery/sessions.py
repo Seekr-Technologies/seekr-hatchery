@@ -33,7 +33,7 @@ from seekr_hatchery.utils import open_for_editing, repo_id, run, to_name
 
 if TYPE_CHECKING:
     from seekr_hatchery.agents.agent_backend import AgentBackend
-    from seekr_hatchery.docker import Runtime
+    from seekr_hatchery.docker import ContainerRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -1076,7 +1076,7 @@ def launch(
     *,
     kind: Literal["new", "resume", "finalize"],
     backend: "AgentBackend",
-    runtime: "Runtime | None",
+    runtime: "ContainerRuntime | None",
     main_branch: str,
     session_id: str,
     no_cache: bool = False,

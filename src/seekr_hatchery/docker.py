@@ -8,10 +8,11 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
-from enum import Enum
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -41,14 +42,261 @@ from seekr_hatchery.utils import open_for_editing, run
 logger = logging.getLogger(__name__)
 
 
-class Runtime(Enum):
-    PODMAN = "PODMAN"
-    DOCKER = "DOCKER"
+# ── Container runtime abstraction ────────────────────────────────────────────
+#
+# ``ContainerRuntime`` mirrors ``AgentBackend``: a small ABC with one concrete
+# subclass per engine (Docker, Podman).  Engine divergence that was previously
+# scattered across inline conditionals — userns flags, label
+# disable, OOM hints — now lives on the subclass that owns it.
+#
+# ``ContainerSpec`` is the backend-agnostic model of *what* the sandbox is.
+# ``ContainerRuntime.render_run_argv(spec)`` is *how* a given engine runs it.
+
+
+@dataclass(frozen=True)
+class ContainerSpec:
+    """Backend-agnostic description of a container to run.
+
+    The spec carries every flag the old inline assembly assembled —
+    but as typed fields rather than ``cmd += [...]`` lines.  Engine-specific
+    rendering (userns, label=disable) lives on ``ContainerRuntime`` subclasses.
+    """
+
+    image: str
+    command: list[str]
+    workdir: str
+    name: str  # HATCHERY_TASK env value
+    container_name: str | None  # --name flag
+    mounts: list[Mount]
+    env: dict[str, str]  # HATCHERY_TASK, HATCHERY_REPO, agent env vars
+    cap_add: list[str] = field(default_factory=list)
+    cap_drop: list[str] = field(default_factory=list)
+    devices: list[str] = field(default_factory=list)
+    security_opt: list[str] = field(default_factory=list)
+    add_hosts: list[str] = field(default_factory=list)
+    interactive: bool = True  # add -it
+    rm: bool = True  # add --rm
+    init: bool = True  # add --init
+    command_override: list[str] | None = None
+    capture_output: bool = False  # capture_output for non-interactive override
+
+
+class ContainerRuntime(ABC):
+    """Abstract container runtime — mirrors ``AgentBackend``.
+
+    Each concrete subclass owns the engine divergence (binary name, userns
+    flags, OOM messaging).  ``render_run_argv(spec)`` turns a
+    ``ContainerSpec`` into the final ``docker``/``podman run`` argv.
+
+    The only divergence point is :meth:`_engine_flags`, which subclasses
+    override to inject engine-specific flags (e.g. Podman's ``--userns=keep-id``
+    and ``--security-opt label=disable``).  ``render_run_argv`` and ``run``
+    are concrete on the base.
+    """
+
+    @property
+    @abstractmethod
+    def binary(self) -> str:
+        """CLI binary name for this runtime (e.g. ``"docker"``, ``"podman"``)."""
+
+    @staticmethod
+    @abstractmethod
+    def available() -> bool:
+        """Return True if this runtime's daemon/CLI is reachable."""
+
+    @abstractmethod
+    def oom_hint(self, returncode: int) -> str | None:
+        """Return a human-readable OOM hint for *returncode*, or ``None``."""
+
+    # ── Engine divergence seam ───────────────────────────────────────────
+
+    def _engine_flags(self, spec: ContainerSpec) -> list[str]:
+        """Return engine-specific flags to inject before ``-w`` in the argv.
+
+        Default: no extra flags (Docker).  Subclasses override to add
+        engine-specific flags like ``--userns=keep-id`` or
+        ``--security-opt label=disable``.
+
+        Tests patch this method on a runtime instance (or the class) to
+        suppress userns in nested-container scenarios without globally
+        patching ``sys.platform``.
+        """
+        return []
+
+    # ── Shared helpers ───────────────────────────────────────────────────
+
+    def _ensure_volumes(self, mounts: list[Mount]) -> None:
+        """Create any named volumes referenced by *mounts* if they don't exist."""
+        seen: set[str] = set()
+        for m in mounts:
+            if not isinstance(m, VolumeMount) or m.name in seen:
+                continue
+            seen.add(m.name)
+            if run([self.binary, "volume", "inspect", m.name], check=False).returncode == 0:
+                continue
+            logger.debug("creating %s volume: %s", self.binary, m.name)
+            run([self.binary, "volume", "create", m.name])
+
+    # ── Concrete rendering + execution (shared by all runtimes) ──────────
+
+    def render_run_argv(self, spec: ContainerSpec) -> list[str]:
+        """Assemble the full ``<binary> run ...`` argv from *spec*."""
+        cmd: list[str] = [self.binary, "run"]
+        if spec.rm:
+            cmd.append("--rm")
+        if spec.init:
+            cmd.append("--init")
+        if spec.interactive:
+            cmd += ["-it"]
+        for m in spec.mounts:
+            cmd += mount_to_docker_args(m)
+        for key, val in spec.env.items():
+            cmd += ["-e", f"{key}={val}"]
+        for host in spec.add_hosts:
+            cmd += [f"--add-host={host}"]
+        if spec.container_name is not None:
+            cmd += ["--name", spec.container_name]
+        cmd += self._engine_flags(spec)
+        cmd += ["-w", spec.workdir]
+        cmd += _render_caps(spec)
+        cmd += _render_security_opt(spec)
+        cmd += _render_devices(spec)
+        cmd += [spec.image]
+        return cmd
+
+    def run(
+        self,
+        spec: ContainerSpec,
+        *,
+        paste_interceptor: clipboard_image.PasteInterceptor | None = None,
+    ) -> subprocess.CompletedProcess[str] | None:
+        """Execute the container described by *spec*.
+
+        For interactive agent launches, runs via ``_exec_agent`` (PTY proxy
+        when a paste interceptor is present).  For command-override mode,
+        runs via ``subprocess.run`` (with or without capture).
+        """
+        self._ensure_volumes(spec.mounts)
+        cmd = self.render_run_argv(spec)
+
+        if spec.command_override is not None:
+            cmd += wrap_cmd_for_file_mounts(spec.command_override, spec.mounts)
+            logger.debug(
+                "Launching %s container image=%r name=%r (command override)",
+                self.binary,
+                spec.image,
+                spec.name,
+            )
+            if spec.interactive:
+                subprocess.run(cmd)
+                return None
+            return subprocess.run(cmd, capture_output=spec.capture_output, text=True)
+
+        cmd += wrap_cmd_for_file_mounts(spec.command, spec.mounts)
+        logger.debug(
+            "Launching %s container image=%r name=%r workdir=%r",
+            self.binary,
+            spec.image,
+            spec.name,
+            spec.workdir,
+        )
+        returncode = _exec_agent(cmd, paste_interceptor)
+        if returncode != 0:
+            ui.warn(f"{self.binary} container exited with code {returncode}")
+            hint = self.oom_hint(returncode)
+            if hint:
+                ui.info(hint)
+        return None
+
+
+class DockerRuntime(ContainerRuntime):
+    """Docker engine backend."""
 
     @property
     def binary(self) -> str:
-        """CLI binary name for this runtime."""
-        return self.value.lower()
+        return "docker"
+
+    @staticmethod
+    def available() -> bool:
+        """Return True if the Docker daemon is reachable."""
+        logger.debug("Checking Docker availability")
+        try:
+            result = run(["docker", "info"], check=False)
+        except FileNotFoundError:
+            return False
+        return result.returncode == 0
+
+    def oom_hint(self, returncode: int) -> str | None:
+        return None
+
+
+class PodmanRuntime(ContainerRuntime):
+    """Podman engine backend."""
+
+    @property
+    def binary(self) -> str:
+        return "podman"
+
+    @staticmethod
+    def available() -> bool:
+        """Return True if the Podman CLI is reachable."""
+        logger.debug("Checking Podman availability")
+        try:
+            result = run(["podman", "info"], check=False)
+        except FileNotFoundError:
+            return False
+        return result.returncode == 0
+
+    def _engine_flags(self, spec: ContainerSpec) -> list[str]:
+        # Podman-specific outer-container flags for rootless mount permissions.
+        # --userns=keep-id maps the calling user to the same UID inside the
+        # container so bind-mounted host files are writable by the hatchery user.
+        # --security-opt label=disable suppresses SELinux/AppArmor label
+        # confinement on mounts.
+        flags: list[str] = []
+        if sys.platform == "linux":
+            flags += ["--userns=keep-id"]
+        flags += ["--security-opt", "label=disable"]
+        return flags
+
+    def oom_hint(self, returncode: int) -> str | None:
+        if returncode == 137:
+            return (
+                "Hint: the container was killed (OOM). Try increasing the Podman machine memory:\n"
+                "  podman machine stop\n"
+                "  podman machine set --memory 8192\n"
+                "  podman machine start"
+            )
+        return None
+
+
+# ── Spec rendering helpers (shared by all runtimes) ────────────────────────
+
+
+def _render_caps(spec: ContainerSpec) -> list[str]:
+    """Render --cap-drop / --cap-add flags from *spec*."""
+    cmd: list[str] = []
+    for cap in spec.cap_drop:
+        cmd += ["--cap-drop", cap]
+    for cap in spec.cap_add:
+        cmd += ["--cap-add", cap]
+    return cmd
+
+
+def _render_security_opt(spec: ContainerSpec) -> list[str]:
+    """Render --security-opt flags from *spec*."""
+    cmd: list[str] = []
+    for opt in spec.security_opt:
+        cmd += ["--security-opt", opt]
+    return cmd
+
+
+def _render_devices(spec: ContainerSpec) -> list[str]:
+    """Render --device flags from *spec*."""
+    cmd: list[str] = []
+    for dev in spec.devices:
+        cmd += ["--device", dev]
+    return cmd
 
 
 _RESOURCES = Path(__file__).parent / "resources"
@@ -271,7 +519,8 @@ def _maybe_api_server(
 
         with _maybe_api_server(mutator, token, backend) as api_proxy, \\
              _kubectl_context(config, session_dir) as kubectl_mounts:
-            _run_container(..., proxy_port=api_proxy.port if api_proxy else None)
+            spec = build_spec(..., proxy_port=api_proxy.port if api_proxy else None)
+            runtime.run(spec)
     """
     if mutator is None:
         yield None
@@ -335,27 +584,7 @@ def dockerfile_path(base: Path, backend: agent.AgentBackend) -> Path:
     return base / ".hatchery" / f"Dockerfile.{backend.kind.lower()}"
 
 
-def docker_available() -> bool:
-    """Return True if the Docker daemon is reachable."""
-    logger.debug("Checking Docker availability")
-    try:
-        result = run(["docker", "info"], check=False)
-    except FileNotFoundError:
-        return False
-    return result.returncode == 0
-
-
-def podman_available() -> bool:
-    """Return True if the Podman CLI is reachable."""
-    logger.debug("Checking Podman availability")
-    try:
-        result = run(["podman", "info"], check=False)
-    except FileNotFoundError:
-        return False
-    return result.returncode == 0
-
-
-def detect_runtime() -> Runtime:
+def detect_runtime() -> ContainerRuntime:
     """Return the preferred container runtime, or exit if none is available.
 
     Podman is preferred because it is rootless-native and its default seccomp
@@ -366,9 +595,9 @@ def detect_runtime() -> Runtime:
     fallback to Docker — the user installed Podman intentionally and should not
     be silently downgraded to the less-secure Docker runtime.
     """
-    if podman_available():
+    if PodmanRuntime.available():
         logger.debug("Using Podman as container runtime")
-        return Runtime.PODMAN
+        return PodmanRuntime()
     if shutil.which("podman") is not None:
         msg = "Podman is installed but not running."
         if sys.platform == "darwin":
@@ -376,9 +605,9 @@ def detect_runtime() -> Runtime:
             msg += "\n(or: podman machine init && podman machine start on first use)"
         ui.error(msg)
         sys.exit(1)
-    if docker_available():
+    if DockerRuntime.available():
         logger.debug("Using Docker as container runtime")
-        return Runtime.DOCKER
+        return DockerRuntime()
     ui.error(".hatchery/dockerfile exists but neither Podman nor Docker is running.")
     ui.info("Start Podman/Docker or pass --no-docker to run without the sandbox.")
     sys.exit(1)
@@ -550,7 +779,7 @@ def load_docker_config(root: Path) -> DockerConfig:
 
 def launch_context(
     meta: SessionMeta,
-    runtime: "Runtime | None",
+    runtime: "ContainerRuntime | None",
 ) -> tuple[DockerConfig | None, list[str], str]:
     """Return (config, features, container_workdir) for the launch path.
 
@@ -1005,7 +1234,7 @@ def build_docker_image(
     worktree: Path,
     image_name: str,
     backend: agent.AgentBackend,
-    runtime: Runtime = Runtime.DOCKER,
+    runtime: ContainerRuntime | None = None,
     no_cache: bool = False,
 ) -> None:
     """Build the sandbox image from the worktree's .hatchery/Dockerfile.<agent>.
@@ -1015,6 +1244,7 @@ def build_docker_image(
 
     Caller resolves *image_name* — typically ``sessions.image_name(repo, name)``.
     """
+    runtime = runtime or DockerRuntime()
     image = image_name
     worktree_dockerfile = dockerfile_path(worktree, backend)
     # Use a temporary empty directory as the build context — NOT the repo root.
@@ -1047,170 +1277,116 @@ def build_docker_image(
             ui.success("  Image built.")
 
 
-def _ensure_volumes(runtime: Runtime, mounts: list[Mount]) -> None:
-    """Create any named volumes referenced by *mounts* if they don't exist.
-
-    Both Docker and Podman auto-create missing volumes when ``run -v
-    name:/path`` is invoked, but doing it explicitly here surfaces
-    creation in the debug logs and lets future tooling (e.g. ``hatchery
-    volume prune``) recognise volumes hatchery owns.  ``volume inspect``
-    returns non-zero when the volume is missing, which is the cheapest
-    cross-runtime existence check.
-
-    For seeded VolumeMounts the launch path already handled creation
-    (and seeding) via ``prepare_volume_mounts``; this call is then a
-    no-op for them. The remaining VolumeMounts are user-config volumes
-    from docker.yaml (``task_scoped=False``, no seed) used by the
-    sandbox-shell flow.
-    """
-    seen: set[str] = set()
-    for m in mounts:
-        if not isinstance(m, VolumeMount) or m.name in seen:
-            continue
-        seen.add(m.name)
-        if run([runtime.binary, "volume", "inspect", m.name], check=False).returncode == 0:
-            continue
-        logger.debug("creating %s volume: %s", runtime.binary, m.name)
-        run([runtime.binary, "volume", "create", m.name])
+# ── Spec builder ─────────────────────────────────────────────────────────────
 
 
-def _userns_flags(runtime: Runtime) -> list[str]:
-    """Return ``--userns=keep-id`` for Podman on Linux; empty list otherwise.
+# Hardcoded capabilities for DinD containers (identical across engines).
+_DIND_CAPS: frozenset[str] = frozenset(
+    {
+        "SYS_ADMIN",
+        "MKNOD",
+        "SETUID",
+        "SETGID",
+        "CHOWN",
+        "DAC_OVERRIDE",
+        "FOWNER",
+        "SETFCAP",
+        "SYS_CHROOT",
+        "SETPCAP",
+        # OCI defaults needed for `podman build` RUN steps (crun capset)
+        "AUDIT_WRITE",
+        "FSETID",
+        "KILL",
+        "NET_BIND_SERVICE",
+        # Networking caps for bridge networking (k3d, kind, CNI)
+        "NET_ADMIN",
+        "NET_RAW",
+    }
+)
 
-    Extracted as a named function so tests can monkeypatch it without globally
-    changing ``sys.platform``, which would also suppress ``--add-host`` injection.
-    """
-    if runtime == Runtime.PODMAN and sys.platform == "linux":
-        return ["--userns=keep-id"]
-    return []
 
-
-def _run_container(
+def build_spec(
+    *,
     image: str,
     mounts: list[Mount],
     workdir: str,
-    hatchery_repo: str,
     name: str,
+    hatchery_repo: str,
+    container_name: str | None,
     mutator: Callable[[dict[str, str]], dict[str, str]] | None,
     proxy_token: str | None,
+    proxy_port: int | None,
     agent_cmd: list[str],
     backend: agent.AgentBackend = agent.CODEX,
     dind: bool = False,
-    runtime: Runtime = Runtime.DOCKER,
-    _command_override: list[str] | None = None,
-    _interactive: bool = False,
     cap_add: list[str] | None = None,
-    container_name: str | None = None,
-    proxy_port: int | None = None,
     add_host_gateway: bool = False,
-    paste_interceptor: clipboard_image.PasteInterceptor | None = None,
-) -> subprocess.CompletedProcess[str] | None:
-    """Assemble and execute the container run command for the given agent session.
+    command_override: list[str] | None = None,
+    interactive: bool = False,
+) -> ContainerSpec:
+    """Build a ``ContainerSpec`` from the launch-path inputs.
 
-    *agent_cmd* is the complete command to run inside the container, including
-    the agent binary and all its arguments (as returned by
-    ``backend.build_*_command(docker=True, ...)``).
+    This function absorbs the env-var assembly, ``--add-host`` platform gate,
+    and DinD cap/device/seccomp assembly that previously lived inline.
+    Engine-specific flags (userns, label=disable) are
+    *not* here — those live on ``ContainerRuntime.render_run_argv``.
 
-    *proxy_token* is a stable per-task UUID used as the API key env var inside
-    the container.  It must be provided whenever *mutator* is set.
-    The same token is reused on resume.
+    *mutator* / *proxy_token* / *proxy_port*: when *mutator* is set and
+    *proxy_port* is not ``None``, the backend's container env vars are
+    injected into ``spec.env``.  When *mutator* is ``None`` (sandbox shell
+    with no agent), no agent env vars are added.
 
-    *proxy_port* is the port of the host-side API proxy, managed externally via
-    ``_maybe_api_server``.  When ``None`` no API proxy env vars are injected.
+    *add_host_gateway* forces ``--add-host=host.docker.internal:host-gateway``
+    on Linux even when the API proxy is not active (e.g. kubectl RBAC proxy).
 
-    *add_host_gateway* forces the ``--add-host=host.docker.internal:host-gateway``
-    flag on Linux even when the API proxy is not active (e.g. when the kubectl
-    feature is enabled and the container needs to reach the RBAC proxy).
+    *command_override* + *interactive*: when set, the spec runs a raw
+    command (e.g. ``/bin/bash``) instead of the agent command.
+    *interactive=True* adds ``-it``; *interactive=False* captures output.
     """
-    # --init injects a minimal init process (tini for docker, catatonit for
-    # podman) as PID 1 so SIGCHLD is handled and zombie children of the agent
-    # process get reaped. Without it, long-running containers accumulate
-    # zombies from tool shell-outs and tool calls eventually hang.
-    _ensure_volumes(runtime, mounts)
-    cmd = [runtime.binary, "run", "--rm", "--init"]
-    if _command_override is None or _interactive:
-        cmd += ["-it"]
-    for m in mounts:
-        cmd += mount_to_docker_args(m)
+    env: dict[str, str] = {
+        "HATCHERY_TASK": name,
+        "HATCHERY_REPO": hatchery_repo,
+    }
 
     if mutator is not None and proxy_port is not None:
-        for key, val in backend.container_env(proxy_token, proxy_port).items():
-            cmd += ["-e", f"{key}={val}"]
+        for key, val in backend.container_env(proxy_token or "", proxy_port).items():
+            env[key] = val
 
-    # On Linux, Docker doesn't automatically expose host.docker.internal;
-    # --add-host maps it to the host gateway so the container can reach any
-    # host-side proxy (API proxy and/or kubectl RBAC proxy).
+    add_hosts: list[str] = []
     if (proxy_port is not None or add_host_gateway) and sys.platform == "linux":
-        cmd += ["--add-host=host.docker.internal:host-gateway"]
+        add_hosts.append("host.docker.internal:host-gateway")
 
-    cmd += ["-e", f"HATCHERY_TASK={name}"]
-    cmd += ["-e", f"HATCHERY_REPO={hatchery_repo}"]
-    if container_name is not None:
-        cmd += ["--name", container_name]
-    # Podman-specific outer-container flags for proper rootless mount permissions.
-    # --userns=keep-id maps the calling user to the same UID inside the container
-    # so bind-mounted host files (owned by the calling user) are writable by the
-    # container's hatchery user (also UID 1000 on most systems).
-    # --security-opt label=disable suppresses SELinux/AppArmor label confinement
-    # on mounts, which would otherwise block access to host-owned directories.
-    match runtime:
-        case Runtime.PODMAN:
-            cmd += _userns_flags(runtime)
-            cmd += ["--security-opt", "label=disable"]
-    cmd += ["-w", workdir]
+    spec_caps_add: list[str] = []
+    spec_caps_drop: list[str] = []
+    spec_devices: list[str] = []
+    spec_security_opt: list[str] = []
+
     if dind:
-        cmd += ["--cap-drop", "ALL"]
-        hardcoded_caps = {
-            "SYS_ADMIN",
-            "MKNOD",
-            "SETUID",
-            "SETGID",
-            "CHOWN",
-            "DAC_OVERRIDE",
-            "FOWNER",
-            "SETFCAP",
-            "SYS_CHROOT",
-            "SETPCAP",
-            # OCI defaults needed for `podman build` RUN steps (crun capset)
-            "AUDIT_WRITE",
-            "FSETID",
-            "KILL",
-            "NET_BIND_SERVICE",
-            # Networking caps for bridge networking (k3d, kind, CNI)
-            "NET_ADMIN",
-            "NET_RAW",
-        }
-        caps = hardcoded_caps | set(cap_add or [])
-        for cap in sorted(caps):
-            cmd += ["--cap-add", cap]
-        cmd += ["--device", "/dev/fuse"]
-        cmd += ["--security-opt", "label=disable"]
-        cmd += ["--security-opt", f"seccomp={_SECCOMP}"]
-    cmd += [image]
+        spec_caps_drop = ["ALL"]
+        caps = _DIND_CAPS | set(cap_add or [])
+        spec_caps_add = sorted(caps)
+        spec_devices = ["/dev/fuse"]
+        spec_security_opt = ["label=disable", f"seccomp={_SECCOMP}"]
 
-    if _command_override is not None:
-        cmd += wrap_cmd_for_file_mounts(_command_override, mounts)
-        logger.debug(f"Launching {runtime.binary} container image={image!r} name={name!r} (command override)")
-        if _interactive:
-            subprocess.run(cmd)
-            return None
-        return subprocess.run(cmd, capture_output=True, text=True)
-
-    # Append the full agent command (binary + args, docker-mode already applied).
-    cmd += wrap_cmd_for_file_mounts(agent_cmd, mounts)
-
-    logger.debug(f"Launching {runtime.binary} container image={image!r} name={name!r} workdir={workdir!r}")
-    returncode = _exec_agent(cmd, paste_interceptor)
-    if returncode != 0:
-        ui.warn(f"{runtime.binary} container exited with code {returncode}")
-        if runtime == Runtime.PODMAN and returncode == 137:
-            ui.info(
-                "Hint: the container was killed (OOM). Try increasing the Podman machine memory:\n"
-                "  podman machine stop\n"
-                "  podman machine set --memory 8192\n"
-                "  podman machine start"
-            )
-    return None
+    return ContainerSpec(
+        image=image,
+        command=agent_cmd,
+        workdir=workdir,
+        name=name,
+        container_name=container_name,
+        mounts=mounts,
+        env=env,
+        cap_add=spec_caps_add,
+        cap_drop=spec_caps_drop,
+        devices=spec_devices,
+        security_opt=spec_security_opt,
+        add_hosts=add_hosts,
+        interactive=(command_override is None or interactive),
+        rm=True,
+        init=True,
+        command_override=command_override,
+        capture_output=not interactive,
+    )
 
 
 def _exec_agent(cmd: list[str], paste_interceptor: clipboard_image.PasteInterceptor | None) -> int:
@@ -1247,7 +1423,7 @@ def run_session(
     *,
     proxy_token: str,
     kubectl_proxy_token: str | None = None,
-    runtime: Runtime = Runtime.DOCKER,
+    runtime: ContainerRuntime | None = None,
     no_cache: bool = False,
     include_entries: list[IncludeEntry] | None = None,
 ) -> None:
@@ -1275,6 +1451,7 @@ def run_session(
     a stable per-session secret) that the caller — sessions.launch —
     owns.
     """
+    runtime = runtime or DockerRuntime()
     try:
         mutator = backend.make_header_mutator()
     except RuntimeError as e:
@@ -1345,31 +1522,30 @@ def run_session(
         _kubectl_context(config, session_dir, kubectl_proxy_token or "") as kubectl_mounts,
     ):
         mounts.extend(kubectl_mounts)
-        _run_container(
-            meta.image_name,
-            mounts,
-            container_workdir,
-            container_repo,
-            meta.name,
-            mutator,
-            proxy_token,
-            agent_cmd,
+        spec = build_spec(
+            image=meta.image_name,
+            mounts=mounts,
+            workdir=container_workdir,
+            name=meta.name,
+            hatchery_repo=container_repo,
+            container_name=meta.container_name,
+            mutator=mutator,
+            proxy_token=proxy_token,
+            proxy_port=api_proxy.port if api_proxy else None,
+            agent_cmd=agent_cmd,
             backend=backend,
             dind=config.dind,
-            runtime=runtime,
             cap_add=config.cap_add,
-            container_name=meta.container_name,
-            proxy_port=api_proxy.port if api_proxy else None,
             add_host_gateway=bool(kubectl_mounts),
-            paste_interceptor=_make_paste_interceptor(backend, session_dir, config),
         )
+        runtime.run(spec, paste_interceptor=_make_paste_interceptor(backend, session_dir, config))
 
 
 def launch_sandbox_shell(
     repo: Path,
     backend: agent.AgentBackend,
     config: DockerConfig,
-    runtime: Runtime,
+    runtime: ContainerRuntime,
     image_name: str,
     *,
     kubectl_proxy_token: str = "",
@@ -1403,26 +1579,27 @@ def launch_sandbox_shell(
             _kubectl_context(config, sandbox_session_dir, kubectl_proxy_token) as kubectl_mounts,
         ):
             mounts = list(mounts) + kubectl_mounts
-            _run_container(
+            spec = build_spec(
                 image=image_name,
                 mounts=mounts,
                 workdir=str(repo),
-                hatchery_repo=str(repo),
                 name="sandbox",
+                hatchery_repo=str(repo),
+                container_name=None,
                 mutator=None,
                 proxy_token=None,
-                agent_cmd=[],
-                runtime=runtime,
-                _command_override=[shell],
-                _interactive=True,
                 proxy_port=api_proxy.port if api_proxy else None,
+                agent_cmd=[],
                 add_host_gateway=bool(kubectl_mounts),
+                command_override=[shell],
+                interactive=True,
             )
+            runtime.run(spec)
     finally:
         shutil.rmtree(sandbox_session_dir, ignore_errors=True)
 
 
-def exec_task_shell(container_name: str, runtime: Runtime, shell: str = "/bin/bash") -> None:
+def exec_task_shell(container_name: str, runtime: ContainerRuntime, shell: str = "/bin/bash") -> None:
     """Exec an interactive shell into the running container *container_name*.
 
     Caller resolves *container_name* — typically ``sessions.container_name(repo, name)``.
@@ -1435,7 +1612,7 @@ def exec_task_shell(container_name: str, runtime: Runtime, shell: str = "/bin/ba
 
 def resolve_runtime(
     repo: Path, worktree: Path, no_docker: bool, backend: agent.AgentBackend = agent.CODEX
-) -> Runtime | None:
+) -> ContainerRuntime | None:
     """Return the runtime to use for this session, or None to run natively.
 
     Returns None only when --no-docker is explicitly set.  When Docker mode is

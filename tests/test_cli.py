@@ -1221,7 +1221,7 @@ class TestSandbox:
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
             patch("seekr_hatchery.cli.docker.ensure_dockerfile", return_value=False),
             patch("seekr_hatchery.cli.docker.ensure_docker_config", return_value=False),
-            patch("seekr_hatchery.cli.docker.detect_runtime", return_value=docker.Runtime.DOCKER),
+            patch("seekr_hatchery.cli.docker.detect_runtime", return_value=docker.DockerRuntime()),
             patch("seekr_hatchery.cli.docker.launch_sandbox_shell") as mock_launch,
         ):
             result = runner.invoke(cli, ["sandbox"])
@@ -1240,7 +1240,7 @@ class TestSandbox:
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
             patch("seekr_hatchery.cli.docker.ensure_dockerfile", return_value=False),
             patch("seekr_hatchery.cli.docker.ensure_docker_config", return_value=False),
-            patch("seekr_hatchery.cli.docker.detect_runtime", return_value=docker.Runtime.DOCKER),
+            patch("seekr_hatchery.cli.docker.detect_runtime", return_value=docker.DockerRuntime()),
             patch("seekr_hatchery.cli.docker.launch_sandbox_shell") as mock_launch,
         ):
             result = runner.invoke(cli, ["sandbox", "--shell", "/bin/sh"])
@@ -1257,7 +1257,7 @@ class TestSandbox:
             patch("seekr_hatchery.cli.docker.ensure_dockerfile", return_value=True) as mock_df,
             patch("seekr_hatchery.cli.docker.ensure_docker_config", return_value=False),
             patch("seekr_hatchery.cli.git.add_and_commit"),
-            patch("seekr_hatchery.cli.docker.detect_runtime", return_value=docker.Runtime.DOCKER),
+            patch("seekr_hatchery.cli.docker.detect_runtime", return_value=docker.DockerRuntime()),
             patch("seekr_hatchery.cli.docker.launch_sandbox_shell"),
         ):
             result = runner.invoke(cli, ["sandbox"])
@@ -1614,7 +1614,7 @@ class TestCliNoWorktree:
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             _, _, _, mock_launch, mock_docker = self._setup_no_worktree_mocks(mocks)
-            mock_docker.return_value = docker.Runtime.DOCKER  # Dockerfile present → Docker
+            mock_docker.return_value = docker.DockerRuntime()  # Dockerfile present → Docker
             mock_launch.side_effect = None  # still mocked; just verify the flag propagates
             result = runner.invoke(cli, ["new", "my-task", "--no-worktree"])
 
@@ -2381,24 +2381,32 @@ class TestExec:
         expected_name = sessions.container_name(tmp_path, "my-task")
         with (
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(tmp_path, True)),
-            patch("seekr_hatchery.cli.docker.detect_runtime", return_value=docker.Runtime.DOCKER),
+            patch("seekr_hatchery.cli.docker.detect_runtime", return_value=docker.DockerRuntime()),
             patch("seekr_hatchery.cli.docker.exec_task_shell") as mock_exec,
         ):
             result = runner.invoke(cli, ["exec", "my-task"])
         assert result.exit_code == 0, result.output
-        mock_exec.assert_called_once_with(expected_name, docker.Runtime.DOCKER, shell="/bin/bash")
+        mock_exec.assert_called_once()
+        call_args = mock_exec.call_args
+        assert call_args[0][0] == expected_name
+        assert isinstance(call_args[0][1], docker.DockerRuntime)
+        assert call_args[1] == {"shell": "/bin/bash"}
 
     def test_exec_custom_shell(self, tmp_path):
         runner = CliRunner()
         expected_name = sessions.container_name(tmp_path, "my-task")
         with (
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(tmp_path, True)),
-            patch("seekr_hatchery.cli.docker.detect_runtime", return_value=docker.Runtime.DOCKER),
+            patch("seekr_hatchery.cli.docker.detect_runtime", return_value=docker.DockerRuntime()),
             patch("seekr_hatchery.cli.docker.exec_task_shell") as mock_exec,
         ):
             result = runner.invoke(cli, ["exec", "my-task", "--shell", "/bin/sh"])
         assert result.exit_code == 0, result.output
-        mock_exec.assert_called_once_with(expected_name, docker.Runtime.DOCKER, shell="/bin/sh")
+        mock_exec.assert_called_once()
+        call_args = mock_exec.call_args
+        assert call_args[0][0] == expected_name
+        assert isinstance(call_args[0][1], docker.DockerRuntime)
+        assert call_args[1] == {"shell": "/bin/sh"}
 
 
 # ---------------------------------------------------------------------------

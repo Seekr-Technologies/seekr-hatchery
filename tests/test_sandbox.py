@@ -47,16 +47,16 @@ def _runtime_real_home(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(scope="session")
-def runtime() -> docker.Runtime:
-    if docker.podman_available():
-        return docker.Runtime.PODMAN
-    if docker.docker_available():
-        return docker.Runtime.DOCKER
+def runtime() -> docker.ContainerRuntime:
+    if docker.PodmanRuntime.available():
+        return docker.PodmanRuntime()
+    if docker.DockerRuntime.available():
+        return docker.DockerRuntime()
     pytest.skip("no container runtime available")
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _prepull_images(runtime: docker.Runtime) -> None:
+def _prepull_images(runtime: docker.ContainerRuntime) -> None:
     """Best-effort pre-pull of base images with retries for Docker Hub rate limits."""
     for img in (
         "docker.io/library/alpine:latest",
@@ -89,7 +89,7 @@ def no_wt_cwd(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 @pytest.fixture(scope="module")
-def no_wt_image(no_wt_cwd: Path, runtime: docker.Runtime) -> str:
+def no_wt_image(no_wt_cwd: Path, runtime: docker.ContainerRuntime) -> str:
     """Build the no-worktree sandbox image once; remove it after the module."""
     image = sessions.image_name(no_wt_cwd, "test-no-wt")
     docker.build_docker_image(no_wt_cwd, no_wt_cwd, image, agent.CODEX, runtime=runtime)
@@ -101,7 +101,7 @@ def no_wt_image(no_wt_cwd: Path, runtime: docker.Runtime) -> str:
 def no_wt_run(
     no_wt_cwd: Path,
     no_wt_image: str,
-    runtime: docker.Runtime,
+    runtime: docker.ContainerRuntime,
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[Callable[..., subprocess.CompletedProcess[str]], list[Mount]]:
     """No-worktree container runner.  Mirrors launch_docker_no_worktree without
@@ -111,7 +111,7 @@ def no_wt_run(
     executes a command override in the production-configured sandbox container.
     """
     # --userns=keep-id fails in nested Podman (DinD); drop it for all sandbox tests.
-    monkeypatch.setattr(docker, "_userns_flags", lambda _r: [])
+    monkeypatch.setattr(type(runtime), "_engine_flags", lambda self, spec: [])
 
     session_dir = sessions.task_session_dir(no_wt_cwd, "test-no-wt")
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -133,19 +133,20 @@ def no_wt_run(
         proxy_token: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         with docker._maybe_api_server(mutator, proxy_token, agent.CODEX) as api_proxy:
-            result = docker._run_container(
+            spec = docker.build_spec(
                 image=no_wt_image,
                 mounts=mounts,
                 workdir=container_cwd,
-                hatchery_repo=container_cwd,
                 name="test-no-wt",
+                hatchery_repo=container_cwd,
+                container_name=None,
                 mutator=mutator,
                 proxy_token=proxy_token,
-                agent_cmd=[],
-                runtime=runtime,
-                _command_override=command,
                 proxy_port=api_proxy.port if api_proxy else None,
+                agent_cmd=[],
+                command_override=command,
             )
+            result = runtime.run(spec)
         assert result is not None
         return result
 
@@ -196,7 +197,7 @@ def wt_worktree(wt_repo: Path) -> Path:
 
 
 @pytest.fixture(scope="module")
-def wt_image(wt_repo: Path, wt_worktree: Path, runtime: docker.Runtime) -> str:
+def wt_image(wt_repo: Path, wt_worktree: Path, runtime: docker.ContainerRuntime) -> str:
     """Build the worktree sandbox image (alpine+git) once; remove it after the module."""
     image = sessions.image_name(wt_repo, "test-wt")
     docker.build_docker_image(wt_repo, wt_worktree, image, agent.CODEX, runtime=runtime)
@@ -209,7 +210,7 @@ def wt_run(
     wt_repo: Path,
     wt_worktree: Path,
     wt_image: str,
-    runtime: docker.Runtime,
+    runtime: docker.ContainerRuntime,
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[Callable[[list[str]], subprocess.CompletedProcess[str]], list[Mount]]:
     """Worktree container runner.  Mirrors the pre-flight setup in launch_docker
@@ -222,7 +223,7 @@ def wt_run(
     that changes to that logic must be mirrored here.
     """
     # --userns=keep-id fails in nested Podman (DinD); drop it for all sandbox tests.
-    monkeypatch.setattr(docker, "_userns_flags", lambda _r: [])
+    monkeypatch.setattr(type(runtime), "_engine_flags", lambda self, spec: [])
 
     task_name = "test-wt"
     session_dir = sessions.task_session_dir(wt_repo, task_name)
@@ -259,18 +260,20 @@ def wt_run(
     )
 
     def run(command: list[str]) -> subprocess.CompletedProcess[str]:
-        result = docker._run_container(
+        spec = docker.build_spec(
             image=wt_image,
             mounts=mounts,
             workdir=container_worktree,
-            hatchery_repo=container_repo,
             name=task_name,
+            hatchery_repo=container_repo,
+            container_name=None,
             mutator=None,
             proxy_token=None,
+            proxy_port=None,
             agent_cmd=[],
-            runtime=runtime,
-            _command_override=command,
+            command_override=command,
         )
+        result = runtime.run(spec)
         assert result is not None
         return result
 
@@ -348,30 +351,32 @@ class TestNoWorktreeMounts:
 
 
 class TestSandboxShell:
-    """Verify _run_container with _interactive=True executes the command."""
+    """Verify runtime.run with interactive=True executes the command."""
 
     def test_interactive_command_runs(
         self,
         no_wt_image: str,
-        runtime: docker.Runtime,
+        runtime: docker.ContainerRuntime,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """_interactive=True runs the command and returns None (output inherited)."""
-        monkeypatch.setattr(docker, "_userns_flags", lambda _r: [])
-        result = docker._run_container(
+        monkeypatch.setattr(type(runtime), "_engine_flags", lambda self, spec: [])
+        spec = docker.build_spec(
             image=no_wt_image,
             mounts=[],
             workdir="/",
-            hatchery_repo="/",
             name="test-sandbox",
+            hatchery_repo="/",
+            container_name=None,
             mutator=None,
             proxy_token=None,
+            proxy_port=None,
             agent_cmd=[],
-            runtime=runtime,
-            _command_override=["echo", "sandbox-ok"],
-            _interactive=True,
+            command_override=["echo", "sandbox-ok"],
+            interactive=True,
         )
-        # _interactive=True returns None (output goes to inherited stdout)
+        result = runtime.run(spec)
+        # interactive=True returns None (output goes to inherited stdout)
         assert result is None
 
 
@@ -411,15 +416,15 @@ def _mutator(headers: dict, **kwargs) -> dict:
 class TestContainerProxy:
     """Container can reach the host proxy and requests are forwarded to the upstream API."""
 
-    def test_proxy_reachable_from_container(self, runtime: docker.Runtime) -> None:
+    def test_proxy_reachable_from_container(self, runtime: docker.ContainerRuntime) -> None:
         """TCP connection from container to the proxy succeeds via host.docker.internal.
 
-        Uses a bare subprocess.run (not _run_container) to test the underlying
+        Uses a bare subprocess.run (not runtime.run) to test the underlying
         host-gateway networking independently of our mount/env setup.
         """
         with proxy_mod.api_server(_mutator, "correct-token") as server:
             port = server.port
-            # --add-host is what _run_container injects on Linux when api_key is set.
+            # --add-host is what build_spec injects on Linux when proxy_port is set.
             extra_args = ["--add-host=host.docker.internal:host-gateway"] if sys.platform == "linux" else []
             result = subprocess.run(
                 [
@@ -443,7 +448,7 @@ class TestContainerProxy:
         self,
         no_wt_run: tuple[Callable[..., subprocess.CompletedProcess[str]], list[Mount]],
     ) -> None:
-        """_run_container routes container requests through the proxy to the upstream API.
+        """runtime.run routes container requests through the proxy to the upstream API.
 
         Verifies the container→proxy channel: a correctly-tokened HTTP request
         reaches the proxy and receives an HTTP reply (forwarded upstream response
@@ -559,7 +564,7 @@ class TestDinD:
     """
 
     @pytest.fixture(scope="class")
-    def dind_image(self, tmp_path_factory: pytest.TempPathFactory, runtime: docker.Runtime) -> str:
+    def dind_image(self, tmp_path_factory: pytest.TempPathFactory, runtime: docker.ContainerRuntime) -> str:
         """Build a DinD-capable image once per class; remove after.
 
         The Dockerfile is generated from the production template pipeline:
@@ -621,34 +626,40 @@ class TestDinD:
     def _dind_run(
         self,
         dind_image: str,
-        runtime: docker.Runtime,
+        runtime: docker.ContainerRuntime,
         monkeypatch: pytest.MonkeyPatch,
         command: list[str],
     ) -> subprocess.CompletedProcess[str]:
         """Run *command* inside the DinD container with production flags."""
-        monkeypatch.setattr(docker, "_userns_flags", lambda _r: [])
-        result = docker._run_container(
+        monkeypatch.setattr(type(runtime), "_engine_flags", lambda self, spec: [])
+        spec = docker.build_spec(
             image=dind_image,
             mounts=[],
             workdir="/",
-            hatchery_repo="/",
             name="test-dind",
+            hatchery_repo="/",
+            container_name=None,
             mutator=None,
             proxy_token=None,
+            proxy_port=None,
             agent_cmd=[],
             dind=True,
-            runtime=runtime,
-            _command_override=command,
+            command_override=command,
         )
+        result = runtime.run(spec)
         assert result is not None
         return result
 
-    def test_podman_info(self, dind_image: str, runtime: docker.Runtime, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_podman_info(
+        self, dind_image: str, runtime: docker.ContainerRuntime, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         result = self._dind_run(dind_image, runtime, monkeypatch, ["podman", "info"])
         assert result.returncode == 0, f"podman info failed:\nstdout={result.stdout}\nstderr={result.stderr}"
         assert "host" in result.stdout
 
-    def test_podman_pull(self, dind_image: str, runtime: docker.Runtime, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_podman_pull(
+        self, dind_image: str, runtime: docker.ContainerRuntime, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         result = self._dind_run(
             dind_image,
             runtime,
@@ -657,7 +668,9 @@ class TestDinD:
         )
         assert result.returncode == 0, f"podman pull failed:\nstdout={result.stdout}\nstderr={result.stderr}"
 
-    def test_podman_run(self, dind_image: str, runtime: docker.Runtime, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_podman_run(
+        self, dind_image: str, runtime: docker.ContainerRuntime, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         result = self._dind_run(
             dind_image,
             runtime,
@@ -667,7 +680,9 @@ class TestDinD:
         assert result.returncode == 0, f"podman run failed:\nstdout={result.stdout}\nstderr={result.stderr}"
         assert "hello-from-dind" in result.stdout
 
-    def test_podman_build(self, dind_image: str, runtime: docker.Runtime, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_podman_build(
+        self, dind_image: str, runtime: docker.ContainerRuntime, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # --isolation=chroot avoids cgroup subtree_control writes.
         # --cap-drop/--cap-add restricts to caps in the bounding set so
         # buildah's capset() for the RUN step process succeeds.
@@ -690,24 +705,26 @@ class TestDinD:
     def test_cap_net_admin_granted(
         self,
         no_wt_image: str,
-        runtime: docker.Runtime,
+        runtime: docker.ContainerRuntime,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """DinD containers have CAP_NET_ADMIN (bit 12) and CAP_NET_RAW (bit 13) in CapEff."""
-        monkeypatch.setattr(docker, "_userns_flags", lambda _r: [])
-        result = docker._run_container(
+        monkeypatch.setattr(type(runtime), "_engine_flags", lambda self, spec: [])
+        spec = docker.build_spec(
             image=no_wt_image,
             mounts=[],
             workdir="/",
-            hatchery_repo="/",
             name="test-cap",
+            hatchery_repo="/",
+            container_name=None,
             mutator=None,
             proxy_token=None,
+            proxy_port=None,
             agent_cmd=[],
             dind=True,
-            runtime=runtime,
-            _command_override=["grep", "CapEff", "/proc/self/status"],
+            command_override=["grep", "CapEff", "/proc/self/status"],
         )
+        result = runtime.run(spec)
         assert result is not None
         assert result.returncode == 0, f"grep CapEff failed:\n{result.stderr}"
         # Parse hex capability mask from "CapEff:\t00000000a80435fb" format
@@ -737,7 +754,7 @@ class TestFileMountSymlink:
     """
 
     @pytest.fixture()
-    def seeded_volume(self, runtime: docker.Runtime, no_wt_image: str) -> str:
+    def seeded_volume(self, runtime: docker.ContainerRuntime, no_wt_image: str) -> str:
         """Create a named volume with a single file and clean it up after the test."""
         vol = "hatchery-test-file-mount-vol"
         subprocess.run([runtime.binary, "volume", "rm", "-f", vol], capture_output=True)
@@ -765,29 +782,31 @@ class TestFileMountSymlink:
         self,
         seeded_volume: str,
         no_wt_image: str,
-        runtime: docker.Runtime,
+        runtime: docker.ContainerRuntime,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The seeded file must be readable at dst inside the container."""
-        monkeypatch.setattr(docker, "_userns_flags", lambda _r: [])
+        monkeypatch.setattr(type(runtime), "_engine_flags", lambda self, spec: [])
         mount = VolumeMount(
             name=seeded_volume,
             dst="/home/hatchery/test.json",
             is_file=True,
             mode="RW",
         )
-        result = docker._run_container(
+        spec = docker.build_spec(
             image=no_wt_image,
             mounts=[mount],
             workdir="/",
-            hatchery_repo="/",
             name="test-file-mount",
+            hatchery_repo="/",
+            container_name=None,
             mutator=None,
             proxy_token=None,
+            proxy_port=None,
             agent_cmd=[],
-            runtime=runtime,
-            _command_override=["cat", "/home/hatchery/test.json"],
+            command_override=["cat", "/home/hatchery/test.json"],
         )
+        result = runtime.run(spec)
         assert result is not None
         assert result.returncode == 0, f"cat failed:\nstdout={result.stdout}\nstderr={result.stderr}"
         assert "hello-from-volume" in result.stdout
@@ -796,11 +815,11 @@ class TestFileMountSymlink:
         self,
         seeded_volume: str,
         no_wt_image: str,
-        runtime: docker.Runtime,
+        runtime: docker.ContainerRuntime,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Writes to dst must persist in the volume (not just the symlink)."""
-        monkeypatch.setattr(docker, "_userns_flags", lambda _r: [])
+        monkeypatch.setattr(type(runtime), "_engine_flags", lambda self, spec: [])
         mount = VolumeMount(
             name=seeded_volume,
             dst="/home/hatchery/test.json",
@@ -808,34 +827,38 @@ class TestFileMountSymlink:
             mode="RW",
         )
         # Write a new value via the container.
-        write_result = docker._run_container(
+        write_spec = docker.build_spec(
             image=no_wt_image,
             mounts=[mount],
             workdir="/",
-            hatchery_repo="/",
             name="test-file-mount-write",
+            hatchery_repo="/",
+            container_name=None,
             mutator=None,
             proxy_token=None,
+            proxy_port=None,
             agent_cmd=[],
-            runtime=runtime,
-            _command_override=["sh", "-c", "echo 'updated' > /home/hatchery/test.json"],
+            command_override=["sh", "-c", "echo 'updated' > /home/hatchery/test.json"],
         )
+        write_result = runtime.run(write_spec)
         assert write_result is not None
         assert write_result.returncode == 0, f"write failed:\nstderr={write_result.stderr}"
 
         # Read it back in a fresh container to confirm persistence.
-        read_result = docker._run_container(
+        read_spec = docker.build_spec(
             image=no_wt_image,
             mounts=[mount],
             workdir="/",
-            hatchery_repo="/",
             name="test-file-mount-read",
+            hatchery_repo="/",
+            container_name=None,
             mutator=None,
             proxy_token=None,
+            proxy_port=None,
             agent_cmd=[],
-            runtime=runtime,
-            _command_override=["cat", "/home/hatchery/test.json"],
+            command_override=["cat", "/home/hatchery/test.json"],
         )
+        read_result = runtime.run(read_spec)
         assert read_result is not None
         assert read_result.returncode == 0, f"read failed:\nstderr={read_result.stderr}"
         assert "updated" in read_result.stdout

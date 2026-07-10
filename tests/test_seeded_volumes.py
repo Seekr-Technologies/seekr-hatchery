@@ -312,8 +312,8 @@ class TestCleanupTaskVolumesNoRuntime:
     def test_silent_when_no_runtime(self, monkeypatch, tmp_path):
         import seekr_hatchery.docker as docker
 
-        monkeypatch.setattr(docker, "podman_available", lambda: False)
-        monkeypatch.setattr(docker, "docker_available", lambda: False)
+        monkeypatch.setattr(docker.PodmanRuntime, "available", staticmethod(lambda: False))
+        monkeypatch.setattr(docker.DockerRuntime, "available", staticmethod(lambda: False))
         repo = tmp_path / "r"
         repo.mkdir()
         # Should return without raising.
