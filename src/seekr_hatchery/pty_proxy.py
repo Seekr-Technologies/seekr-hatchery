@@ -1,6 +1,6 @@
 """Stdlib PTY proxy that interposes a chance to inspect TTY bytes.
 
-``docker._run_container`` wraps the interactive ``docker run -it ...``
+The interactive ``docker run -it ...`` invocation is wrapped ``docker run -it ...``
 invocation in :func:`run_with_pty` so that ``clipboard_image``'s OSC 5522
 paste interceptor can see and react to bytes flowing between the user's
 terminal and the agent inside the container.

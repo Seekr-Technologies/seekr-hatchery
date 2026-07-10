@@ -830,14 +830,14 @@ class TestProbeSessionIdNative:
 
 class TestProbeSessionIdDocker:
     def test_shells_out_to_docker_exec(self):
-        from seekr_hatchery.docker import Runtime
+        from seekr_hatchery.docker import DockerRuntime
 
         uuid = "019f1e3c-5b9a-76f3-b6f7-e5f967162066"
         launch = time.time()
         completed = MagicMock(returncode=0, stdout=_docker_probe_stdout(uuid, mtime=launch + 1))
         with patch("subprocess.run", return_value=completed) as sp:
             got = codex_backend._probe_session_id(
-                _meta(name="my-task"), docker=True, runtime=Runtime.DOCKER, launch_start=launch
+                _meta(name="my-task"), docker=True, runtime=DockerRuntime(), launch_start=launch
             )
         assert got == uuid
         cmd = sp.call_args[0][0]
@@ -846,36 +846,36 @@ class TestProbeSessionIdDocker:
         assert any("my-task" in part for part in cmd)
 
     def test_nonzero_exit_returns_none(self):
-        from seekr_hatchery.docker import Runtime
+        from seekr_hatchery.docker import DockerRuntime
 
         with patch("subprocess.run", return_value=MagicMock(returncode=1, stdout="")):
             assert (
-                codex_backend._probe_session_id(_meta(), docker=True, runtime=Runtime.DOCKER, launch_start=time.time())
+                codex_backend._probe_session_id(_meta(), docker=True, runtime=DockerRuntime(), launch_start=time.time())
                 is None
             )
 
     def test_empty_stdout_returns_none(self):
-        from seekr_hatchery.docker import Runtime
+        from seekr_hatchery.docker import DockerRuntime
 
         with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="")):
             assert (
-                codex_backend._probe_session_id(_meta(), docker=True, runtime=Runtime.DOCKER, launch_start=time.time())
+                codex_backend._probe_session_id(_meta(), docker=True, runtime=DockerRuntime(), launch_start=time.time())
                 is None
             )
 
     def test_timeout_returns_none(self):
-        from seekr_hatchery.docker import Runtime
+        from seekr_hatchery.docker import DockerRuntime
 
         with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd=["docker"], timeout=2)):
             assert (
-                codex_backend._probe_session_id(_meta(), docker=True, runtime=Runtime.DOCKER, launch_start=time.time())
+                codex_backend._probe_session_id(_meta(), docker=True, runtime=DockerRuntime(), launch_start=time.time())
                 is None
             )
 
     def test_stale_rollout_returns_none(self):
         # File mtime is well before launch_start (dirty volume from a
         # previous task run) — must be filtered.
-        from seekr_hatchery.docker import Runtime
+        from seekr_hatchery.docker import DockerRuntime
 
         launch = time.time()
         completed = MagicMock(
@@ -884,34 +884,34 @@ class TestProbeSessionIdDocker:
         )
         with patch("subprocess.run", return_value=completed):
             assert (
-                codex_backend._probe_session_id(_meta(), docker=True, runtime=Runtime.DOCKER, launch_start=launch)
+                codex_backend._probe_session_id(_meta(), docker=True, runtime=DockerRuntime(), launch_start=launch)
                 is None
             )
 
     def test_slight_negative_skew_still_accepted(self):
         # Container clock is a couple of seconds behind host — still
         # accepted thanks to the 5s tolerance window.
-        from seekr_hatchery.docker import Runtime
+        from seekr_hatchery.docker import DockerRuntime
 
         uuid = "019f1e3c-5b9a-76f3-b6f7-e5f967162066"
         launch = time.time()
         completed = MagicMock(returncode=0, stdout=_docker_probe_stdout(uuid, mtime=launch - 2))
         with patch("subprocess.run", return_value=completed):
-            got = codex_backend._probe_session_id(_meta(), docker=True, runtime=Runtime.DOCKER, launch_start=launch)
+            got = codex_backend._probe_session_id(_meta(), docker=True, runtime=DockerRuntime(), launch_start=launch)
         assert got == uuid
 
     def test_unparseable_stdout_returns_none(self):
         # Missing space between mtime and path, or otherwise garbage.
-        from seekr_hatchery.docker import Runtime
+        from seekr_hatchery.docker import DockerRuntime
 
         with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="not-a-stat-line\n")):
             assert (
-                codex_backend._probe_session_id(_meta(), docker=True, runtime=Runtime.DOCKER, launch_start=time.time())
+                codex_backend._probe_session_id(_meta(), docker=True, runtime=DockerRuntime(), launch_start=time.time())
                 is None
             )
 
     def test_non_numeric_mtime_returns_none(self):
-        from seekr_hatchery.docker import Runtime
+        from seekr_hatchery.docker import DockerRuntime
 
         with patch(
             "subprocess.run",
@@ -921,20 +921,20 @@ class TestProbeSessionIdDocker:
             ),
         ):
             assert (
-                codex_backend._probe_session_id(_meta(), docker=True, runtime=Runtime.DOCKER, launch_start=time.time())
+                codex_backend._probe_session_id(_meta(), docker=True, runtime=DockerRuntime(), launch_start=time.time())
                 is None
             )
 
     def test_malformed_filename_returns_none(self):
         # File exists and mtime is fresh, but the filename doesn't carry
         # a UUID — we must not persist garbage.
-        from seekr_hatchery.docker import Runtime
+        from seekr_hatchery.docker import DockerRuntime
 
         launch = time.time()
         stdout = f"{launch + 1} /home/hatchery/.codex/sessions/2026/07/01/rollout-oops.jsonl\n"
         with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout=stdout)):
             assert (
-                codex_backend._probe_session_id(_meta(), docker=True, runtime=Runtime.DOCKER, launch_start=launch)
+                codex_backend._probe_session_id(_meta(), docker=True, runtime=DockerRuntime(), launch_start=launch)
                 is None
             )
 

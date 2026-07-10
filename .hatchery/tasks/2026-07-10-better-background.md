@@ -286,16 +286,16 @@ delegate to the new classes.
 
 ## Progress Log
 
-- [ ] A1. Introduce `ContainerSpec` frozen dataclass in `docker.py`
-- [ ] A2. Introduce `ContainerRuntime` ABC + `DockerRuntime` / `PodmanRuntime`
-- [ ] A3. Implement `build_spec()` — extracts spec assembly from callers
-- [ ] A4. Refactor `run_session` → `build_spec(...)` + `runtime.run(spec)`
-- [ ] A5. Refactor `launch_sandbox_shell` → `build_spec(...)` + `runtime.run(spec)`
-- [ ] A6. Refactor `exec_task_shell` — use `runtime.binary`
-- [ ] A7. Refactor `build_docker_image` — use `runtime.binary`
-- [ ] A8. Keep `Runtime` enum as deprecated alias with `to_runtime()`
-- [ ] A9. Update tests
-- [ ] A10. Delete dead code (`_run_container`, `_userns_flags`)
+- [x] A1. Introduce `ContainerSpec` frozen dataclass in `docker.py`
+- [x] A2. Introduce `ContainerRuntime` ABC + `DockerRuntime` / `PodmanRuntime`
+- [x] A3. Implement `build_spec()` — extracts spec assembly from callers
+- [x] A4. Refactor `run_session` → `build_spec(...)` + `runtime.run(spec)`
+- [x] A5. Refactor `launch_sandbox_shell` → `build_spec(...)` + `runtime.run(spec)`
+- [x] A6. Refactor `exec_task_shell` — use `runtime.binary`
+- [x] A7. Refactor `build_docker_image` — use `runtime.binary`
+- [x] A8. Keep `Runtime` enum as deprecated alias with `to_runtime()`
+- [x] A9. Update tests (test_docker.py, test_pure.py, test_cli.py, test_sandbox.py, test_agent_codex.py)
+- [x] A10. Delete dead code (`_run_container`, `_userns_flags`, module-level `_ensure_volumes`)
 
 ## Summary
 

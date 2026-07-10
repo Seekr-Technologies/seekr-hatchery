@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from seekr_hatchery.mount import Mount
 
 if TYPE_CHECKING:
-    from seekr_hatchery.docker import Runtime
+    from seekr_hatchery.docker import ContainerRuntime
     from seekr_hatchery.models import SessionMeta
 
 # Home directory of the non-root user inside every sandbox container.
@@ -216,7 +216,7 @@ class AgentBackend(ABC):
         meta: "SessionMeta",
         *,
         docker: bool,
-        runtime: "Runtime | None",
+        runtime: "ContainerRuntime | None",
         launch_start: float,
         stop: threading.Event,
     ) -> list[Callable[[], None]]:

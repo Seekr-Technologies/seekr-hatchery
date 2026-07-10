@@ -199,7 +199,7 @@ def _launch(
     *,
     kind: Literal["new", "resume", "finalize"],
     backend: agent.AgentBackend,
-    runtime: docker.Runtime | None,
+    runtime: docker.ContainerRuntime | None,
     main_branch: str,
     session_id: str,
     no_cache: bool = False,

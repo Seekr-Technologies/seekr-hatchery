@@ -562,25 +562,27 @@ class TestSandboxContextNoWorktree:
 
 
 # ---------------------------------------------------------------------------
-# Runtime enum
+# ContainerRuntime backends
 # ---------------------------------------------------------------------------
 
 
-class TestRuntime:
+class TestContainerRuntime:
     def test_podman_binary(self):
-        assert docker.Runtime.PODMAN.binary == "podman"
+        assert docker.PodmanRuntime().binary == "podman"
 
     def test_docker_binary(self):
+        assert docker.DockerRuntime().binary == "docker"
+
+    def test_runtime_enum_to_runtime_podman(self):
+        assert isinstance(docker.Runtime.PODMAN.to_runtime(), docker.PodmanRuntime)
+
+    def test_runtime_enum_to_runtime_docker(self):
+        assert isinstance(docker.Runtime.DOCKER.to_runtime(), docker.DockerRuntime)
+
+    def test_runtime_enum_binary_still_works(self):
+        # Deprecated enum still has .binary for backward compat
+        assert docker.Runtime.PODMAN.binary == "podman"
         assert docker.Runtime.DOCKER.binary == "docker"
-
-    def test_values_are_uppercase(self):
-        assert docker.Runtime.PODMAN.value == "PODMAN"
-        assert docker.Runtime.DOCKER.value == "DOCKER"
-
-    def test_binary_differs_from_value(self):
-        # binary is lowercase; value is UPPERCASE — they must differ
-        assert docker.Runtime.PODMAN.binary != docker.Runtime.PODMAN.value
-        assert docker.Runtime.DOCKER.binary != docker.Runtime.DOCKER.value
 
 
 # ---------------------------------------------------------------------------
@@ -678,7 +680,7 @@ class TestDockerConfigCapAdd:
 
 
 class TestDindCapMerge:
-    """Verify _run_container merges user cap_add with DinD defaults."""
+    """Verify build_spec merges user cap_add with DinD defaults."""
 
     _COMMON = dict(
         image="test-image:task",
@@ -694,9 +696,8 @@ class TestDindCapMerge:
 
     def _run(self, **kwargs) -> list[str]:
         args = {**self._COMMON, **kwargs}
-        with patch("seekr_hatchery.docker.subprocess.run") as mock_run:
-            docker._run_container(**args, proxy_port=9999)
-        return mock_run.call_args[0][0]
+        spec = docker.build_spec(**args, container_name=None, proxy_port=9999)
+        return docker.DockerRuntime().render_run_argv(spec)
 
     def test_user_caps_merged(self):
         cmd = self._run(dind=True, cap_add=["NET_BIND_SERVICE"])
@@ -753,7 +754,7 @@ class TestMigrateDockerConfig:
 
 
 class TestRunContainerDindFlags:
-    """Verify _run_container injects the correct flags depending on dind=."""
+    """Verify build_spec + render_run_argv injects the correct flags depending on dind=."""
 
     _COMMON = dict(
         image="test-image:task",
@@ -768,11 +769,10 @@ class TestRunContainerDindFlags:
     )
 
     def _run(self, **kwargs) -> list[str]:
-        """Call _run_container with mock subprocess and return the captured cmd."""
+        """Build spec and render argv (no subprocess call needed)."""
         args = {**self._COMMON, **kwargs}
-        with patch("seekr_hatchery.docker.subprocess.run") as mock_run:
-            docker._run_container(**args, proxy_port=9999)
-        return mock_run.call_args[0][0]
+        spec = docker.build_spec(**args, container_name=None, proxy_port=9999)
+        return docker.DockerRuntime().render_run_argv(spec)
 
     def test_dind_false_no_extra_flags(self):
         cmd = self._run(dind=False)
@@ -840,7 +840,7 @@ class TestSeccompResource:
 
 
 class TestRunContainerName:
-    """Verify _run_container passes --name when container_name is provided."""
+    """Verify build_spec + render_run_argv passes --name when container_name is provided."""
 
     _COMMON = dict(
         image="test-image:task",
@@ -856,9 +856,9 @@ class TestRunContainerName:
 
     def _run(self, **kwargs) -> list[str]:
         args = {**self._COMMON, **kwargs}
-        with patch("seekr_hatchery.docker.subprocess.run") as mock_run:
-            docker._run_container(**args)
-        return mock_run.call_args[0][0]
+        container_name = args.pop("container_name", None)
+        spec = docker.build_spec(**args, container_name=container_name, proxy_port=None)
+        return docker.DockerRuntime().render_run_argv(spec)
 
     def test_name_injected_when_provided(self):
         cmd = self._run(container_name="hatchery-myrepo-my-task")
@@ -975,19 +975,19 @@ class TestExecTaskShell:
 
     def test_calls_docker_exec_with_container_name(self):
         with patch("seekr_hatchery.docker.subprocess.run") as mock_run:
-            docker.exec_task_shell("hatchery-myrepo-deadbeef-my-task", docker.Runtime.DOCKER)
+            docker.exec_task_shell("hatchery-myrepo-deadbeef-my-task", docker.DockerRuntime())
         cmd = mock_run.call_args[0][0]
         assert cmd == ["docker", "exec", "-it", "hatchery-myrepo-deadbeef-my-task", "/bin/bash"]
 
     def test_custom_shell_passed_to_exec(self):
         with patch("seekr_hatchery.docker.subprocess.run") as mock_run:
-            docker.exec_task_shell("hatchery-myrepo-deadbeef-my-task", docker.Runtime.DOCKER, shell="/bin/sh")
+            docker.exec_task_shell("hatchery-myrepo-deadbeef-my-task", docker.DockerRuntime(), shell="/bin/sh")
         cmd = mock_run.call_args[0][0]
         assert cmd[-1] == "/bin/sh"
 
     def test_uses_podman_binary_for_podman_runtime(self):
         with patch("seekr_hatchery.docker.subprocess.run") as mock_run:
-            docker.exec_task_shell("hatchery-myrepo-deadbeef-my-task", docker.Runtime.PODMAN)
+            docker.exec_task_shell("hatchery-myrepo-deadbeef-my-task", docker.PodmanRuntime())
         cmd = mock_run.call_args[0][0]
         assert cmd[0] == "podman"
 
