@@ -19,7 +19,7 @@ def _no_wt_meta(cwd):
 
 
 # ---------------------------------------------------------------------------
-# docker_available()
+# DockerRuntime.available()
 # ---------------------------------------------------------------------------
 
 
@@ -28,24 +28,24 @@ class TestDockerAvailable:
         mock_result = MagicMock()
         mock_result.returncode = 0
         monkeypatch.setattr(docker, "run", lambda *a, **kw: mock_result)
-        assert docker.docker_available() is True
+        assert docker.DockerRuntime.available() is True
 
     def test_returns_false_when_rc_nonzero(self, monkeypatch):
         mock_result = MagicMock()
         mock_result.returncode = 1
         monkeypatch.setattr(docker, "run", lambda *a, **kw: mock_result)
-        assert docker.docker_available() is False
+        assert docker.DockerRuntime.available() is False
 
     def test_returns_false_when_binary_not_found(self, monkeypatch):
         def _raise(*a, **kw):
             raise FileNotFoundError("No such file or directory: 'docker'")
 
         monkeypatch.setattr(docker, "run", _raise)
-        assert docker.docker_available() is False
+        assert docker.DockerRuntime.available() is False
 
 
 # ---------------------------------------------------------------------------
-# podman_available()
+# PodmanRuntime.available()
 # ---------------------------------------------------------------------------
 
 
@@ -54,20 +54,20 @@ class TestPodmanAvailable:
         mock_result = MagicMock()
         mock_result.returncode = 0
         monkeypatch.setattr(docker, "run", lambda *a, **kw: mock_result)
-        assert docker.podman_available() is True
+        assert docker.PodmanRuntime.available() is True
 
     def test_returns_false_when_rc_nonzero(self, monkeypatch):
         mock_result = MagicMock()
         mock_result.returncode = 1
         monkeypatch.setattr(docker, "run", lambda *a, **kw: mock_result)
-        assert docker.podman_available() is False
+        assert docker.PodmanRuntime.available() is False
 
     def test_returns_false_when_binary_not_found(self, monkeypatch):
         def _raise(*a, **kw):
             raise FileNotFoundError("No such file or directory: 'podman'")
 
         monkeypatch.setattr(docker, "run", _raise)
-        assert docker.podman_available() is False
+        assert docker.PodmanRuntime.available() is False
 
 
 # ---------------------------------------------------------------------------

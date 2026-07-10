@@ -108,31 +108,6 @@ class ContainerRuntime(ABC):
     def oom_hint(self, returncode: int) -> str | None:
         """Return a human-readable OOM hint for *returncode*, or ``None``."""
 
-    @staticmethod
-    def detect() -> "ContainerRuntime":
-        """Return the preferred available runtime, or exit if none is.
-
-        Podman is preferred (rootless-native, better seccomp for nested
-        containers).  If the Podman binary is installed but not running,
-        this is an error — the user installed it intentionally.
-        """
-        if PodmanRuntime.available():
-            logger.debug("Using Podman as container runtime")
-            return PodmanRuntime()
-        if shutil.which("podman") is not None:
-            msg = "Podman is installed but not running."
-            if sys.platform == "darwin":
-                msg += " Start it with: podman machine start"
-                msg += "\n(or: podman machine init && podman machine start on first use)"
-            ui.error(msg)
-            sys.exit(1)
-        if DockerRuntime.available():
-            logger.debug("Using Docker as container runtime")
-            return DockerRuntime()
-        ui.error(".hatchery/dockerfile exists but neither Podman nor Docker is running.")
-        ui.info("Start Podman/Docker or pass --no-docker to run without the sandbox.")
-        sys.exit(1)
-
     # ── Engine divergence seam ───────────────────────────────────────────
 
     def _engine_flags(self, spec: ContainerSpec) -> list[str]:
@@ -609,22 +584,6 @@ def dockerfile_path(base: Path, backend: agent.AgentBackend) -> Path:
     return base / ".hatchery" / f"Dockerfile.{backend.kind.lower()}"
 
 
-def docker_available() -> bool:
-    """Return True if the Docker daemon is reachable.
-
-    Deprecated: prefer ``DockerRuntime.available()``.
-    """
-    return DockerRuntime.available()
-
-
-def podman_available() -> bool:
-    """Return True if the Podman CLI is reachable.
-
-    Deprecated: prefer ``PodmanRuntime.available()``.
-    """
-    return PodmanRuntime.available()
-
-
 def detect_runtime() -> ContainerRuntime:
     """Return the preferred container runtime, or exit if none is available.
 
@@ -636,7 +595,22 @@ def detect_runtime() -> ContainerRuntime:
     fallback to Docker — the user installed Podman intentionally and should not
     be silently downgraded to the less-secure Docker runtime.
     """
-    return ContainerRuntime.detect()
+    if PodmanRuntime.available():
+        logger.debug("Using Podman as container runtime")
+        return PodmanRuntime()
+    if shutil.which("podman") is not None:
+        msg = "Podman is installed but not running."
+        if sys.platform == "darwin":
+            msg += " Start it with: podman machine start"
+            msg += "\n(or: podman machine init && podman machine start on first use)"
+        ui.error(msg)
+        sys.exit(1)
+    if DockerRuntime.available():
+        logger.debug("Using Docker as container runtime")
+        return DockerRuntime()
+    ui.error(".hatchery/dockerfile exists but neither Podman nor Docker is running.")
+    ui.info("Start Podman/Docker or pass --no-docker to run without the sandbox.")
+    sys.exit(1)
 
 
 # ── Setup ─────────────────────────────────────────────────────────────────────

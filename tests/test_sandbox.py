@@ -48,9 +48,9 @@ def _runtime_real_home(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(scope="session")
 def runtime() -> docker.ContainerRuntime:
-    if docker.podman_available():
+    if docker.PodmanRuntime.available():
         return docker.PodmanRuntime()
-    if docker.docker_available():
+    if docker.DockerRuntime.available():
         return docker.DockerRuntime()
     pytest.skip("no container runtime available")
 
