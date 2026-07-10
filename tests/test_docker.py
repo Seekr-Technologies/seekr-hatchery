@@ -262,7 +262,7 @@ class TestRenderRunArgv:
     def _build_and_render(
         self,
         monkeypatch,
-        runtime: docker.ContainerRuntime = None,
+        runtime: docker.ContainerRuntime | None = None,
         mutator=None,
         proxy_token: str = "proxy-uuid-token",
         proxy_port: int = 9999,
@@ -272,8 +272,6 @@ class TestRenderRunArgv:
             runtime = docker.DockerRuntime()
         if mutator is None:
             mutator = _make_mutator()
-        # Stub _ensure_volumes so no real subprocess calls happen.
-        monkeypatch.setattr(runtime, "_ensure_volumes", lambda _mounts: None)
         spec = docker.build_spec(
             image="test-image",
             mounts=[],
@@ -551,6 +549,266 @@ class TestRunInteractive:
 
 
 # ---------------------------------------------------------------------------
+# Golden argv / ContainerSpec assertions (full-output)
+# ---------------------------------------------------------------------------
+
+
+class _FixedEnvBackend:
+    """Minimal backend stub with deterministic container_env for golden tests."""
+
+    kind = "TEST"
+
+    @staticmethod
+    def container_env(proxy_token: str, proxy_port: int) -> dict[str, str]:
+        return {
+            "OPENAI_API_KEY": proxy_token,
+            "OPENAI_BASE_URL": f"http://host.docker.internal:{proxy_port}",
+        }
+
+
+class TestGoldenSpecAndArgv:
+    """Full-output golden tests for build_spec + render_run_argv.
+
+    These lock in the exact ContainerSpec fields and rendered argv so that
+    argv-order or field-name changes are caught immediately.
+    """
+
+    def test_spec_non_dind_with_proxy(self, monkeypatch):
+        """build_spec for a standard agent launch with proxy (non-DinD)."""
+        monkeypatch.setattr(docker.sys, "platform", "linux")
+        spec = docker.build_spec(
+            image="test-image",
+            mounts=[],
+            workdir="/workspace",
+            name="test-task",
+            hatchery_repo="/repo",
+            container_name="hatchery-ctr",
+            mutator=lambda h: h,
+            proxy_token="proxy-uuid-token",
+            proxy_port=9999,
+            agent_cmd=["codex"],
+            backend=_FixedEnvBackend(),
+        )
+        assert spec == docker.ContainerSpec(
+            image="test-image",
+            command=["codex"],
+            workdir="/workspace",
+            name="test-task",
+            container_name="hatchery-ctr",
+            mounts=[],
+            env={
+                "HATCHERY_TASK": "test-task",
+                "HATCHERY_REPO": "/repo",
+                "OPENAI_API_KEY": "proxy-uuid-token",
+                "OPENAI_BASE_URL": "http://host.docker.internal:9999",
+            },
+            cap_add=[],
+            cap_drop=[],
+            devices=[],
+            security_opt=[],
+            add_hosts=["host.docker.internal:host-gateway"],
+            interactive=True,
+            rm=True,
+            init=True,
+            command_override=None,
+            capture_output=True,
+        )
+
+    def test_spec_dind(self, monkeypatch):
+        """build_spec for a DinD launch (no proxy)."""
+        spec = docker.build_spec(
+            image="test-image",
+            mounts=[],
+            workdir="/workspace",
+            name="test-task",
+            hatchery_repo="/repo",
+            container_name=None,
+            mutator=None,
+            proxy_token=None,
+            proxy_port=None,
+            agent_cmd=["codex"],
+            backend=_FixedEnvBackend(),
+            dind=True,
+            cap_add=["NET_BIND_SERVICE"],
+        )
+        assert spec.cap_drop == ["ALL"]
+        assert spec.devices == ["/dev/fuse"]
+        assert spec.security_opt == ["label=disable", f"seccomp={docker._SECCOMP}"]
+        assert "NET_BIND_SERVICE" in spec.cap_add
+        assert "SYS_ADMIN" in spec.cap_add
+        assert spec.add_hosts == []
+
+    def test_docker_argv_non_dind(self, monkeypatch):
+        """Full rendered argv for Docker, non-DinD, with proxy on Linux."""
+        monkeypatch.setattr(docker.sys, "platform", "linux")
+        spec = docker.build_spec(
+            image="test-image",
+            mounts=[],
+            workdir="/workspace",
+            name="test-task",
+            hatchery_repo="/repo",
+            container_name="hatchery-ctr",
+            mutator=lambda h: h,
+            proxy_token="proxy-uuid-token",
+            proxy_port=9999,
+            agent_cmd=["codex"],
+            backend=_FixedEnvBackend(),
+        )
+        assert docker.DockerRuntime().render_run_argv(spec) == [
+            "docker",
+            "run",
+            "--rm",
+            "--init",
+            "-it",
+            "-e",
+            "HATCHERY_TASK=test-task",
+            "-e",
+            "HATCHERY_REPO=/repo",
+            "-e",
+            "OPENAI_API_KEY=proxy-uuid-token",
+            "-e",
+            "OPENAI_BASE_URL=http://host.docker.internal:9999",
+            "--add-host=host.docker.internal:host-gateway",
+            "--name",
+            "hatchery-ctr",
+            "-w",
+            "/workspace",
+            "test-image",
+        ]
+
+    def test_podman_argv_non_dind(self, monkeypatch):
+        """Full rendered argv for Podman, non-DinD, with proxy on Linux."""
+        monkeypatch.setattr(docker.sys, "platform", "linux")
+        spec = docker.build_spec(
+            image="test-image",
+            mounts=[],
+            workdir="/workspace",
+            name="test-task",
+            hatchery_repo="/repo",
+            container_name="hatchery-ctr",
+            mutator=lambda h: h,
+            proxy_token="proxy-uuid-token",
+            proxy_port=9999,
+            agent_cmd=["codex"],
+            backend=_FixedEnvBackend(),
+        )
+        assert docker.PodmanRuntime().render_run_argv(spec) == [
+            "podman",
+            "run",
+            "--rm",
+            "--init",
+            "-it",
+            "-e",
+            "HATCHERY_TASK=test-task",
+            "-e",
+            "HATCHERY_REPO=/repo",
+            "-e",
+            "OPENAI_API_KEY=proxy-uuid-token",
+            "-e",
+            "OPENAI_BASE_URL=http://host.docker.internal:9999",
+            "--add-host=host.docker.internal:host-gateway",
+            "--name",
+            "hatchery-ctr",
+            "--userns=keep-id",
+            "--security-opt",
+            "label=disable",
+            "-w",
+            "/workspace",
+            "test-image",
+        ]
+
+    def test_docker_argv_dind(self, monkeypatch):
+        """Full rendered argv for Docker, DinD, no proxy."""
+        spec = docker.build_spec(
+            image="test-image",
+            mounts=[],
+            workdir="/workspace",
+            name="test-task",
+            hatchery_repo="/repo",
+            container_name=None,
+            mutator=None,
+            proxy_token=None,
+            proxy_port=None,
+            agent_cmd=["codex"],
+            backend=_FixedEnvBackend(),
+            dind=True,
+            cap_add=["NET_BIND_SERVICE"],
+        )
+        assert docker.DockerRuntime().render_run_argv(spec) == [
+            "docker",
+            "run",
+            "--rm",
+            "--init",
+            "-it",
+            "-e",
+            "HATCHERY_TASK=test-task",
+            "-e",
+            "HATCHERY_REPO=/repo",
+            "-w",
+            "/workspace",
+            "--cap-drop",
+            "ALL",
+            "--cap-add",
+            "AUDIT_WRITE",
+            "--cap-add",
+            "CHOWN",
+            "--cap-add",
+            "DAC_OVERRIDE",
+            "--cap-add",
+            "FOWNER",
+            "--cap-add",
+            "FSETID",
+            "--cap-add",
+            "KILL",
+            "--cap-add",
+            "MKNOD",
+            "--cap-add",
+            "NET_ADMIN",
+            "--cap-add",
+            "NET_BIND_SERVICE",
+            "--cap-add",
+            "NET_RAW",
+            "--cap-add",
+            "SETFCAP",
+            "--cap-add",
+            "SETGID",
+            "--cap-add",
+            "SETPCAP",
+            "--cap-add",
+            "SETUID",
+            "--cap-add",
+            "SYS_ADMIN",
+            "--cap-add",
+            "SYS_CHROOT",
+            "--security-opt",
+            "label=disable",
+            "--security-opt",
+            f"seccomp={docker._SECCOMP}",
+            "--device",
+            "/dev/fuse",
+            "test-image",
+        ]
+
+
+# ---------------------------------------------------------------------------
+# oom_hint()
+# ---------------------------------------------------------------------------
+
+
+class TestOomHint:
+    def test_podman_137_returns_hint(self):
+        hint = docker.PodmanRuntime().oom_hint(137)
+        assert hint is not None
+        assert "memory" in hint
+
+    def test_podman_0_returns_none(self):
+        assert docker.PodmanRuntime().oom_hint(0) is None
+
+    def test_docker_137_returns_none(self):
+        assert docker.DockerRuntime().oom_hint(137) is None
+
+
+# ---------------------------------------------------------------------------
 # build_docker_image() — build context and stdin
 # ---------------------------------------------------------------------------
 
@@ -590,7 +848,7 @@ class TestBuildDockerImage:
             # _stream_build is used in non-debug mode; stub it out
             monkeypatch.setattr(docker, "_stream_build", lambda cmd, cwd: (0, []))
 
-        docker.build_docker_image(repo, worktree, "test-task", agent.CODEX, runtime=docker.Runtime.PODMAN)
+        docker.build_docker_image(repo, worktree, "test-task", agent.CODEX, runtime=docker.PodmanRuntime())
         return captured[0], captured_kwargs[0]
 
     def test_build_context_is_not_repo_root(self, monkeypatch, tmp_path):

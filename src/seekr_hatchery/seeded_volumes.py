@@ -73,12 +73,12 @@ def cleanup_task_volumes(repo: Path, name: str) -> None:
     """
     # Lazy import: docker.py imports prepare_volume_mounts from this
     # module, so we can't import the runtime helpers at module-load time.
-    from seekr_hatchery.docker import Runtime, docker_available, podman_available
+    from seekr_hatchery.docker import DockerRuntime, PodmanRuntime
 
-    if podman_available():
-        runtime = Runtime.PODMAN
-    elif docker_available():
-        runtime = Runtime.DOCKER
+    if PodmanRuntime.available():
+        runtime = PodmanRuntime()
+    elif DockerRuntime.available():
+        runtime = DockerRuntime()
     else:
         return  # no runtime — nothing to clean up
 

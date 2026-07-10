@@ -573,17 +573,6 @@ class TestContainerRuntime:
     def test_docker_binary(self):
         assert docker.DockerRuntime().binary == "docker"
 
-    def test_runtime_enum_to_runtime_podman(self):
-        assert isinstance(docker.Runtime.PODMAN.to_runtime(), docker.PodmanRuntime)
-
-    def test_runtime_enum_to_runtime_docker(self):
-        assert isinstance(docker.Runtime.DOCKER.to_runtime(), docker.DockerRuntime)
-
-    def test_runtime_enum_binary_still_works(self):
-        # Deprecated enum still has .binary for backward compat
-        assert docker.Runtime.PODMAN.binary == "podman"
-        assert docker.Runtime.DOCKER.binary == "docker"
-
 
 # ---------------------------------------------------------------------------
 # DockerConfig validation
@@ -749,7 +738,7 @@ class TestMigrateDockerConfig:
 
 
 # ---------------------------------------------------------------------------
-# _run_container DinD flags
+# build_spec DinD flags
 # ---------------------------------------------------------------------------
 
 
@@ -835,7 +824,7 @@ class TestSeccompResource:
 
 
 # ---------------------------------------------------------------------------
-# _run_container container name
+# build_spec container name
 # ---------------------------------------------------------------------------
 
 

@@ -13,7 +13,6 @@ from collections import deque
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from enum import Enum
 from pathlib import Path
 from typing import Literal
 
@@ -43,37 +42,11 @@ from seekr_hatchery.utils import open_for_editing, run
 logger = logging.getLogger(__name__)
 
 
-class Runtime(Enum):
-    """Deprecated: use ``ContainerRuntime`` subclasses (``DockerRuntime``, ``PodmanRuntime``).
-
-    Kept as a compatibility shim for callers that haven't migrated yet
-    (``seeded_volumes.py``, ``agents/codex.py``, tests).  New code should
-    use ``ContainerRuntime.detect()`` and ``DockerRuntime()`` / ``PodmanRuntime()``
-    directly.
-    """
-
-    PODMAN = "PODMAN"
-    DOCKER = "DOCKER"
-
-    @property
-    def binary(self) -> str:
-        """CLI binary name for this runtime."""
-        return self.value.lower()
-
-    def to_runtime(self) -> "ContainerRuntime":
-        """Return the ``ContainerRuntime`` instance corresponding to this enum value."""
-        match self:
-            case Runtime.PODMAN:
-                return PodmanRuntime()
-            case Runtime.DOCKER:
-                return DockerRuntime()
-
-
 # ── Container runtime abstraction ────────────────────────────────────────────
 #
 # ``ContainerRuntime`` mirrors ``AgentBackend``: a small ABC with one concrete
 # subclass per engine (Docker, Podman).  Engine divergence that was previously
-# scattered across ``_run_container`` conditionals — userns flags, label
+# scattered across inline conditionals — userns flags, label
 # disable, OOM hints — now lives on the subclass that owns it.
 #
 # ``ContainerSpec`` is the backend-agnostic model of *what* the sandbox is.
@@ -84,7 +57,7 @@ class Runtime(Enum):
 class ContainerSpec:
     """Backend-agnostic description of a container to run.
 
-    The spec carries every flag the old inline ``_run_container`` assembled —
+    The spec carries every flag the old inline assembly assembled —
     but as typed fields rather than ``cmd += [...]`` lines.  Engine-specific
     rendering (userns, label=disable) lives on ``ContainerRuntime`` subclasses.
     """
@@ -114,6 +87,11 @@ class ContainerRuntime(ABC):
     Each concrete subclass owns the engine divergence (binary name, userns
     flags, OOM messaging).  ``render_run_argv(spec)`` turns a
     ``ContainerSpec`` into the final ``docker``/``podman run`` argv.
+
+    The only divergence point is :meth:`_engine_flags`, which subclasses
+    override to inject engine-specific flags (e.g. Podman's ``--userns=keep-id``
+    and ``--security-opt label=disable``).  ``render_run_argv`` and ``run``
+    are concrete on the base.
     """
 
     @property
@@ -125,24 +103,6 @@ class ContainerRuntime(ABC):
     @abstractmethod
     def available() -> bool:
         """Return True if this runtime's daemon/CLI is reachable."""
-
-    @abstractmethod
-    def render_run_argv(self, spec: ContainerSpec) -> list[str]:
-        """Assemble the full ``<binary> run ...`` argv from *spec*."""
-
-    @abstractmethod
-    def run(
-        self,
-        spec: ContainerSpec,
-        *,
-        paste_interceptor: clipboard_image.PasteInterceptor | None = None,
-    ) -> subprocess.CompletedProcess[str] | None:
-        """Execute the container described by *spec*.
-
-        For interactive agent launches, runs via ``_exec_agent`` (PTY proxy
-        when a paste interceptor is present).  For command-override mode,
-        runs via ``subprocess.run`` (with or without capture).
-        """
 
     @abstractmethod
     def oom_hint(self, returncode: int) -> str | None:
@@ -173,6 +133,21 @@ class ContainerRuntime(ABC):
         ui.info("Start Podman/Docker or pass --no-docker to run without the sandbox.")
         sys.exit(1)
 
+    # ── Engine divergence seam ───────────────────────────────────────────
+
+    def _engine_flags(self, spec: ContainerSpec) -> list[str]:
+        """Return engine-specific flags to inject before ``-w`` in the argv.
+
+        Default: no extra flags (Docker).  Subclasses override to add
+        engine-specific flags like ``--userns=keep-id`` or
+        ``--security-opt label=disable``.
+
+        Tests patch this method on a runtime instance (or the class) to
+        suppress userns in nested-container scenarios without globally
+        patching ``sys.platform``.
+        """
+        return []
+
     # ── Shared helpers ───────────────────────────────────────────────────
 
     def _ensure_volumes(self, mounts: list[Mount]) -> None:
@@ -187,25 +162,10 @@ class ContainerRuntime(ABC):
             logger.debug("creating %s volume: %s", self.binary, m.name)
             run([self.binary, "volume", "create", m.name])
 
-
-class DockerRuntime(ContainerRuntime):
-    """Docker engine backend."""
-
-    @property
-    def binary(self) -> str:
-        return "docker"
-
-    @staticmethod
-    def available() -> bool:
-        """Return True if the Docker daemon is reachable."""
-        logger.debug("Checking Docker availability")
-        try:
-            result = run(["docker", "info"], check=False)
-        except FileNotFoundError:
-            return False
-        return result.returncode == 0
+    # ── Concrete rendering + execution (shared by all runtimes) ──────────
 
     def render_run_argv(self, spec: ContainerSpec) -> list[str]:
+        """Assemble the full ``<binary> run ...`` argv from *spec*."""
         cmd: list[str] = [self.binary, "run"]
         if spec.rm:
             cmd.append("--rm")
@@ -221,6 +181,7 @@ class DockerRuntime(ContainerRuntime):
             cmd += [f"--add-host={host}"]
         if spec.container_name is not None:
             cmd += ["--name", spec.container_name]
+        cmd += self._engine_flags(spec)
         cmd += ["-w", spec.workdir]
         cmd += _render_caps(spec)
         cmd += _render_security_opt(spec)
@@ -234,6 +195,12 @@ class DockerRuntime(ContainerRuntime):
         *,
         paste_interceptor: clipboard_image.PasteInterceptor | None = None,
     ) -> subprocess.CompletedProcess[str] | None:
+        """Execute the container described by *spec*.
+
+        For interactive agent launches, runs via ``_exec_agent`` (PTY proxy
+        when a paste interceptor is present).  For command-override mode,
+        runs via ``subprocess.run`` (with or without capture).
+        """
         self._ensure_volumes(spec.mounts)
         cmd = self.render_run_argv(spec)
 
@@ -265,6 +232,24 @@ class DockerRuntime(ContainerRuntime):
             if hint:
                 ui.info(hint)
         return None
+
+
+class DockerRuntime(ContainerRuntime):
+    """Docker engine backend."""
+
+    @property
+    def binary(self) -> str:
+        return "docker"
+
+    @staticmethod
+    def available() -> bool:
+        """Return True if the Docker daemon is reachable."""
+        logger.debug("Checking Docker availability")
+        try:
+            result = run(["docker", "info"], check=False)
+        except FileNotFoundError:
+            return False
+        return result.returncode == 0
 
     def oom_hint(self, returncode: int) -> str | None:
         return None
@@ -287,74 +272,17 @@ class PodmanRuntime(ContainerRuntime):
             return False
         return result.returncode == 0
 
-    def render_run_argv(self, spec: ContainerSpec) -> list[str]:
-        cmd: list[str] = [self.binary, "run"]
-        if spec.rm:
-            cmd.append("--rm")
-        if spec.init:
-            cmd.append("--init")
-        if spec.interactive:
-            cmd += ["-it"]
-        for m in spec.mounts:
-            cmd += mount_to_docker_args(m)
-        for key, val in spec.env.items():
-            cmd += ["-e", f"{key}={val}"]
-        for host in spec.add_hosts:
-            cmd += [f"--add-host={host}"]
-        if spec.container_name is not None:
-            cmd += ["--name", spec.container_name]
+    def _engine_flags(self, spec: ContainerSpec) -> list[str]:
         # Podman-specific outer-container flags for rootless mount permissions.
         # --userns=keep-id maps the calling user to the same UID inside the
         # container so bind-mounted host files are writable by the hatchery user.
         # --security-opt label=disable suppresses SELinux/AppArmor label
         # confinement on mounts.
+        flags: list[str] = []
         if sys.platform == "linux":
-            cmd += ["--userns=keep-id"]
-        cmd += ["--security-opt", "label=disable"]
-        cmd += ["-w", spec.workdir]
-        cmd += _render_caps(spec)
-        cmd += _render_security_opt(spec)
-        cmd += _render_devices(spec)
-        cmd += [spec.image]
-        return cmd
-
-    def run(
-        self,
-        spec: ContainerSpec,
-        *,
-        paste_interceptor: clipboard_image.PasteInterceptor | None = None,
-    ) -> subprocess.CompletedProcess[str] | None:
-        self._ensure_volumes(spec.mounts)
-        cmd = self.render_run_argv(spec)
-
-        if spec.command_override is not None:
-            cmd += wrap_cmd_for_file_mounts(spec.command_override, spec.mounts)
-            logger.debug(
-                "Launching %s container image=%r name=%r (command override)",
-                self.binary,
-                spec.image,
-                spec.name,
-            )
-            if spec.interactive:
-                subprocess.run(cmd)
-                return None
-            return subprocess.run(cmd, capture_output=spec.capture_output, text=True)
-
-        cmd += wrap_cmd_for_file_mounts(spec.command, spec.mounts)
-        logger.debug(
-            "Launching %s container image=%r name=%r workdir=%r",
-            self.binary,
-            spec.image,
-            spec.name,
-            spec.workdir,
-        )
-        returncode = _exec_agent(cmd, paste_interceptor)
-        if returncode != 0:
-            ui.warn(f"{self.binary} container exited with code {returncode}")
-            hint = self.oom_hint(returncode)
-            if hint:
-                ui.info(hint)
-        return None
+            flags += ["--userns=keep-id"]
+        flags += ["--security-opt", "label=disable"]
+        return flags
 
     def oom_hint(self, returncode: int) -> str | None:
         if returncode == 137:
@@ -367,7 +295,7 @@ class PodmanRuntime(ContainerRuntime):
         return None
 
 
-# ── Spec rendering helpers (shared by both runtimes) ────────────────────────
+# ── Spec rendering helpers (shared by all runtimes) ────────────────────────
 
 
 def _render_caps(spec: ContainerSpec) -> list[str]:
@@ -877,7 +805,7 @@ def load_docker_config(root: Path) -> DockerConfig:
 
 def launch_context(
     meta: SessionMeta,
-    runtime: "Runtime | None",
+    runtime: "ContainerRuntime | None",
 ) -> tuple[DockerConfig | None, list[str], str]:
     """Return (config, features, container_workdir) for the launch path.
 
@@ -1332,7 +1260,7 @@ def build_docker_image(
     worktree: Path,
     image_name: str,
     backend: agent.AgentBackend,
-    runtime: ContainerRuntime = DockerRuntime(),
+    runtime: ContainerRuntime | None = None,
     no_cache: bool = False,
 ) -> None:
     """Build the sandbox image from the worktree's .hatchery/Dockerfile.<agent>.
@@ -1342,6 +1270,7 @@ def build_docker_image(
 
     Caller resolves *image_name* — typically ``sessions.image_name(repo, name)``.
     """
+    runtime = runtime or DockerRuntime()
     image = image_name
     worktree_dockerfile = dockerfile_path(worktree, backend)
     # Use a temporary empty directory as the build context — NOT the repo root.
@@ -1424,8 +1353,8 @@ def build_spec(
     """Build a ``ContainerSpec`` from the launch-path inputs.
 
     This function absorbs the env-var assembly, ``--add-host`` platform gate,
-    and DinD cap/device/seccomp assembly that previously lived inline in
-    ``_run_container``.  Engine-specific flags (userns, label=disable) are
+    and DinD cap/device/seccomp assembly that previously lived inline.
+    Engine-specific flags (userns, label=disable) are
     *not* here — those live on ``ContainerRuntime.render_run_argv``.
 
     *mutator* / *proxy_token* / *proxy_port*: when *mutator* is set and
