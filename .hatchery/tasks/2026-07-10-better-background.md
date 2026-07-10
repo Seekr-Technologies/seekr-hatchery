@@ -145,11 +145,157 @@ coordination.
 
 ## Agreed Plan
 
-*(To be filled in after planning discussion)*
+### Sub-task A — Sandbox runtime builder refactor (behavior-preserving)
+
+#### A1. Introduce `ContainerSpec` (frozen dataclass, in `docker.py`)
+
+Captures everything `_run_container` currently assembles inline — no
+engine-specific strings:
+
+```python
+@dataclass(frozen=True)
+class ContainerSpec:
+    image: str
+    command: list[str]
+    workdir: str
+    name: str                       # HATCHERY_TASK env value
+    container_name: str | None      # --name flag
+    mounts: list[Mount]
+    env: dict[str, str]             # HATCHERY_TASK, HATCHERY_REPO, agent env
+    cap_add: list[str] = field(default_factory=list)
+    cap_drop: list[str] = field(default_factory=list)
+    devices: list[str] = field(default_factory=list)
+    security_opt: list[str] = field(default_factory=list)
+    add_hosts: list[str] = field(default_factory=list)
+    interactive: bool = True        # -it vs not
+    rm: bool = True                 # --rm
+    init: bool = True               # --init
+    command_override: list[str] | None = None
+    capture_output: bool = False    # for non-interactive override
+```
+
+**Location:** `docker.py` (keeps it cycle-free — `sessions` and `docker`
+already import `models`, and `docker` is the runtime layer).
+
+#### A2. Introduce `ContainerRuntime` ABC + `DockerRuntime` / `PodmanRuntime`
+
+Mirrors `AgentBackend` structure:
+
+```python
+class ContainerRuntime(ABC):
+    @property
+    @abstractmethod
+    def binary(self) -> str: ...
+
+    @staticmethod
+    @abstractmethod
+    def available() -> bool: ...
+
+    @abstractmethod
+    def render_run_argv(self, spec: ContainerSpec) -> list[str]: ...
+
+    @abstractmethod
+    def run(self, spec: ContainerSpec, *, paste_interceptor=None) -> subprocess.CompletedProcess | None: ...
+
+    @abstractmethod
+    def oom_hint(self, returncode: int) -> str | None: ...
+
+class DockerRuntime(ContainerRuntime): ...
+class PodmanRuntime(ContainerRuntime): ...
+```
+
+- `binary` → `"docker"` / `"podman"`
+- `available()` → absorbs `docker_available()` / `podman_available()`
+- `render_run_argv(spec)` — assembles `[binary, "run", ...]` from the spec.
+  Podman adds `--userns=keep-id` on Linux + `--security-opt label=disable`.
+  DinD cap-drop/cap-add/devices/seccomp render from spec fields (identical
+  across engines). Absorbs `_userns_flags()` and the `match runtime` block.
+- `run(spec, *, paste_interceptor)` — calls `render_run_argv` then executes
+  via `_exec_agent` (interactive) or `subprocess.run` (command_override).
+  Absorbs `_run_container`'s execution tail + OOM hint messaging.
+- `oom_hint(returncode)` → Podman-137 message; Docker returns `None`.
+- `detect()` class method on the ABC absorbs `detect_runtime()` — tries
+  PodmanRuntime, then DockerRuntime, exits if neither.
+
+Module-level `docker_available()` / `podman_available()` / `detect_runtime()`
+become thin wrappers delegating to the new classes (backward compat for
+`seeded_volumes.py`, tests, etc.).
+
+#### A3. Implement `build_spec()` — extracts spec assembly from callers
+
+One function that takes the assembled inputs and returns a `ContainerSpec`.
+Moves env-var assembly, `--add-host` platform gate, DinD cap/device/seccomp
+assembly here — all spec content, not in the renderer.  `--add-host` lives
+in `spec.add_hosts` as `"host.docker.internal:host-gateway"` on Linux when
+proxy is active or `add_host_gateway` is set.
+
+#### A4. Refactor `run_session` → `build_spec(...)` + `runtime.run(spec)`
+
+`run_session` keeps its current responsibilities (sentinel files, mount
+construction, image build, sidecar context managers) but replaces the
+`_run_container(...)` call with `build_spec(...)` + `runtime.run(spec)`.
+The `Runtime` enum parameter type changes to `ContainerRuntime` throughout
+the call chain: `sessions.launch` → `docker.run_session` → `runtime.run`.
+
+#### A5. Refactor `launch_sandbox_shell` → `build_spec(...)` + `runtime.run(spec)`
+
+Same pattern. The `_command_override` + `_interactive` parameters become
+`spec.command_override` + `spec.interactive` + `spec.capture_output`.
+
+#### A6. Refactor `exec_task_shell` — use `runtime.binary`
+
+Trivial: `runtime` parameter type changes from `Runtime` to `ContainerRuntime`.
+No behavior change.
+
+#### A7. Refactor `build_docker_image` — use `runtime.binary`
+
+Parameter type changes from `Runtime` to `ContainerRuntime`. Uses
+`runtime.binary` (same as before).
+
+#### A8. Keep `Runtime` enum as deprecated alias
+
+Keep `Runtime` enum but add a `to_runtime()` method returning the ABC
+instance. External callers (`seeded_volumes.py`, `agents/codex.py`,
+`AgentBackend.background_threads`, tests) can migrate incrementally.
+Module-level `docker_available()` / `podman_available()` / `detect_runtime()`
+delegate to the new classes.
+
+#### A9. Update tests
+
+- `test_docker.py`: `TestRunContainerRuntime` and `TestRunContainerInteractive`
+  → rewrite to test `build_spec()` + `runtime.render_run_argv()` + `runtime.run()`.
+  Assert on `ContainerSpec` fields and rendered argv, not `_run_container` calls.
+- `test_pure.py`: `TestRuntime` → update for `ContainerRuntime` ABC.
+  `TestExecTaskShell` → update signature.
+- `test_cli.py`: `detect_runtime` mocks → return `ContainerRuntime` instances.
+- `test_sandbox.py`: `runtime` fixture → return `ContainerRuntime` instance.
+- `test_agent_codex.py`: `Runtime.DOCKER` → `DockerRuntime()` in probe tests.
+- `test_seeded_volumes.py`: No changes (uses module-level functions which
+  remain as wrappers).
+
+#### A10. Delete dead code
+
+- `_run_container` — fully replaced by `build_spec` + `runtime.run`.
+- `_userns_flags` — absorbed into `PodmanRuntime.render_run_argv`.
+
+### Success criteria
+- No behavior change in production code paths.
+- `uv run pytest` (excluding `--integration`) fully green.
+- `uv run ruff check .` and `uv run ruff format .` clean.
+- `_run_container` and `_userns_flags` no longer exist.
 
 ## Progress Log
 
-*(Steps will appear here once the plan is agreed)*
+- [ ] A1. Introduce `ContainerSpec` frozen dataclass in `docker.py`
+- [ ] A2. Introduce `ContainerRuntime` ABC + `DockerRuntime` / `PodmanRuntime`
+- [ ] A3. Implement `build_spec()` — extracts spec assembly from callers
+- [ ] A4. Refactor `run_session` → `build_spec(...)` + `runtime.run(spec)`
+- [ ] A5. Refactor `launch_sandbox_shell` → `build_spec(...)` + `runtime.run(spec)`
+- [ ] A6. Refactor `exec_task_shell` — use `runtime.binary`
+- [ ] A7. Refactor `build_docker_image` — use `runtime.binary`
+- [ ] A8. Keep `Runtime` enum as deprecated alias with `to_runtime()`
+- [ ] A9. Update tests
+- [ ] A10. Delete dead code (`_run_container`, `_userns_flags`)
 
 ## Summary
 
