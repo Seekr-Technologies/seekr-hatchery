@@ -1449,7 +1449,7 @@ def run_session(
     *,
     proxy_token: str,
     kubectl_proxy_token: str | None = None,
-    runtime: ContainerRuntime = DockerRuntime(),
+    runtime: ContainerRuntime | None = None,
     no_cache: bool = False,
     include_entries: list[IncludeEntry] | None = None,
 ) -> None:
@@ -1477,6 +1477,7 @@ def run_session(
     a stable per-session secret) that the caller — sessions.launch —
     owns.
     """
+    runtime = runtime or DockerRuntime()
     try:
         mutator = backend.make_header_mutator()
     except RuntimeError as e:
