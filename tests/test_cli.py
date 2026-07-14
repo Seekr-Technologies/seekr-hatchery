@@ -146,6 +146,8 @@ def _new_patches():
         patch("seekr_hatchery.cli.git.git_root_or_cwd"),
         patch("seekr_hatchery.cli.sessions.ensure_gitignore"),
         patch("seekr_hatchery.cli.sessions.ensure_tasks_dir"),
+        patch("seekr_hatchery.cli.sessions.ensure_repo_store"),
+        patch("seekr_hatchery.cli.sessions.ensure_git_exclude"),
         patch("seekr_hatchery.cli.docker.ensure_dockerfile"),
         patch("seekr_hatchery.cli.docker.ensure_docker_config"),
         patch("seekr_hatchery.cli.sessions.task_db_path"),
@@ -167,6 +169,8 @@ class TestCliNew:
 
         (
             mock_root,
+            _,
+            _,
             _,
             _,
             _,
@@ -249,7 +253,7 @@ class TestCliNew:
 
         assert result.exit_code == 0
         call_args = mock_docker.call_args
-        assert call_args[0][2] is True or call_args[1].get("no_docker") is True
+        assert call_args[0][1] is True or call_args[1].get("no_docker") is True
 
     def test_no_editor_skips_open_for_editing(self):
         runner = CliRunner()
@@ -258,6 +262,8 @@ class TestCliNew:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
                 mock_root,
+                _,
+                _,
                 _,
                 _,
                 _,
@@ -299,6 +305,8 @@ class TestCliNew:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
                 mock_root,
+                _,
+                _,
                 _,
                 _,
                 _,
@@ -346,6 +354,8 @@ class TestCliNew:
                 _,
                 _,
                 _,
+                _,
+                _,
                 mock_db_path,
                 mock_wt_dir,
                 _,
@@ -381,6 +391,8 @@ class TestCliNew:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
                 mock_root,
+                _,
+                _,
                 _,
                 _,
                 _,
@@ -423,6 +435,8 @@ class TestCliNew:
                 mock_root,
                 _,
                 _,
+                _,
+                _,
                 mock_ensure_df,
                 mock_ensure_dc,
                 mock_db_path,
@@ -458,6 +472,8 @@ class TestCliNew:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
                 mock_root,
+                _,
+                _,
                 _,
                 _,
                 mock_ensure_df,
@@ -498,6 +514,8 @@ class TestCliNew:
                 mock_root,
                 _,
                 _,
+                _,
+                _,
                 mock_ensure_df,
                 _,
                 mock_db_path,
@@ -526,108 +544,7 @@ class TestCliNew:
         assert not mock_remove_wt.called
         assert not mock_delete_br.called
 
-    def test_new_help_shows_no_commit_docker_option(self):
-        runner = CliRunner()
-        result = runner.invoke(cli, ["new", "--help"])
-        assert result.exit_code == 0
-        assert "--no-commit-docker" in result.output
-
-    def test_no_commit_docker_generates_to_repo_root_first(self):
-        """--no-commit-docker calls ensure_dockerfile with repo path before worktree path."""
-        runner = CliRunner()
-
-        with ExitStack() as stack:
-            mocks = [stack.enter_context(p) for p in _new_patches()]
-            (
-                mock_root,
-                _,
-                _,
-                mock_ensure_df,
-                mock_ensure_dc,
-                mock_db_path,
-                mock_wt_dir,
-                _,
-                _,
-                mock_write,
-                _,
-                _,
-                mock_docker,
-                _,
-                _,
-                _,
-            ) = mocks
-            repo = Path("/repo")
-            mock_root.return_value = (repo, True)
-            mock_db_path.return_value = MagicMock(exists=lambda: False)
-            mock_wt_dir.return_value = repo / ".hatchery/worktrees"
-            mock_write.return_value = repo / ".hatchery/tasks/task.md"
-            mock_docker.return_value = None
-            mock_ensure_df.return_value = False
-            mock_ensure_dc.return_value = False
-            result = runner.invoke(cli, ["new", "my-task", "--no-commit-docker"])
-
-        assert result.exit_code == 0
-        # Called twice: once for repo root (generate), once for worktree (copy via source=repo)
-        assert mock_ensure_df.call_count == 2
-        assert mock_ensure_dc.call_count == 2
-        # First call targets repo root
-        assert mock_ensure_df.call_args_list[0][0][0] == repo
-        assert mock_ensure_dc.call_args_list[0][0][0] == repo
-        # Second call targets worktree
-        worktree = repo / ".hatchery/worktrees/my-task"
-        assert mock_ensure_df.call_args_list[1][0][0] == worktree
-        assert mock_ensure_dc.call_args_list[1][0][0] == worktree
-
-    def test_no_commit_docker_skips_dockerfile_commit(self):
-        """--no-commit-docker never git-commits the Dockerfile."""
-        runner = CliRunner()
-
-        with ExitStack() as stack:
-            mocks = [stack.enter_context(p) for p in _new_patches()]
-            (
-                mock_root,
-                _,
-                _,
-                mock_ensure_df,
-                mock_ensure_dc,
-                mock_db_path,
-                mock_wt_dir,
-                _,
-                mock_run,
-                mock_write,
-                _,
-                _,
-                mock_docker,
-                _,
-                _,
-                _,
-            ) = mocks
-            repo = Path("/repo")
-            mock_root.return_value = (repo, True)
-            mock_db_path.return_value = MagicMock(exists=lambda: False)
-            mock_wt_dir.return_value = repo / ".hatchery/worktrees"
-            mock_write.return_value = repo / ".hatchery/tasks/task.md"
-            mock_docker.return_value = None
-            # Repo-root call creates the file (True); worktree copy returns False
-            mock_ensure_df.side_effect = [True, False]
-            mock_ensure_dc.side_effect = [True, False]
-            result = runner.invoke(cli, ["new", "my-task", "--no-commit-docker"])
-
-        assert result.exit_code == 0
-        dockerfile_commits = [
-            c
-            for c in mock_run.call_args_list
-            if c[0][0] == ["git", "commit", "-m", "chore: add hatchery Docker configuration"]
-        ]
-        assert len(dockerfile_commits) == 0
-        # The task-file commit must use .hatchery/tasks/ (not .hatchery/) so the
-        # copied-but-uncommitted Docker files are not swept into the staging area.
-        task_file_adds = [c for c in mock_run.call_args_list if c[0][0] == ["git", "add", ".hatchery/tasks/"]]
-        assert len(task_file_adds) == 1
-        full_hatchery_adds = [c for c in mock_run.call_args_list if c[0][0] == ["git", "add", ".hatchery/"]]
-        assert len(full_hatchery_adds) == 0
-
-    def test_no_commit_docker_false_default_commits_when_created(self):
+    def test_committed_docker_commits_when_created(self):
         """Without the flag, a newly generated Dockerfile is committed as normal."""
         runner = CliRunner()
 
@@ -635,6 +552,8 @@ class TestCliNew:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
                 mock_root,
+                _,
+                _,
                 _,
                 _,
                 mock_ensure_df,
@@ -662,7 +581,7 @@ class TestCliNew:
             result = runner.invoke(cli, ["new", "my-task"])
 
         assert result.exit_code == 0
-        # ensure_dockerfile called exactly once (no --no-commit-docker)
+        # ensure_dockerfile called exactly once
         assert mock_ensure_df.call_count == 1
         dockerfile_commits = [
             c
@@ -680,6 +599,8 @@ class TestCliNew:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
                 mock_root,
+                _,
+                _,
                 _,
                 _,
                 mock_ensure_df,
@@ -721,49 +642,6 @@ class TestCliNew:
         ]
         assert len(task_file_commits) == 1
 
-    def test_no_commit_docker_existing_dockerfile_not_committed(self):
-        """--no-commit-docker with a pre-existing repo-root Dockerfile never commits it."""
-        runner = CliRunner()
-
-        with ExitStack() as stack:
-            mocks = [stack.enter_context(p) for p in _new_patches()]
-            (
-                mock_root,
-                _,
-                _,
-                mock_ensure_df,
-                mock_ensure_dc,
-                mock_db_path,
-                mock_wt_dir,
-                _,
-                mock_run,
-                mock_write,
-                _,
-                _,
-                mock_docker,
-                _,
-                _,
-                _,
-            ) = mocks
-            repo = Path("/repo")
-            mock_root.return_value = (repo, True)
-            mock_db_path.return_value = MagicMock(exists=lambda: False)
-            mock_wt_dir.return_value = repo / ".hatchery/worktrees"
-            mock_write.return_value = repo / ".hatchery/tasks/task.md"
-            mock_docker.return_value = None
-            # Both calls return False: file already exists at root, copied to worktree
-            mock_ensure_df.return_value = False
-            mock_ensure_dc.return_value = False
-            result = runner.invoke(cli, ["new", "my-task", "--no-commit-docker"])
-
-        assert result.exit_code == 0
-        dockerfile_commits = [
-            c
-            for c in mock_run.call_args_list
-            if c[0][0] == ["git", "commit", "-m", "chore: add hatchery Docker configuration"]
-        ]
-        assert len(dockerfile_commits) == 0
-
     def test_no_commit_skips_all_commits_dockerfile_new(self):
         """--no-commit skips docker and task-file commits even when Dockerfile is brand-new."""
         runner = CliRunner()
@@ -772,6 +650,8 @@ class TestCliNew:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
                 mock_root,
+                _,
+                _,
                 _,
                 _,
                 mock_ensure_df,
@@ -794,9 +674,9 @@ class TestCliNew:
             mock_wt_dir.return_value = repo / ".hatchery/worktrees"
             mock_write.return_value = repo / ".hatchery/tasks/task.md"
             mock_docker.return_value = None
-            # Repo-root call creates (True); worktree copy returns False
-            mock_ensure_df.side_effect = [True, False]
-            mock_ensure_dc.side_effect = [True, False]
+            # Single call to the store
+            mock_ensure_df.return_value = True
+            mock_ensure_dc.return_value = True
             result = runner.invoke(cli, ["new", "my-task", "--no-commit"])
 
         assert result.exit_code == 0
@@ -811,6 +691,8 @@ class TestCliNew:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
                 mock_root,
+                _,
+                _,
                 _,
                 _,
                 mock_ensure_df,
@@ -849,6 +731,8 @@ class TestCliNew:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
                 mock_root,
+                _,
+                _,
                 _,
                 _,
                 mock_ensure_df,
@@ -1022,7 +906,8 @@ class TestCliResume:
         with (
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
-            patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted"),
+            patch("seekr_hatchery.cli.sessions.docker.ensure_dockerfile"),
+            patch("seekr_hatchery.cli.sessions.docker.ensure_docker_config"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch") as mock_launch,
         ):
@@ -1039,14 +924,15 @@ class TestCliResume:
         with (
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None) as mock_docker,
-            patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted"),
+            patch("seekr_hatchery.cli.sessions.docker.ensure_dockerfile"),
+            patch("seekr_hatchery.cli.sessions.docker.ensure_docker_config"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch"),
         ):
             runner.invoke(cli, ["resume", "my-task", "--no-docker"])
 
         call_args = mock_docker.call_args
-        assert call_args[0][2] is True or call_args[1].get("no_docker") is True
+        assert call_args[0][1] is True or call_args[1].get("no_docker") is True
 
     def test_resume_restores_missing_dockerfile(self, tmp_path, fake_tasks_db):
         """cmd_resume restores Docker files when Dockerfile is missing from worktree."""
@@ -1062,7 +948,8 @@ class TestCliResume:
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
             patch("seekr_hatchery.cli.docker.dockerfile_path", return_value=missing_df),
-            patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted") as mock_ensure,
+            patch("seekr_hatchery.cli.sessions.docker.ensure_dockerfile") as mock_ensure,
+            patch("seekr_hatchery.cli.sessions.docker.ensure_docker_config"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch"),
         ):
@@ -1083,7 +970,8 @@ class TestCliResume:
         with (
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
-            patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted") as mock_ensure,
+            patch("seekr_hatchery.cli.sessions.docker.ensure_dockerfile") as mock_ensure,
+            patch("seekr_hatchery.cli.sessions.docker.ensure_docker_config"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch"),
         ):
@@ -1101,7 +989,8 @@ class TestCliResume:
         with (
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
-            patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted") as mock_ensure,
+            patch("seekr_hatchery.cli.sessions.docker.ensure_dockerfile") as mock_ensure,
+            patch("seekr_hatchery.cli.sessions.docker.ensure_docker_config"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch"),
         ):
@@ -1190,7 +1079,8 @@ class TestCliResume:
         with (
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
-            patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted"),
+            patch("seekr_hatchery.cli.sessions.docker.ensure_dockerfile"),
+            patch("seekr_hatchery.cli.sessions.docker.ensure_docker_config"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch") as mock_launch,
         ):
@@ -1263,6 +1153,43 @@ class TestSandbox:
             result = runner.invoke(cli, ["sandbox"])
             assert result.exit_code == 0, result.output
             assert mock_df.called
+
+
+    def test_sandbox_no_commit_writes_docker_to_store_not_repo(self, tmp_path, monkeypatch):
+        """sandbox --no-commit writes docker files to the store, not the repo."""
+        repo = tmp_path / "repo"
+        (repo / ".hatchery").mkdir(parents=True)
+        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path / "hatchery")
+        monkeypatch.setattr(sessions, "_TASKS_DB_DIR", tmp_path / "hatchery" / "tasks")
+
+        runner = CliRunner()
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
+            patch("seekr_hatchery.cli.docker.ensure_dockerfile", return_value=True) as mock_df,
+            patch("seekr_hatchery.cli.docker.ensure_docker_config", return_value=True) as mock_dc,
+            patch("seekr_hatchery.cli.git.add_and_commit") as mock_commit,
+            patch("seekr_hatchery.cli.sessions.ensure_tasks_dir") as mock_tasks_dir,
+            patch("seekr_hatchery.cli.sessions.ensure_repo_store") as mock_store,
+            patch("seekr_hatchery.cli.sessions.docker_store_dir", return_value=tmp_path / "store"),
+            patch("seekr_hatchery.cli.docker.detect_runtime", return_value=docker.DockerRuntime()),
+            patch("seekr_hatchery.cli.docker.load_docker_config", return_value=docker.DockerConfig()),
+            patch("seekr_hatchery.cli.docker.docker_features", return_value={}),
+            patch("seekr_hatchery.cli.docker.launch_sandbox_shell") as mock_launch,
+        ):
+            result = runner.invoke(cli, ["sandbox", "--no-commit"])
+            assert result.exit_code == 0, result.output
+            # ensure_tasks_dir not called (no in-tree .hatchery/tasks)
+            assert not mock_tasks_dir.called
+            # git.add_and_commit not called
+            assert not mock_commit.called
+            # ensure_repo_store called
+            assert mock_store.called
+            # docker files written to store dir, not repo
+            assert mock_df.call_args[0][0] == tmp_path / "store"
+            assert mock_dc.call_args[0][0] == tmp_path / "store"
+            # launch_sandbox_shell gets docker_root=store
+            assert mock_launch.call_args[1]["docker_root"] == tmp_path / "store"
+
 
 
 # ---------------------------------------------------------------------------
@@ -1565,6 +1492,8 @@ class TestCliNoWorktree:
             _,
             _,
             _,
+            _,
+            _,
             mock_db_path,
             mock_wt_dir,
             mock_create_wt,
@@ -1661,6 +1590,8 @@ class TestCliNoWorktree:
                 mock_root,
                 _,
                 _,
+                _,
+                _,
                 mock_ensure_df,
                 mock_ensure_dc,
                 mock_db_path,
@@ -1694,6 +1625,8 @@ class TestCliNoWorktree:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
                 mock_root,
+                _,
+                _,
                 _,
                 _,
                 mock_ensure_df,
@@ -1739,6 +1672,7 @@ class TestCliNoWorktree:
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(tmp_path, False)),
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.sessions.restore_dockerfile_if_needed"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch") as mock_launch,
         ):
@@ -2341,6 +2275,7 @@ class TestResumeChat:
         with (
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.sessions.restore_dockerfile_if_needed"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch") as mock_launch,
         ):
@@ -2359,7 +2294,8 @@ class TestResumeChat:
         with (
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
-            patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted"),
+            patch("seekr_hatchery.cli.sessions.docker.ensure_dockerfile"),
+            patch("seekr_hatchery.cli.sessions.docker.ensure_docker_config"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch") as mock_launch,
         ):
@@ -2519,6 +2455,8 @@ class TestCliNewInclude:
                 _,
                 _,
                 _,
+                _,
+                _,
                 mock_db_path,
                 mock_wt_dir,
                 mock_create_wt,
@@ -2564,6 +2502,8 @@ class TestCliNewInclude:
                 _,
                 _,
                 _,
+                _,
+                _,
                 mock_db_path,
                 mock_wt_dir,
                 _,
@@ -2603,6 +2543,8 @@ class TestCliNewInclude:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
                 mock_root,
+                _,
+                _,
                 _,
                 _,
                 _,
@@ -2651,6 +2593,8 @@ class TestCliNewInclude:
                 _,
                 _,
                 _,
+                _,
+                _,
                 mock_db_path,
                 mock_wt_dir,
                 _,
@@ -2693,9 +2637,26 @@ class TestCliNewInclude:
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
-            (mock_root, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, mock_save, mock_docker, _, _, _) = (
-                mocks
-            )
+            (
+                mock_root,
+                _,
+                _,
+                _,
+                _,
+                _,
+                _,
+                mock_db_path,
+                mock_wt_dir,
+                _,
+                _,
+                mock_write,
+                _,
+                mock_save,
+                mock_docker,
+                _,
+                _,
+                _,
+            ) = mocks
             mock_root.return_value = (Path("/repo"), True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
             mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
@@ -2728,9 +2689,26 @@ class TestCliNewInclude:
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
-            (mock_root, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, mock_save, mock_docker, _, _, _) = (
-                mocks
-            )
+            (
+                mock_root,
+                _,
+                _,
+                _,
+                _,
+                _,
+                _,
+                mock_db_path,
+                mock_wt_dir,
+                _,
+                _,
+                mock_write,
+                _,
+                mock_save,
+                mock_docker,
+                _,
+                _,
+                _,
+            ) = mocks
             mock_root.return_value = (Path("/repo"), True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
             mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
@@ -2760,7 +2738,11 @@ class TestCliNewInclude:
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
-            (mock_root, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, _, mock_docker, _, _, _) = mocks
+            (mock_root, _, _, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, _, mock_docker, _, _, _) = (
+                mocks
+            )
+            (_,)
+            (_,)
             mock_root.return_value = (Path("/repo"), True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
             mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
@@ -2791,9 +2773,26 @@ class TestCliNewInclude:
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
-            (mock_root, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, mock_save, mock_docker, _, _, _) = (
-                mocks
-            )
+            (
+                mock_root,
+                _,
+                _,
+                _,
+                _,
+                _,
+                _,
+                mock_db_path,
+                mock_wt_dir,
+                _,
+                _,
+                mock_write,
+                _,
+                mock_save,
+                mock_docker,
+                _,
+                _,
+                _,
+            ) = mocks
             mock_root.return_value = (tmp_path, True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
             mock_wt_dir.return_value = tmp_path / ".hatchery/worktrees"
@@ -2830,9 +2829,26 @@ class TestCliNewInclude:
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
-            (mock_root, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, mock_save, mock_docker, _, _, _) = (
-                mocks
-            )
+            (
+                mock_root,
+                _,
+                _,
+                _,
+                _,
+                _,
+                _,
+                mock_db_path,
+                mock_wt_dir,
+                _,
+                _,
+                mock_write,
+                _,
+                mock_save,
+                mock_docker,
+                _,
+                _,
+                _,
+            ) = mocks
             mock_root.return_value = (tmp_path, True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
             mock_wt_dir.return_value = tmp_path / ".hatchery/worktrees"
@@ -2889,7 +2905,8 @@ class TestCliResumeInclude:
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
             patch("seekr_hatchery.cli.sessions.save", side_effect=lambda m: saved.append(m.model_dump())),
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
-            patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted"),
+            patch("seekr_hatchery.cli.sessions.docker.ensure_dockerfile"),
+            patch("seekr_hatchery.cli.sessions.docker.ensure_docker_config"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli.git.create_include_worktrees"),
             patch("seekr_hatchery.cli.git.remove_include_worktrees"),
@@ -2964,7 +2981,8 @@ class TestCliResumeInclude:
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
             patch("seekr_hatchery.cli.sessions.save"),
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
-            patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted"),
+            patch("seekr_hatchery.cli.sessions.docker.ensure_dockerfile"),
+            patch("seekr_hatchery.cli.sessions.docker.ensure_docker_config"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli.git.create_include_worktrees") as mock_create,
             patch("seekr_hatchery.cli.git.remove_include_worktrees") as mock_remove,
@@ -2993,7 +3011,8 @@ class TestCliResumeInclude:
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
             patch("seekr_hatchery.cli.sessions.save"),
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
-            patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted"),
+            patch("seekr_hatchery.cli.sessions.docker.ensure_dockerfile"),
+            patch("seekr_hatchery.cli.sessions.docker.ensure_docker_config"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli.git.create_include_worktrees") as mock_create,
             patch("seekr_hatchery.cli.git.remove_include_worktrees") as mock_remove,
@@ -3034,7 +3053,8 @@ class TestCliResumeInclude:
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
             patch("seekr_hatchery.cli.sessions.save"),
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
-            patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted"),
+            patch("seekr_hatchery.cli.sessions.docker.ensure_dockerfile"),
+            patch("seekr_hatchery.cli.sessions.docker.ensure_docker_config"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli.git.create_include_worktrees") as mock_create,
             patch("seekr_hatchery.cli.git.remove_include_worktrees") as mock_remove,
@@ -3068,7 +3088,8 @@ class TestCliResumeInclude:
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
             patch("seekr_hatchery.cli.sessions.save") as mock_save,
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
-            patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted"),
+            patch("seekr_hatchery.cli.sessions.docker.ensure_dockerfile"),
+            patch("seekr_hatchery.cli.sessions.docker.ensure_docker_config"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli.git.create_worktree"),
             patch("seekr_hatchery.cli.git.create_include_worktrees") as mock_create_inc,
@@ -3110,7 +3131,8 @@ class TestCliResumeInclude:
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
             patch("seekr_hatchery.cli.sessions.save") as mock_save,
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
-            patch("seekr_hatchery.cli.docker.ensure_docker_files_uncommitted"),
+            patch("seekr_hatchery.cli.sessions.docker.ensure_dockerfile"),
+            patch("seekr_hatchery.cli.sessions.docker.ensure_docker_config"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli.git.create_worktree"),
             patch("seekr_hatchery.cli.git.create_include_worktrees") as mock_create_inc,
@@ -3143,9 +3165,26 @@ class TestCliResumeInclude:
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
-            (mock_root, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, mock_save, mock_docker, _, _, _) = (
-                mocks
-            )
+            (
+                mock_root,
+                _,
+                _,
+                _,
+                _,
+                _,
+                _,
+                mock_db_path,
+                mock_wt_dir,
+                _,
+                _,
+                mock_write,
+                _,
+                mock_save,
+                mock_docker,
+                _,
+                _,
+                _,
+            ) = mocks
             mock_root.return_value = (tmp_path, True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
             mock_wt_dir.return_value = tmp_path / ".hatchery/worktrees"
@@ -3482,3 +3521,90 @@ class TestLaunchFinalizeInclude:
         assert mock_run_session.called
         kwargs = mock_run_session.call_args[1]
         assert entry_b in kwargs.get("include_entries", [])
+
+
+# ---------------------------------------------------------------------------
+# auto_commit config + --commit/--no-commit flag resolution
+# ---------------------------------------------------------------------------
+
+
+class TestAutoCommitResolution:
+    """Test that --commit/--no-commit flag resolves against auto_commit config.
+
+    These tests write a real config file (with auto_commit set) to the
+    home-redirected config path, then invoke the CLI. The _new_patches
+    mock all filesystem-touching functions, so only the flag resolution
+    and the saved meta are exercised.
+    """
+
+    @staticmethod
+    def _write_config(home, auto_commit):
+        import json
+
+        path = home / ".hatchery" / "config.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"schema_version": "1", "auto_commit": auto_commit}))
+
+    def test_no_flag_auto_commit_true(self, home):
+        """No flag + auto_commit=True → no_commit=False."""
+        self._write_config(home, True)
+        runner = CliRunner()
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in _new_patches()]
+            mock_root, _, _, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, mock_save, _, _, _, _ = mocks
+            mock_root.return_value = (Path("/repo"), True)
+            mock_db_path.return_value = MagicMock(exists=lambda: False)
+            mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
+            mock_write.return_value = Path("/repo/.hatchery/tasks/task.md")
+            result = runner.invoke(cli, ["new", "my-task"])
+        assert result.exit_code == 0, result.output
+        saved_meta = mock_save.call_args[0][0]
+        assert saved_meta.get("no_commit") is False
+
+    def test_no_flag_auto_commit_false(self, home):
+        """No flag + auto_commit=False → no_commit=True."""
+        self._write_config(home, False)
+        runner = CliRunner()
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in _new_patches()]
+            mock_root, _, _, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, mock_save, _, _, _, _ = mocks
+            mock_root.return_value = (Path("/repo"), True)
+            mock_db_path.return_value = MagicMock(exists=lambda: False)
+            mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
+            mock_write.return_value = Path("/repo/.hatchery/tasks/task.md")
+            result = runner.invoke(cli, ["new", "my-task"])
+        assert result.exit_code == 0, result.output
+        saved_meta = mock_save.call_args[0][0]
+        assert saved_meta.get("no_commit") is True
+
+    def test_explicit_commit_overrides_false(self, home):
+        """--commit + auto_commit=False → no_commit=False."""
+        self._write_config(home, False)
+        runner = CliRunner()
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in _new_patches()]
+            mock_root, _, _, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, mock_save, _, _, _, _ = mocks
+            mock_root.return_value = (Path("/repo"), True)
+            mock_db_path.return_value = MagicMock(exists=lambda: False)
+            mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
+            mock_write.return_value = Path("/repo/.hatchery/tasks/task.md")
+            result = runner.invoke(cli, ["new", "my-task", "--commit"])
+        assert result.exit_code == 0, result.output
+        saved_meta = mock_save.call_args[0][0]
+        assert saved_meta.get("no_commit") is False
+
+    def test_explicit_no_commit_overrides_true(self, home):
+        """--no-commit + auto_commit=True → no_commit=True."""
+        self._write_config(home, True)
+        runner = CliRunner()
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in _new_patches()]
+            mock_root, _, _, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, mock_save, _, _, _, _ = mocks
+            mock_root.return_value = (Path("/repo"), True)
+            mock_db_path.return_value = MagicMock(exists=lambda: False)
+            mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
+            mock_write.return_value = Path("/repo/.hatchery/tasks/task.md")
+            result = runner.invoke(cli, ["new", "my-task", "--no-commit"])
+        assert result.exit_code == 0, result.output
+        saved_meta = mock_save.call_args[0][0]
+        assert saved_meta.get("no_commit") is True

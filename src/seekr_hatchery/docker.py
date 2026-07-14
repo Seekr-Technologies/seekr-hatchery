@@ -619,29 +619,12 @@ def detect_runtime() -> ContainerRuntime:
 def ensure_dockerfile(
     repo: Path,
     backend: agent.AgentBackend = agent.CODEX,
-    *,
-    source: Path | None = None,
 ) -> bool:
-    """Write a starter Dockerfile if none exists. Returns True if created.
-
-    If *source* is given and the Dockerfile exists there but not in *repo*,
-    the file is copied from *source* instead of generated from the template.
-    Returns False in that case so callers do not auto-commit a file the user
-    intentionally left uncommitted.
-    """
+    """Write a starter Dockerfile if none exists. Returns True if created."""
     df = dockerfile_path(repo, backend)
     if df.exists():
         return False
     df.parent.mkdir(parents=True, exist_ok=True)
-    if source is not None:
-        source_df = dockerfile_path(source, backend)
-        if source_df.exists():
-            shutil.copy2(source_df, df)
-            ui.warn(
-                f"  Copied {df.relative_to(repo)} from repo root "
-                "(uncommitted — will not be committed to this worktree branch)"
-            )
-            return False
     text = _DOCKERFILE_TEMPLATE.read_text()
     text = text.replace("{{AGENT_INSTALL}}", backend.dockerfile_install)
     text = text.replace("{{DIND}}", _comment_out(DIND_DOCKERFILE_LINES))
@@ -679,51 +662,21 @@ def _migrate_docker_config(data: dict) -> dict:
     return data
 
 
-def ensure_docker_config(repo: Path, *, source: Path | None = None) -> bool:
+def ensure_docker_config(repo: Path) -> bool:
     """Write .hatchery/docker.yaml from template if it does not already exist.
 
     Returns True if the file was created, False if it already existed.
-
-    If *source* is given and docker.yaml exists there but not in *repo*,
-    the file is copied from *source* instead of generated from the template.
-    Returns False in that case so callers do not auto-commit a file the user
-    intentionally left uncommitted.
     """
     config_file = repo / DOCKER_CONFIG
     if config_file.exists():
         return False
     config_file.parent.mkdir(parents=True, exist_ok=True)
-    if source is not None:
-        source_config = source / DOCKER_CONFIG
-        if source_config.exists():
-            shutil.copy2(source_config, config_file)
-            ui.warn(
-                f"  Copied {DOCKER_CONFIG} from repo root (uncommitted — will not be committed to this worktree branch)"
-            )
-            return False
     config_file.write_text(_DOCKER_CONFIG_TEMPLATE.read_text())
     ui.info(f"  Created {DOCKER_CONFIG}")
     answer = input("  Would you like to edit the docker config? [Y/n] ").strip().lower()
     if answer != "n":
         open_for_editing(config_file)
     return True
-
-
-def ensure_docker_files_uncommitted(
-    repo: Path,
-    worktree: Path,
-    backend: agent.AgentBackend,
-) -> None:
-    """Ensure Docker files exist in *worktree* without committing.
-
-    Generates Dockerfile and docker.yaml in the repo root if they don't
-    already exist, then copies them into the worktree via the *source*
-    parameter so they remain uncommitted on the task branch.
-    """
-    ensure_dockerfile(repo, backend)
-    ensure_docker_config(repo)
-    ensure_dockerfile(worktree, backend, source=repo)
-    ensure_docker_config(worktree, source=repo)
 
 
 # ── DinD helpers ──────────────────────────────────────────────────────────────
@@ -798,8 +751,7 @@ def launch_context(
     """
     if runtime is None:
         return None, [], ""
-    root = meta.repo_path if meta.no_worktree else meta.worktree_path
-    config = load_docker_config(root)
+    config = load_docker_config(meta.docker_root)
     features = docker_features(config)
     _check_host_path_safe_for_mount(meta.repo_path)
     container_workdir = str(meta.worktree_path)
@@ -1073,6 +1025,13 @@ def build_mounts(
             mounts.append(_clipboard_image_mount(session_dir))
         if config.follow_symlinks:
             mounts.extend(_construct_symlink_mounts(meta.worktree_path, mounts))
+
+    # In no-commit mode, mount the record store RW so the agent can edit
+    # the live task file and read sibling records for cross-task context.
+    if meta.no_commit and meta.type != "chat":
+        record_dir = meta.record_dir
+        record_dir.mkdir(parents=True, exist_ok=True)
+        mounts.append(BindMount(src=str(record_dir), dst=str(record_dir), mode="RW"))
 
     if include_entries:
         mounts.extend(_docker_mounts_includes(include_entries, meta.name, session_dir, no_worktree=meta.no_worktree))
@@ -1467,7 +1426,7 @@ def run_session(
     if meta.no_worktree:
         container_workdir = str(meta.worktree_path)
         container_repo = str(meta.worktree_path)
-        build_root = meta.worktree_path  # cwd serves as build context root
+        build_root = meta.docker_root
     else:
         # Pre-seed writable sentinel files for git's .git/-root writes.
         git_sentinels = []
@@ -1485,7 +1444,7 @@ def run_session(
 
         container_workdir = str(meta.worktree_path)
         container_repo = str(meta.repo_path)
-        build_root = meta.worktree_path
+        build_root = meta.docker_root
 
     if config.dind and not _dind_dockerfile_ok(build_root, backend):
         ui.warn("dind: true is set but the Dockerfile doesn't appear to install Podman.")
@@ -1551,6 +1510,7 @@ def launch_sandbox_shell(
     kubectl_proxy_token: str = "",
     shell: str = "/bin/bash",
     no_cache: bool = False,
+    docker_root: Path | None = None,
 ) -> None:
     """Drop the user into an interactive shell inside the sandbox container.
 
@@ -1558,10 +1518,17 @@ def launch_sandbox_shell(
     The repo is mounted RW at its host path (so the sandbox shell sees the
     same paths a native shell would).
 
+    *docker_root* is the directory whose ``.hatchery/`` holds the Dockerfile
+    — defaults to *repo* (committed mode). In not-committed mode the caller
+    passes the out-of-tree docker store so the image builds from the store's
+    Dockerfile, not the repo root.
+
     Caller resolves *image_name* — typically ``sessions.image_name(repo, "sandbox")``.
     """
+    if docker_root is None:
+        docker_root = repo
     _check_host_path_safe_for_mount(repo)
-    build_docker_image(repo, repo, image_name, backend, runtime=runtime, no_cache=no_cache)
+    build_docker_image(repo, docker_root, image_name, backend, runtime=runtime, no_cache=no_cache)
     mounts: list[Mount] = [BindMount(src=str(repo), dst=str(repo), mode="RW")]
     mounts.extend(_default_home_mounts())
     mounts.extend(_construct_docker_mounts(config))
@@ -1611,7 +1578,7 @@ def exec_task_shell(container_name: str, runtime: ContainerRuntime, shell: str =
 
 
 def resolve_runtime(
-    repo: Path, worktree: Path, no_docker: bool, backend: agent.AgentBackend = agent.CODEX
+    docker_root: Path, no_docker: bool, backend: agent.AgentBackend = agent.CODEX
 ) -> ContainerRuntime | None:
     """Return the runtime to use for this session, or None to run natively.
 
@@ -1620,15 +1587,20 @@ def resolve_runtime(
     function prints an error and exits so the user is never silently placed in
     an unsandboxed environment.
 
+    *docker_root* is the directory whose ``.hatchery/`` holds the Dockerfile
+    — either the worktree (commit mode), the repo root (no-worktree), or the
+    out-of-tree store (no-commit mode). Use ``SessionMeta.docker_root`` to
+    get the right one.
+
     Checks for the agent-specific Dockerfile (e.g. ``Dockerfile.codex``).
     """
     if no_docker:
         logger.debug("--no-docker set, running natively")
         return None
-    agent_df = dockerfile_path(worktree, backend)
+    agent_df = dockerfile_path(docker_root, backend)
     if not agent_df.exists():
         ui.error(
-            f"No Dockerfile found for '{backend.kind.lower()}' in {worktree / '.hatchery'}.\n"
+            f"No Dockerfile found for '{backend.kind.lower()}' in {docker_root / '.hatchery'}.\n"
             "A Dockerfile is required for sandbox mode. "
             "Run `hatchery new` to create one, or pass --no-docker to run without a sandbox."
         )

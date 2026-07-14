@@ -106,3 +106,46 @@ class SessionMeta(BaseModel):
     @property
     def include_entries(self) -> list[IncludeEntry]:
         return load_include_entries({"include": self.include})
+
+    @property
+    def record_dir(self) -> Path:
+        """Out-of-tree record store directory for this repo."""
+        from seekr_hatchery.sessions import record_store_dir
+
+        return record_store_dir(self.repo_path)
+
+    @property
+    def task_dir(self) -> Path:
+        """Where the task file lives.
+
+        Not-committed mode: out-of-tree record store (survives worktree removal).
+        Committed mode: in-tree .hatchery/tasks/ (committed to the repo).
+
+        Defensive fallback: if the primary location has no ``*-<name>.md`` file
+        but the other location does (e.g. a hand-edited meta or partial
+        migration), return the other location so the record is not silently
+        lost — ``done`` would otherwise fail to preserve it.
+        """
+        import glob
+
+        primary = self.record_dir if self.no_commit else self.worktree_path / ".hatchery" / "tasks"
+        fallback = self.worktree_path / ".hatchery" / "tasks" if self.no_commit else self.record_dir
+        if glob.glob(str(primary / f"*-{self.name}.md")):
+            return primary
+        if glob.glob(str(fallback / f"*-{self.name}.md")):
+            return fallback
+        return primary
+
+    @property
+    def docker_root(self) -> Path:
+        """Where Docker files live and builds are rooted.
+
+        Not-committed mode: out-of-tree docker store.
+        Committed mode + no_worktree: repo root.
+        Committed mode + worktree: worktree root.
+        """
+        if self.no_commit:
+            from seekr_hatchery.sessions import docker_store_dir
+
+            return docker_store_dir(self.repo_path)
+        return self.repo_path if self.no_worktree else self.worktree_path

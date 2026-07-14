@@ -18,6 +18,7 @@ class TestUserConfigModelDefaults:
             "schema_version": "1",
             "default_agent": None,
             "open_editor": False,
+            "auto_commit": True,
         }
 
     def test_invalid_schema_version_rejected(self):
@@ -215,3 +216,39 @@ class TestResolveBackendAutoDetect:
         result = user_config.UserConfig.load(path).resolve_backend(None)
         assert result is agent.CODEX
         assert not path.exists()
+
+
+# ---------------------------------------------------------------------------
+# set_auto_commit — mutates in memory only
+# ---------------------------------------------------------------------------
+
+
+class TestSetAutoCommit:
+    def test_defaults_to_true(self, tmp_path):
+        cfg = user_config.UserConfig.load(tmp_path / "config.json")
+        assert cfg.auto_commit is True
+
+    def test_sets_value_in_memory(self, tmp_path):
+        cfg = user_config.UserConfig.load(tmp_path / "config.json")
+        assert cfg.auto_commit is True
+        cfg.set_auto_commit(False)
+        assert cfg.auto_commit is False
+
+    def test_round_trip(self, tmp_path):
+        path = tmp_path / "config.json"
+        cfg = user_config.UserConfig.load(path)
+        cfg.set_auto_commit(False)
+        cfg.save()
+        reloaded = user_config.UserConfig.load(path)
+        assert reloaded.auto_commit is False
+
+    def test_load_from_file(self, tmp_path):
+        path = tmp_path / "config.json"
+        path.write_text(json.dumps({"schema_version": "1", "auto_commit": False}))
+        cfg = user_config.UserConfig.load(path)
+        assert cfg.auto_commit is False
+
+    def test_validate_accepts_auto_commit(self, tmp_path):
+        path = tmp_path / "config.json"
+        path.write_text('{"schema_version": "1", "auto_commit": false}')
+        assert user_config.validate_config_file(path) is None

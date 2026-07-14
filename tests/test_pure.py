@@ -11,6 +11,7 @@ import seekr_hatchery.constants as constants
 import seekr_hatchery.docker as docker
 import seekr_hatchery.sessions as sessions
 import seekr_hatchery.utils as utils
+from seekr_hatchery.models import SessionMeta
 
 
 def _make_mutator(key: str = "test-key"):
@@ -34,18 +35,18 @@ class TestFindTaskFile:
         task_file = tmp_path / ".hatchery" / "tasks" / "2026-01-15-my-task.md"
         task_file.parent.mkdir(parents=True)
         task_file.write_text("contents")
-        assert sessions.find_task_file(tmp_path, "my-task") == task_file
+        assert sessions.find_task_file(tmp_path / ".hatchery" / "tasks", "my-task") == task_file
 
     def test_returns_none_when_no_match(self, tmp_path):
         (tmp_path / ".hatchery" / "tasks").mkdir(parents=True)
-        assert sessions.find_task_file(tmp_path, "nonexistent") is None
+        assert sessions.find_task_file(tmp_path / ".hatchery" / "tasks", "nonexistent") is None
 
     def test_returns_latest_when_multiple(self, tmp_path):
         tasks_dir = tmp_path / ".hatchery" / "tasks"
         tasks_dir.mkdir(parents=True)
         (tasks_dir / "2026-01-10-my-task.md").write_text("old")
         (tasks_dir / "2026-03-04-my-task.md").write_text("new")
-        result = sessions.find_task_file(tmp_path, "my-task")
+        result = sessions.find_task_file(tasks_dir, "my-task")
         assert result == tasks_dir / "2026-03-04-my-task.md"
 
 
@@ -131,18 +132,22 @@ class TestTaskFileName:
 
 
 class TestSessionPrompt:
+    @staticmethod
+    def _meta(worktree, name):
+        return SessionMeta(name=name, repo=str(worktree), worktree=str(worktree))
+
     def test_contains_task_file_path(self, tmp_path):
         task_file = tmp_path / ".hatchery" / "tasks" / "2026-01-15-my-task.md"
         task_file.parent.mkdir(parents=True)
         task_file.write_text("task contents")
-        result = sessions.session_prompt("my-task", tmp_path)
+        result = sessions.session_prompt(self._meta(tmp_path, "my-task"))
         assert ".hatchery/tasks/2026-01-15-my-task.md" in result
 
     def test_is_string(self, tmp_path):
         task_file = tmp_path / ".hatchery" / "tasks" / "2026-01-15-foo.md"
         task_file.parent.mkdir(parents=True)
         task_file.write_text("contents")
-        result = sessions.session_prompt("foo", tmp_path)
+        result = sessions.session_prompt(self._meta(tmp_path, "foo"))
         assert isinstance(result, str)
 
     def test_file_not_found_returns_fallback_prompt(self, tmp_path):
@@ -150,7 +155,7 @@ class TestSessionPrompt:
         prompt explains the situation so the agent can recover.
         """
         (tmp_path / ".hatchery" / "tasks").mkdir(parents=True)
-        result = sessions.session_prompt("nonexistent", tmp_path)
+        result = sessions.session_prompt(self._meta(tmp_path, "nonexistent"))
         assert isinstance(result, str)
         assert "nonexistent" in result
         assert "not present" in result or "missing" in result
@@ -159,7 +164,7 @@ class TestSessionPrompt:
         """Even with no .hatchery/tasks/ directory at all, session_prompt
         should return a fallback string rather than raising.
         """
-        result = sessions.session_prompt("nonexistent", tmp_path)
+        result = sessions.session_prompt(self._meta(tmp_path, "nonexistent"))
         assert isinstance(result, str)
         assert "nonexistent" in result
 
@@ -167,12 +172,12 @@ class TestSessionPrompt:
         task_file = tmp_path / ".hatchery" / "tasks" / "2026-01-15-foo.md"
         task_file.parent.mkdir(parents=True)
         task_file.write_text("contents")
-        result = sessions.session_prompt("foo", tmp_path, extra_note="HELLO")
+        result = sessions.session_prompt(self._meta(tmp_path, "foo"), extra_note="HELLO")
         assert result.startswith("HELLO")
         assert "contents" in result
 
     def test_extra_note_prepended_when_file_missing(self, tmp_path):
-        result = sessions.session_prompt("foo", tmp_path, extra_note="HELLO")
+        result = sessions.session_prompt(self._meta(tmp_path, "foo"), extra_note="HELLO")
         assert result.startswith("HELLO")
         assert "foo" in result
 
@@ -181,7 +186,7 @@ class TestSessionPrompt:
         task_file = tmp_path / ".hatchery" / "tasks" / "2026-01-01-old-task.md"
         task_file.parent.mkdir(parents=True)
         task_file.write_text("created yesterday")
-        result = sessions.session_prompt("old-task", tmp_path)
+        result = sessions.session_prompt(self._meta(tmp_path, "old-task"))
         assert "2026-01-01-old-task.md" in result
         assert "created yesterday" in result
 
@@ -333,7 +338,7 @@ class TestMigrate:
         result = sessions._migrate(meta)
         assert result["schema_version"] == 1
 
-    def test_v1_idempotent(self):
+    def test_v1_is_idempotent(self):
         meta = {"name": "test", "schema_version": 1}
         result = sessions._migrate(meta)
         assert result["schema_version"] == 1

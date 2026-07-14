@@ -147,7 +147,7 @@ def _do_mark_done(name: str, repo: Path, worktree: Path) -> None:
     commit_changes = False
 
     if not meta.no_worktree and worktree.exists():
-        task_path = sessions.find_task_file(worktree, name)
+        task_path = sessions.find_task_file(meta.task_dir, name)
         if task_path and task_path.exists():
             content = task_path.read_text()
             if "## Summary" not in content:
@@ -253,7 +253,8 @@ def _post_exit_check(
     features: list[str] | None = None,
     prompt_note: str = "",
 ) -> None:
-    task_path = sessions.find_task_file(worktree, name)
+    meta = sessions.load(repo, name)
+    task_path = sessions.find_task_file(meta.task_dir, name)
     if task_path and task_path.exists():
         content = task_path.read_text()
         if sessions.is_task_complete(content):
@@ -277,12 +278,11 @@ def _post_exit_check(
     click.echo()
     choice = input("Choice [w/x/l, Enter = leave for later]: ").strip().lower()
     if choice == "w":
-        meta = sessions.load(repo, name)
         if not meta.session_id:
             ui.error("no session ID found. Cannot relaunch.")
             return
         backend = agent.from_kind(meta.agent)
-        runtime = docker.resolve_runtime(repo, worktree, no_docker=not sandbox, backend=backend)
+        runtime = docker.resolve_runtime(meta.docker_root, no_docker=not sandbox, backend=backend)
         main_branch = git.get_default_branch(repo)
         include_repos = load_include_entries({"include": meta.include})
         _launch(
@@ -476,18 +476,6 @@ def cli(log_level: str) -> None:
     help="Rebuild the sandbox image from scratch, ignoring the layer cache",
 )
 @click.option(
-    "--no-commit-docker",
-    "no_commit_docker",
-    is_flag=True,
-    help=(
-        "Write the generated Dockerfile and docker.yaml to the repo root instead of "
-        "the worktree branch, and skip the automatic commit. "
-        "Useful for keeping Docker config out of version control. "
-        "If you forgot this flag on your first run, use "
-        "`git rm --cached .hatchery/Dockerfile.<agent> .hatchery/docker.yaml` to undo."
-    ),
-)
-@click.option(
     "--include",
     "include",
     multiple=True,
@@ -524,13 +512,13 @@ def cli(log_level: str) -> None:
     ),
 )
 @click.option(
-    "--no-commit",
-    "no_commit",
-    is_flag=True,
+    "--commit/--no-commit",
+    "commit",
+    default=None,
     help=(
-        "Skip all automatic git commits made by hatchery "
-        "(task file, Docker configuration, etc.). "
-        "Files are still written to the worktree but never staged or committed."
+        "Whether hatchery should auto-commit its scaffolding (task file, "
+        "Docker configuration, etc.). Default: from config (true). "
+        "Use --no-commit to skip all hatchery commits."
     ),
 )
 def cmd_new(
@@ -541,11 +529,10 @@ def cmd_new(
     editor: bool | None,
     agent_name: str,
     rebuild_sandbox: bool,
-    no_commit_docker: bool,
     include: tuple[Path, ...],
     include_rw: tuple[Path, ...],
     include_ro: tuple[Path, ...],
-    no_commit: bool,
+    commit: bool | None,
 ) -> None:
     """Start a new task."""
     ui.hatchery_header(_version)
@@ -557,6 +544,7 @@ def cmd_new(
     cfg = user_config.UserConfig.load()
     backend = cfg.resolve_backend(agent_name)
     use_editor = editor if editor is not None else cfg.open_editor
+    no_commit = (not commit) if commit is not None else (not cfg.auto_commit)
 
     # Resolve --include paths: convert CLI tuples → entries, then sessions
     # merges them with docker.yaml's 'include:' list.
@@ -578,7 +566,6 @@ def cmd_new(
             base=base,
             no_worktree=no_worktree,
             no_commit=no_commit,
-            no_commit_docker=no_commit_docker,
             no_docker=no_docker,
             in_repo=in_repo,
             include_entries=include_repos,
@@ -591,7 +578,7 @@ def cmd_new(
         ui.warn("Cancelled.")
         sys.exit(1)
 
-    runtime = docker.resolve_runtime(meta.repo_path, meta.worktree_path, no_docker, backend=backend)
+    runtime = docker.resolve_runtime(meta.docker_root, no_docker, backend=backend)
     main_branch = git.get_default_branch(repo) if in_repo else ""
     include_repos = load_include_entries({"include": meta.include})
     try:
@@ -626,12 +613,15 @@ def cmd_new(
     help="Agent to use (auto-detected if not specified)",
 )
 @click.option(
-    "--no-commit",
-    "no_commit",
-    is_flag=True,
-    help="Skip all automatic git commits made by hatchery (Docker configuration, etc.).",
+    "--commit/--no-commit",
+    "commit",
+    default=None,
+    help=(
+        "Whether hatchery should auto-commit its scaffolding (Docker configuration, etc.). "
+        "Default: from config (true). Use --no-commit to skip all hatchery commits."
+    ),
 )
-def cmd_chat(name: str | None, agent_name: str, no_commit: bool) -> None:
+def cmd_chat(name: str | None, agent_name: str, commit: bool | None) -> None:
     """Start a free-form chat session in a sandbox."""
     ui.hatchery_header(_version)
     repo, in_repo = git.git_root_or_cwd()
@@ -640,6 +630,7 @@ def cmd_chat(name: str | None, agent_name: str, no_commit: bool) -> None:
 
     cfg = user_config.UserConfig.load()
     backend = cfg.resolve_backend(agent_name)
+    no_commit = (not commit) if commit is not None else (not cfg.auto_commit)
 
     name = sessions.next_chat_name(repo) if name is None else utils.to_name(name)
 
@@ -656,7 +647,7 @@ def cmd_chat(name: str | None, agent_name: str, no_commit: bool) -> None:
         ui.warn("Cancelled.")
         sys.exit(1)
 
-    runtime = docker.resolve_runtime(repo, repo, no_docker=False, backend=backend)
+    runtime = docker.resolve_runtime(meta.docker_root, no_docker=False, backend=backend)
     main_branch = git.get_default_branch(repo) if in_repo else ""
     _launch(
         meta,
@@ -784,7 +775,7 @@ def cmd_resume(
     updates = _cli_includes_to_entries(include, include_rw, include_ro)
     include_repos = sessions.merge_include_updates(include_repos, updates, meta)
 
-    runtime = docker.resolve_runtime(repo, meta.worktree_path, no_docker, backend=backend)
+    runtime = docker.resolve_runtime(meta.docker_root, no_docker, backend=backend)
     _launch(
         meta,
         kind=launch_kind,
@@ -807,28 +798,41 @@ def cmd_resume(
     help="Rebuild the sandbox image from scratch, ignoring the layer cache",
 )
 @click.option(
-    "--no-commit",
-    "no_commit",
-    is_flag=True,
-    help="Skip all automatic git commits made by hatchery (Docker configuration, etc.).",
+    "--commit/--no-commit",
+    "commit",
+    default=None,
+    help=(
+        "Whether hatchery should auto-commit its scaffolding (Docker configuration, etc.). "
+        "Default: from config (true). Use --no-commit to skip all hatchery commits."
+    ),
 )
-def cmd_sandbox(shell: str, rebuild_sandbox: bool, no_commit: bool) -> None:
+def cmd_sandbox(shell: str, rebuild_sandbox: bool, commit: bool | None) -> None:
     """Drop into an interactive shell inside the Docker sandbox."""
     repo, in_repo = git.git_root_or_cwd()
     cfg = user_config.UserConfig.load()
     backend = cfg.resolve_backend(None)
-    sessions.ensure_tasks_dir(repo)
-    df_created = docker.ensure_dockerfile(repo, backend)
-    dc_created = docker.ensure_docker_config(repo)
-    if in_repo and not no_commit and (df_created or dc_created):
-        ui.info("  Committing...")
-        git.add_and_commit(
-            repo,
-            "chore: add hatchery Docker configuration",
-            paths=[str(docker.dockerfile_path(repo, backend).relative_to(repo)), str(DOCKER_CONFIG)],
-        )
+    no_commit = (not commit) if commit is not None else (not cfg.auto_commit)
+
+    if not no_commit:
+        docker_root = repo
+        sessions.ensure_tasks_dir(repo)
+        df_created = docker.ensure_dockerfile(docker_root, backend)
+        dc_created = docker.ensure_docker_config(docker_root)
+        if in_repo and (df_created or dc_created):
+            ui.info("  Committing...")
+            git.add_and_commit(
+                repo,
+                "chore: add hatchery Docker configuration",
+                paths=[str(docker.dockerfile_path(repo, backend).relative_to(repo)), str(DOCKER_CONFIG)],
+            )
+    else:
+        sessions.ensure_repo_store(repo)
+        docker_root = sessions.docker_store_dir(repo)
+        docker.ensure_dockerfile(docker_root, backend)
+        docker.ensure_docker_config(docker_root)
+
     runtime = docker.detect_runtime()
-    config = docker.load_docker_config(repo)
+    config = docker.load_docker_config(docker_root)
     features = docker.docker_features(config)
     ui.banner("sandbox", repo, sandbox=True, worktree=False, features=features)
     docker.launch_sandbox_shell(
@@ -839,6 +843,7 @@ def cmd_sandbox(shell: str, rebuild_sandbox: bool, no_commit: bool) -> None:
         image_name=sessions.image_name(repo, "sandbox"),
         shell=shell,
         no_cache=rebuild_sandbox,
+        docker_root=docker_root,
     )
 
 
@@ -927,7 +932,7 @@ def cmd_status(name: str) -> None:
     """Show task file and metadata."""
     repo, _ = git.git_root_or_cwd()
     meta = sessions.load(repo, name)
-    task_path = sessions.find_task_file(meta.worktree_path, name)
+    task_path = sessions.find_task_file(meta.task_dir, name)
 
     click.echo(click.style("Name:     ", bold=True) + meta.name)
     click.echo(click.style("Type:     ", bold=True) + meta.type)
