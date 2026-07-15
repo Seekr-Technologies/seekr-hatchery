@@ -461,8 +461,8 @@ class TestCliNew:
             runner.invoke(cli, ["new", "my-task"])
 
         worktree = Path("/repo/.hatchery/worktrees/my-task")
-        assert mock_ensure_df.call_args[0][0] == worktree
-        assert mock_ensure_dc.call_args[0][0] == worktree
+        assert mock_ensure_df.call_args[0][0] == worktree / ".hatchery"
+        assert mock_ensure_dc.call_args[0][0] == worktree / ".hatchery"
 
     def test_keyboard_interrupt_cleans_up_worktree(self):
         """Ctrl-C after worktree creation removes the worktree and branch."""
@@ -1170,7 +1170,7 @@ class TestSandbox:
             patch("seekr_hatchery.cli.git.add_and_commit") as mock_commit,
             patch("seekr_hatchery.cli.sessions.ensure_tasks_dir") as mock_tasks_dir,
             patch("seekr_hatchery.cli.sessions.ensure_repo_store") as mock_store,
-            patch("seekr_hatchery.cli.sessions.docker_store_dir", return_value=tmp_path / "store"),
+            patch("seekr_hatchery.cli.sessions.repo_store_dir", return_value=tmp_path / "store"),
             patch("seekr_hatchery.cli.docker.detect_runtime", return_value=docker.DockerRuntime()),
             patch("seekr_hatchery.cli.docker.load_docker_config", return_value=docker.DockerConfig()),
             patch("seekr_hatchery.cli.docker.docker_features", return_value={}),
@@ -1188,7 +1188,7 @@ class TestSandbox:
             assert mock_df.call_args[0][0] == tmp_path / "store"
             assert mock_dc.call_args[0][0] == tmp_path / "store"
             # launch_sandbox_shell gets docker_root=store
-            assert mock_launch.call_args[1]["docker_root"] == tmp_path / "store"
+            assert mock_launch.call_args[1]["hatchery_dir"] == tmp_path / "store"
 
 
 

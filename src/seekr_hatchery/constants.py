@@ -21,11 +21,10 @@ DEFAULT_BASE = "HEAD"
 # creating per-task worktrees and by docker when mounting them.
 WORKTREES_SUBDIR = Path(".hatchery") / "worktrees"
 
-# Docker config file inside a repo (relative to repo root). Read by both
-# cli.py and docker.py when staging Docker scaffolding commits.
-DOCKER_CONFIG = Path(".hatchery") / "docker.yaml"
+# Docker config file name (relative to a hatchery_dir).
+DOCKER_CONFIG = "docker.yaml"
 
 # Persistent out-of-tree store for repos that opt out of committing hatchery
-# files. Lives under ~/.hatchery/repos/<repo-id>/ and holds docker/ and
-# records/ subdirs. Used by sessions.py path helpers.
+# files. Lives under ~/.hatchery/repos/<repo-id>/ and holds the no-commit
+# hatchery_dir. Used by sessions.py path helpers.
 REPOS_SUBDIR = "repos"

@@ -167,9 +167,7 @@ class TestResolveRuntime:
         repo.mkdir()
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        dockerfile_dir = worktree / ".hatchery"
-        dockerfile_dir.mkdir()
-        (dockerfile_dir / "Dockerfile.codex").write_text("FROM debian\n")
+        (worktree / "Dockerfile.codex").write_text("FROM debian\n")
         monkeypatch.setattr(docker, "detect_runtime", lambda: docker.PodmanRuntime())
         result = docker.resolve_runtime(worktree, no_docker=False)
         assert isinstance(result, docker.PodmanRuntime)
@@ -179,9 +177,7 @@ class TestResolveRuntime:
         repo.mkdir()
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        dockerfile_dir = worktree / ".hatchery"
-        dockerfile_dir.mkdir()
-        (dockerfile_dir / "Dockerfile.codex").write_text("FROM debian\n")
+        (worktree / "Dockerfile.codex").write_text("FROM debian\n")
         monkeypatch.setattr(docker, "detect_runtime", lambda: docker.DockerRuntime())
         result = docker.resolve_runtime(worktree, no_docker=False)
         assert isinstance(result, docker.DockerRuntime)
@@ -191,9 +187,6 @@ class TestResolveRuntime:
         repo.mkdir()
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        dockerfile_dir = worktree / ".hatchery"
-        dockerfile_dir.mkdir()
-        (dockerfile_dir / "Dockerfile.codex").write_text("FROM debian\n")
         monkeypatch.setattr(docker, "detect_runtime", lambda: (_ for _ in ()).throw(SystemExit(1)))
         with pytest.raises(SystemExit) as exc_info:
             docker.resolve_runtime(worktree, no_docker=False)
@@ -204,9 +197,6 @@ class TestResolveRuntime:
         repo.mkdir()
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        dockerfile_dir = worktree / ".hatchery"
-        dockerfile_dir.mkdir()
-        (dockerfile_dir / "Dockerfile.codex").write_text("FROM debian\n")
 
         def _exit():
             print("Error: neither Podman nor Docker is running.", file=_sys.stderr)
@@ -224,9 +214,6 @@ class TestResolveRuntime:
         worktree = tmp_path / "worktree"
         worktree.mkdir()
         # Even with Dockerfile present, no_docker=True returns None
-        dockerfile_dir = worktree / ".hatchery"
-        dockerfile_dir.mkdir()
-        (dockerfile_dir / "Dockerfile.codex").write_text("FROM debian\n")
         result = docker.resolve_runtime(worktree, no_docker=True)
         assert result is None
 
@@ -1292,8 +1279,8 @@ class TestBuildMountsRecordStore:
         )
         cfg = docker.DockerConfig()
         mounts = docker.build_mounts(meta, self._make_backend(), tmp_path / "sd", cfg)
-        record_dir = meta.record_dir
-        expected = mount.BindMount(src=str(record_dir), dst=str(record_dir), mode="RW")
+        hdir = meta.hatchery_dir
+        expected = mount.BindMount(src=str(hdir), dst=str(hdir), mode="RW")
         assert expected in mounts
 
     def test_commit_mode_no_record_store_mount(self, tmp_path, monkeypatch):
@@ -1309,8 +1296,8 @@ class TestBuildMountsRecordStore:
         mounts = docker.build_mounts(meta, self._make_backend(), tmp_path / "sd", cfg)
         # No mount whose src/dst contains "records"
         for m in mounts:
-            if hasattr(m, "src") and "records" in str(m.src):
-                assert False, "record store mount should not be present in commit mode"
+            if hasattr(m, "src") and "repos" in str(m.src):
+                assert False, "hatchery_dir mount should not be present in commit mode"
 
     def test_no_commit_chat_no_record_store_mount(self, tmp_path, monkeypatch):
         monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
@@ -1329,8 +1316,8 @@ class TestBuildMountsRecordStore:
         cfg = docker.DockerConfig()
         mounts = docker.build_mounts(meta, self._make_backend(), tmp_path / "sd", cfg)
         for m in mounts:
-            if hasattr(m, "src") and "records" in str(m.src):
-                assert False, "record store mount should not be present for chat type"
+            if hasattr(m, "src") and "repos" in str(m.src):
+                assert False, "hatchery_dir mount should not be present for chat type"
 
 
 # ensure_dockerfile / ensure_docker_config
@@ -1350,12 +1337,12 @@ class TestEnsureDockerfileGenerate:
         created = docker.ensure_dockerfile(target, agent.CODEX)
 
         assert created is True
-        assert (target / ".hatchery" / "Dockerfile.codex").exists()
+        assert (target / "Dockerfile.codex").exists()
 
     def test_returns_false_when_already_exists(self, tmp_path, monkeypatch):
         target = tmp_path / "target"
-        (target / ".hatchery").mkdir(parents=True)
-        (target / ".hatchery" / "Dockerfile.codex").write_text("FROM debian\n")
+        target.mkdir()
+        (target / "Dockerfile.codex").write_text("FROM debian\n")
 
         monkeypatch.setattr("builtins.input", lambda _: "n")
 

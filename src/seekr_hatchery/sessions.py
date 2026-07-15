@@ -136,7 +136,7 @@ def sandbox_context(
     no_worktree: bool = False,
     include_paths: list[IncludeEntry] | None = None,
     no_commit: bool = False,
-    record_dir: Path | None = None,
+    hatchery_dir: Path | None = None,
 ) -> str:
     """Return a system-prompt section describing the sandbox environment."""
     include_paths = include_paths or []
@@ -205,10 +205,10 @@ def sandbox_context(
             f"When creating commits or pull requests, target `{main_branch}`. You may push to `{branch}` only.",
         ]
 
-    if no_commit and record_dir:
+    if no_commit and hatchery_dir:
         lines.append("")
         lines.append(
-            f"**Record store:** `{record_dir}` is mounted read-write — "
+            f"**Record store:** `{hatchery_dir}` is mounted read-write — "
             "this is your local hatchery record (stored outside the repo, not committed). "
             "Prior task records in the same directory are available for reference."
         )
@@ -323,26 +323,29 @@ def repo_store_dir(repo: Path) -> Path:
     return constants.HATCHERY_DIR / constants.REPOS_SUBDIR / repo_id(repo)
 
 
-def record_store_dir(repo: Path) -> Path:
-    """Directory for out-of-tree task record files (~/.hatchery/repos/<id>/records/)."""
-    return repo_store_dir(repo) / "records"
+def hatchery_dir(repo: Path, worktree: Path, *, no_commit: bool, no_worktree: bool) -> Path:
+    """Resolve the directory that holds this session's hatchery files.
 
-
-def docker_store_dir(repo: Path) -> Path:
-    """Directory for out-of-tree Docker files (~/.hatchery/repos/<id>/docker/)."""
-    return repo_store_dir(repo) / "docker"
+    No-commit: ``~/.hatchery/repos/<id>/`` (the store itself is the hatchery_dir).
+    Commit + no_worktree: ``<repo>/.hatchery``.
+    Commit + worktree: ``<worktree>/.hatchery``.
+    """
+    if no_commit:
+        return repo_store_dir(repo)
+    if no_worktree:
+        return repo / ".hatchery"
+    return worktree / ".hatchery"
 
 
 def ensure_repo_store(repo: Path) -> None:
     """Ensure the repo store exists and repo.json is up to date.
 
-    Creates ``repos/<repo-id>/`` with ``records/`` and ``docker/`` subdirs.
+    Creates ``repos/<repo-id>/`` with a ``tasks/`` subdir.
     Writes/refreshes ``repo.json`` with the repo's absolute path and basename
     so the store is navigable without scanning all known repos. Idempotent.
     """
     store = repo_store_dir(repo)
-    (store / "records").mkdir(parents=True, exist_ok=True)
-    (store / "docker").mkdir(parents=True, exist_ok=True)
+    (store / "tasks").mkdir(parents=True, exist_ok=True)
     repo_meta = {"path": str(repo), "name": repo.name}
     repo_meta_path = store / "repo.json"
     repo_meta_path.write_text(json.dumps(repo_meta, indent=2))
@@ -691,23 +694,23 @@ def restore_dockerfile_if_needed(
     """
     if no_docker:
         return
-    docker_root = meta.docker_root
-    agent_df = docker.dockerfile_path(docker_root, backend)
+    hdir = meta.hatchery_dir
+    agent_df = docker.dockerfile_path(hdir, backend)
     if agent_df.exists():
         return
     if meta.no_commit:
         ui.note("Dockerfile missing from store — restoring.")
         ensure_repo_store(repo)
-        docker.ensure_dockerfile(docker_store_dir(repo), backend)
-        docker.ensure_docker_config(docker_store_dir(repo))
+        docker.ensure_dockerfile(hdir, backend)
+        docker.ensure_docker_config(hdir)
     elif meta.no_worktree:
         ui.note("Dockerfile missing — regenerating in place.")
-        docker.ensure_dockerfile(meta.worktree_path, backend)
-        docker.ensure_docker_config(meta.worktree_path)
+        docker.ensure_dockerfile(hdir, backend)
+        docker.ensure_docker_config(hdir)
     else:
         ui.note("Dockerfile missing from worktree — regenerating (will be committed to the task branch).")
-        docker.ensure_dockerfile(meta.worktree_path, backend)
-        docker.ensure_docker_config(meta.worktree_path)
+        docker.ensure_dockerfile(hdir, backend)
+        docker.ensure_docker_config(hdir)
 
 
 def resolve_resume_kind(meta: SessionMeta) -> tuple[Literal["new", "resume"], str]:
@@ -900,12 +903,13 @@ def _check_not_in_progress(repo: Path, name: str, *, label: str = "session") -> 
 def _commit_docker_files(backend: "AgentBackend", worktree: Path) -> None:
     """Stage and commit any newly created Docker scaffolding files."""
     ui.info("  Committing...")
+    hdir = worktree / ".hatchery"
     git.add_and_commit(
         worktree,
         "chore: add hatchery Docker configuration",
         paths=[
-            str(docker.dockerfile_path(worktree, backend).relative_to(worktree)),
-            str(DOCKER_CONFIG),
+            str(docker.dockerfile_path(hdir, backend).relative_to(worktree)),
+            str(Path(".hatchery") / DOCKER_CONFIG),
         ],
     )
 
@@ -1061,14 +1065,10 @@ def create(
 
     try:
         if is_chat:
-            if no_commit:
-                ensure_repo_store(repo)
-                docker_dir = docker_store_dir(repo)
-                df_created = docker.ensure_dockerfile(docker_dir, backend)
-                dc_created = docker.ensure_docker_config(docker_dir)
-            else:
-                df_created = docker.ensure_dockerfile(repo, backend)
-                dc_created = docker.ensure_docker_config(repo)
+            hdir = hatchery_dir(repo, worktree, no_commit=no_commit, no_worktree=no_worktree)
+            (hdir / "tasks").mkdir(parents=True, exist_ok=True)
+            df_created = docker.ensure_dockerfile(hdir, backend)
+            dc_created = docker.ensure_docker_config(hdir)
             if in_repo and not no_commit and (df_created or dc_created):
                 _commit_docker_files(backend, repo)
         else:
@@ -1098,30 +1098,19 @@ def create(
                 git.create_include_worktrees(include_entries, name)
                 cleanup_includes = list(include_entries)
 
+            hdir = hatchery_dir(repo, worktree, no_commit=no_commit, no_worktree=no_worktree)
+            (hdir / "tasks").mkdir(parents=True, exist_ok=True)
             if in_repo:
-                if no_commit:
-                    ensure_repo_store(repo)
-                    docker_dir = docker_store_dir(repo)
-                    docker.ensure_dockerfile(docker_dir, backend)
-                    docker.ensure_docker_config(docker_dir)
-                    df_created = dc_created = False
-                else:
-                    df_created = docker.ensure_dockerfile(worktree, backend)
-                    dc_created = docker.ensure_docker_config(worktree)
-                if df_created or dc_created:
+                df_created = docker.ensure_dockerfile(hdir, backend)
+                dc_created = docker.ensure_docker_config(hdir)
+                if (df_created or dc_created) and not no_commit:
                     _commit_docker_files(backend, worktree)
             elif not no_docker:
-                if no_commit:
-                    ensure_repo_store(repo)
-                    docker_dir = docker_store_dir(repo)
-                    docker.ensure_dockerfile(docker_dir, backend)
-                    docker.ensure_docker_config(docker_dir)
-                else:
-                    docker.ensure_dockerfile(worktree, backend)
-                    docker.ensure_docker_config(worktree)
+                docker.ensure_dockerfile(hdir, backend)
+                docker.ensure_docker_config(hdir)
 
-            # Re-read docker.yaml from the docker root; new include entries get materialised.
-            post_config = docker.load_docker_config(docker_store_dir(repo) if no_commit else worktree)
+            # Re-read docker.yaml from the hatchery dir; new include entries get materialised.
+            post_config = docker.load_docker_config(hdir)
             post_include_paths = {x.path for x in include_entries}
             new_entries: list[IncludeEntry] = []
             for raw_entry in post_config.include:
@@ -1139,7 +1128,7 @@ def create(
                 include_entries = include_entries + new_entries
                 cleanup_includes = list(include_entries)
 
-            _tasks_dir = record_store_dir(repo) if no_commit else worktree / ".hatchery" / "tasks"
+            _tasks_dir = hdir / "tasks"
             if use_editor:
                 task_path = write_task_file(_tasks_dir, name, branch)
                 content_before = task_path.read_text()
@@ -1224,10 +1213,10 @@ def launch(
     include_repos = include_repos or []
     is_chat = meta.is_chat
 
-    # Ensure the record store exists (in case it was deleted between sessions).
+    # Ensure the hatchery dir exists (in case it was deleted between sessions).
     if meta.no_commit and not is_chat:
         ensure_repo_store(meta.repo_path)
-        meta.record_dir.mkdir(parents=True, exist_ok=True)
+        meta.hatchery_dir.mkdir(parents=True, exist_ok=True)
 
     if kind == "new":
         backend.on_new_task(meta.session_dir)
@@ -1248,7 +1237,7 @@ def launch(
             meta.no_worktree,
             include_paths=include_repos,
             no_commit=meta.no_commit,
-            record_dir=meta.record_dir if meta.no_commit else None,
+            hatchery_dir=meta.hatchery_dir if meta.no_commit else None,
         )
         if meta.no_commit:
             system_prompt = _SESSION_SYSTEM_NOCOMMIT + "\n" + env_ctx

@@ -344,9 +344,7 @@ class TestRemoveWorktree:
 
 class TestLoadDockerConfig:
     def _write_config(self, repo: Path, content: str) -> None:
-        config_dir = repo / ".hatchery"
-        config_dir.mkdir(exist_ok=True)
-        (config_dir / "docker.yaml").write_text(content)
+        (repo / "docker.yaml").write_text(content)
 
     def test_returns_empty_config_when_no_file(self, fake_repo):
         result = docker.load_docker_config(fake_repo)

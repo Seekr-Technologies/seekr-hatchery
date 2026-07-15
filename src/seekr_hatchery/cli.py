@@ -282,7 +282,7 @@ def _post_exit_check(
             ui.error("no session ID found. Cannot relaunch.")
             return
         backend = agent.from_kind(meta.agent)
-        runtime = docker.resolve_runtime(meta.docker_root, no_docker=not sandbox, backend=backend)
+        runtime = docker.resolve_runtime(meta.hatchery_dir, no_docker=not sandbox, backend=backend)
         main_branch = git.get_default_branch(repo)
         include_repos = load_include_entries({"include": meta.include})
         _launch(
@@ -548,7 +548,7 @@ def cmd_new(
 
     # Resolve --include paths: convert CLI tuples → entries, then sessions
     # merges them with docker.yaml's 'include:' list.
-    early_config = docker.load_docker_config(repo)
+    early_config = docker.load_docker_config(repo / ".hatchery")
     include_repos = sessions.merge_includes_with_config(
         _cli_includes_to_entries(include, include_rw, include_ro),
         early_config.include,
@@ -578,7 +578,7 @@ def cmd_new(
         ui.warn("Cancelled.")
         sys.exit(1)
 
-    runtime = docker.resolve_runtime(meta.docker_root, no_docker, backend=backend)
+    runtime = docker.resolve_runtime(meta.hatchery_dir, no_docker, backend=backend)
     main_branch = git.get_default_branch(repo) if in_repo else ""
     include_repos = load_include_entries({"include": meta.include})
     try:
@@ -647,7 +647,7 @@ def cmd_chat(name: str | None, agent_name: str, commit: bool | None) -> None:
         ui.warn("Cancelled.")
         sys.exit(1)
 
-    runtime = docker.resolve_runtime(meta.docker_root, no_docker=False, backend=backend)
+    runtime = docker.resolve_runtime(meta.hatchery_dir, no_docker=False, backend=backend)
     main_branch = git.get_default_branch(repo) if in_repo else ""
     _launch(
         meta,
@@ -775,7 +775,7 @@ def cmd_resume(
     updates = _cli_includes_to_entries(include, include_rw, include_ro)
     include_repos = sessions.merge_include_updates(include_repos, updates, meta)
 
-    runtime = docker.resolve_runtime(meta.docker_root, no_docker, backend=backend)
+    runtime = docker.resolve_runtime(meta.hatchery_dir, no_docker, backend=backend)
     _launch(
         meta,
         kind=launch_kind,
@@ -814,25 +814,25 @@ def cmd_sandbox(shell: str, rebuild_sandbox: bool, commit: bool | None) -> None:
     no_commit = (not commit) if commit is not None else (not cfg.auto_commit)
 
     if not no_commit:
-        docker_root = repo
+        hdir = repo / ".hatchery"
         sessions.ensure_tasks_dir(repo)
-        df_created = docker.ensure_dockerfile(docker_root, backend)
-        dc_created = docker.ensure_docker_config(docker_root)
+        df_created = docker.ensure_dockerfile(hdir, backend)
+        dc_created = docker.ensure_docker_config(hdir)
         if in_repo and (df_created or dc_created):
             ui.info("  Committing...")
             git.add_and_commit(
                 repo,
                 "chore: add hatchery Docker configuration",
-                paths=[str(docker.dockerfile_path(repo, backend).relative_to(repo)), str(DOCKER_CONFIG)],
+                paths=[str(docker.dockerfile_path(hdir, backend).relative_to(repo)), str(Path(".hatchery") / DOCKER_CONFIG)],
             )
     else:
         sessions.ensure_repo_store(repo)
-        docker_root = sessions.docker_store_dir(repo)
-        docker.ensure_dockerfile(docker_root, backend)
-        docker.ensure_docker_config(docker_root)
+        hdir = sessions.repo_store_dir(repo)
+        docker.ensure_dockerfile(hdir, backend)
+        docker.ensure_docker_config(hdir)
 
     runtime = docker.detect_runtime()
-    config = docker.load_docker_config(docker_root)
+    config = docker.load_docker_config(hdir)
     features = docker.docker_features(config)
     ui.banner("sandbox", repo, sandbox=True, worktree=False, features=features)
     docker.launch_sandbox_shell(
@@ -843,7 +843,7 @@ def cmd_sandbox(shell: str, rebuild_sandbox: bool, commit: bool | None) -> None:
         image_name=sessions.image_name(repo, "sandbox"),
         shell=shell,
         no_cache=rebuild_sandbox,
-        docker_root=docker_root,
+        hatchery_dir=hdir,
     )
 
 

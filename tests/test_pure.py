@@ -306,7 +306,7 @@ class TestDockerImageName:
 class TestDockerfilePath:
     def test_returns_agent_specific_path(self):
         repo = Path("/some/repo")
-        assert docker.dockerfile_path(repo, agent.CODEX) == Path("/some/repo/.hatchery/Dockerfile.codex")
+        assert docker.dockerfile_path(repo, agent.CODEX) == Path("/some/repo/Dockerfile.codex")
 
 
 # ---------------------------------------------------------------------------

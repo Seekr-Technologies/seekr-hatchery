@@ -576,12 +576,12 @@ def _kubectl_context(
 # ── Utilities ─────────────────────────────────────────────────────────────────
 
 
-def dockerfile_path(base: Path, backend: agent.AgentBackend) -> Path:
-    """Return the canonical path to this backend's Dockerfile under *base*.
+def dockerfile_path(hatchery_dir: Path, backend: agent.AgentBackend) -> Path:
+    """Return the canonical path to this backend's Dockerfile under *hatchery_dir*.
 
     Files are named ``Dockerfile.<agent>`` (e.g. ``Dockerfile.codex``).
     """
-    return base / ".hatchery" / f"Dockerfile.{backend.kind.lower()}"
+    return hatchery_dir / f"Dockerfile.{backend.kind.lower()}"
 
 
 def detect_runtime() -> ContainerRuntime:
@@ -617,11 +617,11 @@ def detect_runtime() -> ContainerRuntime:
 
 
 def ensure_dockerfile(
-    repo: Path,
+    hatchery_dir: Path,
     backend: agent.AgentBackend = agent.CODEX,
 ) -> bool:
     """Write a starter Dockerfile if none exists. Returns True if created."""
-    df = dockerfile_path(repo, backend)
+    df = dockerfile_path(hatchery_dir, backend)
     if df.exists():
         return False
     df.parent.mkdir(parents=True, exist_ok=True)
@@ -629,7 +629,7 @@ def ensure_dockerfile(
     text = text.replace("{{AGENT_INSTALL}}", backend.dockerfile_install)
     text = text.replace("{{DIND}}", _comment_out(DIND_DOCKERFILE_LINES))
     df.write_text(text)
-    ui.info(f"  Created {df.relative_to(repo)}")
+    ui.info(f"  Created {df.relative_to(hatchery_dir)}")
     answer = input("  Would you like to edit the Dockerfile? [Y/n] ").strip().lower()
     if answer != "n":
         open_for_editing(df)
@@ -662,12 +662,12 @@ def _migrate_docker_config(data: dict) -> dict:
     return data
 
 
-def ensure_docker_config(repo: Path) -> bool:
-    """Write .hatchery/docker.yaml from template if it does not already exist.
+def ensure_docker_config(hatchery_dir: Path) -> bool:
+    """Write docker.yaml from template if it does not already exist.
 
     Returns True if the file was created, False if it already existed.
     """
-    config_file = repo / DOCKER_CONFIG
+    config_file = hatchery_dir / DOCKER_CONFIG
     if config_file.exists():
         return False
     config_file.parent.mkdir(parents=True, exist_ok=True)
@@ -682,13 +682,13 @@ def ensure_docker_config(repo: Path) -> bool:
 # ── DinD helpers ──────────────────────────────────────────────────────────────
 
 
-def _dind_dockerfile_ok(worktree: Path, backend: agent.AgentBackend) -> bool:
+def _dind_dockerfile_ok(hatchery_dir: Path, backend: agent.AgentBackend) -> bool:
     """Return True if the Dockerfile has an uncommented fuse-overlayfs reference.
 
     fuse-overlayfs is the storage driver required for rootless nested containers
     and is a reliable smoke-test that the DinD section has been uncommented.
     """
-    df = dockerfile_path(worktree, backend)
+    df = dockerfile_path(hatchery_dir, backend)
     if not df.exists():
         return False
     for line in df.read_text().splitlines():
@@ -711,14 +711,14 @@ def docker_features(config: DockerConfig) -> list[str]:
 # ── Mount construction ────────────────────────────────────────────────────────
 
 
-def load_docker_config(root: Path) -> DockerConfig:
-    """Read and parse root/docker.yaml into a DockerConfig.
+def load_docker_config(hatchery_dir: Path) -> DockerConfig:
+    """Read and parse hatchery_dir/docker.yaml into a DockerConfig.
 
     Returns an empty DockerConfig if the file does not exist. Exits with an
     error message if the file cannot be parsed or fails validation — an
     invalid config is always a user mistake that must be fixed before launching.
     """
-    config_file = root / DOCKER_CONFIG
+    config_file = hatchery_dir / DOCKER_CONFIG
     if not config_file.exists():
         return DockerConfig()
     try:
@@ -751,7 +751,7 @@ def launch_context(
     """
     if runtime is None:
         return None, [], ""
-    config = load_docker_config(meta.docker_root)
+    config = load_docker_config(meta.hatchery_dir)
     features = docker_features(config)
     _check_host_path_safe_for_mount(meta.repo_path)
     container_workdir = str(meta.worktree_path)
@@ -1026,12 +1026,12 @@ def build_mounts(
         if config.follow_symlinks:
             mounts.extend(_construct_symlink_mounts(meta.worktree_path, mounts))
 
-    # In no-commit mode, mount the record store RW so the agent can edit
+    # In no-commit mode, mount the hatchery_dir RW so the agent can edit
     # the live task file and read sibling records for cross-task context.
     if meta.no_commit and meta.type != "chat":
-        record_dir = meta.record_dir
-        record_dir.mkdir(parents=True, exist_ok=True)
-        mounts.append(BindMount(src=str(record_dir), dst=str(record_dir), mode="RW"))
+        hdir = meta.hatchery_dir
+        hdir.mkdir(parents=True, exist_ok=True)
+        mounts.append(BindMount(src=str(hdir), dst=str(hdir), mode="RW"))
 
     if include_entries:
         mounts.extend(_docker_mounts_includes(include_entries, meta.name, session_dir, no_worktree=meta.no_worktree))
@@ -1190,22 +1190,22 @@ def _stream_build(cmd: list[str], cwd: Path, n_lines: int = 4) -> tuple[int, lis
 
 def build_docker_image(
     repo: Path,
-    worktree: Path,
+    hatchery_dir: Path,
     image_name: str,
     backend: agent.AgentBackend,
     runtime: ContainerRuntime | None = None,
     no_cache: bool = False,
 ) -> None:
-    """Build the sandbox image from the worktree's .hatchery/Dockerfile.<agent>.
+    """Build the sandbox image from the hatchery_dir's Dockerfile.<agent>.
 
-    Using the worktree's copy means Dockerfile changes made as part of a task
+    Using the hatchery_dir copy means Dockerfile changes made as part of a task
     are isolated to that task's image and merge into main with the task.
 
     Caller resolves *image_name* — typically ``sessions.image_name(repo, name)``.
     """
     runtime = runtime or DockerRuntime()
     image = image_name
-    worktree_dockerfile = dockerfile_path(worktree, backend)
+    worktree_dockerfile = dockerfile_path(hatchery_dir, backend)
     # Use a temporary empty directory as the build context — NOT the repo root.
     # The generated Dockerfile has no COPY/ADD from context (only multi-stage
     # COPY --from=), so an empty context is correct and avoids tar-ing the
@@ -1426,7 +1426,7 @@ def run_session(
     if meta.no_worktree:
         container_workdir = str(meta.worktree_path)
         container_repo = str(meta.worktree_path)
-        build_root = meta.docker_root
+        build_root = meta.hatchery_dir
     else:
         # Pre-seed writable sentinel files for git's .git/-root writes.
         git_sentinels = []
@@ -1444,7 +1444,7 @@ def run_session(
 
         container_workdir = str(meta.worktree_path)
         container_repo = str(meta.repo_path)
-        build_root = meta.docker_root
+        build_root = meta.hatchery_dir
 
     if config.dind and not _dind_dockerfile_ok(build_root, backend):
         ui.warn("dind: true is set but the Dockerfile doesn't appear to install Podman.")
@@ -1510,7 +1510,7 @@ def launch_sandbox_shell(
     kubectl_proxy_token: str = "",
     shell: str = "/bin/bash",
     no_cache: bool = False,
-    docker_root: Path | None = None,
+    hatchery_dir: Path | None = None,
 ) -> None:
     """Drop the user into an interactive shell inside the sandbox container.
 
@@ -1518,17 +1518,17 @@ def launch_sandbox_shell(
     The repo is mounted RW at its host path (so the sandbox shell sees the
     same paths a native shell would).
 
-    *docker_root* is the directory whose ``.hatchery/`` holds the Dockerfile
-    — defaults to *repo* (committed mode). In not-committed mode the caller
-    passes the out-of-tree docker store so the image builds from the store's
-    Dockerfile, not the repo root.
+    *hatchery_dir* is the directory holding the Dockerfile
+    — defaults to *repo* / ``.hatchery`` (committed mode). In not-committed
+    mode the caller passes the out-of-tree store so the image builds from the
+    store's Dockerfile, not the repo root.
 
     Caller resolves *image_name* — typically ``sessions.image_name(repo, "sandbox")``.
     """
-    if docker_root is None:
-        docker_root = repo
+    if hatchery_dir is None:
+        hatchery_dir = repo / ".hatchery"
     _check_host_path_safe_for_mount(repo)
-    build_docker_image(repo, docker_root, image_name, backend, runtime=runtime, no_cache=no_cache)
+    build_docker_image(repo, hatchery_dir, image_name, backend, runtime=runtime, no_cache=no_cache)
     mounts: list[Mount] = [BindMount(src=str(repo), dst=str(repo), mode="RW")]
     mounts.extend(_default_home_mounts())
     mounts.extend(_construct_docker_mounts(config))
@@ -1578,7 +1578,7 @@ def exec_task_shell(container_name: str, runtime: ContainerRuntime, shell: str =
 
 
 def resolve_runtime(
-    docker_root: Path, no_docker: bool, backend: agent.AgentBackend = agent.CODEX
+    hatchery_dir: Path, no_docker: bool, backend: agent.AgentBackend = agent.CODEX
 ) -> ContainerRuntime | None:
     """Return the runtime to use for this session, or None to run natively.
 
@@ -1587,20 +1587,20 @@ def resolve_runtime(
     function prints an error and exits so the user is never silently placed in
     an unsandboxed environment.
 
-    *docker_root* is the directory whose ``.hatchery/`` holds the Dockerfile
-    — either the worktree (commit mode), the repo root (no-worktree), or the
-    out-of-tree store (no-commit mode). Use ``SessionMeta.docker_root`` to
-    get the right one.
+    *hatchery_dir* is the directory holding the Dockerfile
+    — either the worktree's ``.hatchery`` (commit mode), the repo's ``.hatchery``
+    (no-worktree), or the out-of-tree store (no-commit mode). Use
+    ``SessionMeta.hatchery_dir`` to get the right one.
 
     Checks for the agent-specific Dockerfile (e.g. ``Dockerfile.codex``).
     """
     if no_docker:
         logger.debug("--no-docker set, running natively")
         return None
-    agent_df = dockerfile_path(docker_root, backend)
+    agent_df = dockerfile_path(hatchery_dir, backend)
     if not agent_df.exists():
         ui.error(
-            f"No Dockerfile found for '{backend.kind.lower()}' in {docker_root / '.hatchery'}.\n"
+            f"No Dockerfile found for '{backend.kind.lower()}' in {hatchery_dir}.\n"
             "A Dockerfile is required for sandbox mode. "
             "Run `hatchery new` to create one, or pass --no-docker to run without a sandbox."
         )
