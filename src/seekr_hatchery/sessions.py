@@ -208,9 +208,11 @@ def sandbox_context(
     if no_commit and hatchery_dir:
         lines.append("")
         lines.append(
-            f"**Hatchery directory:** `{hatchery_dir}` is mounted read-write — "
-            "this is your local hatchery record (stored outside the repo, not committed). "
-            "Prior task records in the same directory are available for reference."
+            "**Task record:** your task file is mounted read-write — edit it in place. "
+            "Other task records and the Dockerfile/docker.yaml in the same store are read-only: "
+            "read them for context or to help draft changes, but any change to the sandbox config "
+            "must be applied by the user outside the container (edits there won't persist and won't "
+            "take effect)."
         )
 
     if include_paths:

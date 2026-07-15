@@ -1258,13 +1258,14 @@ class TestBuildMountsIncludesVolumes:
 # ---------------------------------------------------------------------------
 
 
-class TestBuildMountsRecordStore:
+class TestBuildMountsNoCommit:
     def _make_backend(self):
         b = MagicMock()
         b.construct_mounts = MagicMock(return_value=[])
         return b
 
-    def test_no_commit_task_adds_record_store_rw_mount(self, tmp_path, monkeypatch):
+    def test_no_commit_task_has_ro_store_and_rw_task_file(self, tmp_path, monkeypatch):
+        """No-commit task: RO store mount + RW own-task-file mount."""
         monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
         monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path)
         import seekr_hatchery.sessions as sessions
@@ -1277,13 +1278,33 @@ class TestBuildMountsRecordStore:
             no_commit=True,
             type="task",
         )
+        # Create the task file so meta.task_file resolves
+        hdir = meta.hatchery_dir
+        (hdir / "tasks").mkdir(parents=True)
+        task_file = hdir / "tasks" / "2026-01-01-t.md"
+        task_file.write_text("# task\n")
+
         cfg = docker.DockerConfig()
         mounts = docker.build_mounts(meta, self._make_backend(), tmp_path / "sd", cfg)
-        hdir = meta.hatchery_dir
-        expected = mount.BindMount(src=str(hdir), dst=str(hdir), mode="RW")
-        assert expected in mounts
 
-    def test_commit_mode_no_record_store_mount(self, tmp_path, monkeypatch):
+        # 1. RO mount of the whole hatchery_dir
+        expected_ro = mount.BindMount(src=str(hdir), dst=str(hdir), mode="RO")
+        assert expected_ro in mounts
+
+        # 2. RW mount of the task file
+        expected_rw = mount.BindMount(src=str(task_file), dst=str(task_file), mode="RW")
+        assert expected_rw in mounts
+
+        # 3. No other RW mount under hdir (no sibling or Dockerfile RW)
+        rw_under_hdir = [
+            m for m in mounts
+            if isinstance(m, mount.BindMount) and m.mode == "RW" and str(hdir) in str(m.src)
+        ]
+        assert len(rw_under_hdir) == 1
+        assert str(rw_under_hdir[0].src) == str(task_file)
+
+    def test_commit_mode_no_store_mount(self, tmp_path, monkeypatch):
+        """Commit mode: no hatchery_dir mount at all."""
         monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
         meta = SessionMeta(
             name="t",
@@ -1294,12 +1315,12 @@ class TestBuildMountsRecordStore:
         )
         cfg = docker.DockerConfig()
         mounts = docker.build_mounts(meta, self._make_backend(), tmp_path / "sd", cfg)
-        # No mount whose src/dst contains "records"
         for m in mounts:
             if hasattr(m, "src") and "repos" in str(m.src):
                 assert False, "hatchery_dir mount should not be present in commit mode"
 
-    def test_no_commit_chat_no_record_store_mount(self, tmp_path, monkeypatch):
+    def test_no_commit_chat_no_store_mount(self, tmp_path, monkeypatch):
+        """Chat type: no store mount even in no-commit mode."""
         monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
         monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path)
         import seekr_hatchery.sessions as sessions
@@ -1318,6 +1339,38 @@ class TestBuildMountsRecordStore:
         for m in mounts:
             if hasattr(m, "src") and "repos" in str(m.src):
                 assert False, "hatchery_dir mount should not be present for chat type"
+
+    def test_no_commit_task_file_missing_ro_only(self, tmp_path, monkeypatch):
+        """If find_task_file returns None, only the RO store mount is present."""
+        monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
+        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path)
+        import seekr_hatchery.sessions as sessions
+        monkeypatch.setattr(sessions, "_TASKS_DB_DIR", tmp_path / "tasks")
+
+        meta = SessionMeta(
+            name="t",
+            repo=str(tmp_path),
+            worktree=str(tmp_path / "wt"),
+            no_commit=True,
+            type="task",
+        )
+        # No task file created — meta.task_file will be None
+        hdir = meta.hatchery_dir
+        hdir.mkdir(parents=True, exist_ok=True)
+
+        cfg = docker.DockerConfig()
+        mounts = docker.build_mounts(meta, self._make_backend(), tmp_path / "sd", cfg)
+
+        # RO mount present
+        expected_ro = mount.BindMount(src=str(hdir), dst=str(hdir), mode="RO")
+        assert expected_ro in mounts
+
+        # No RW mount under hdir
+        rw_under_hdir = [
+            m for m in mounts
+            if isinstance(m, mount.BindMount) and m.mode == "RW" and str(hdir) in str(m.src)
+        ]
+        assert len(rw_under_hdir) == 0
 
 
 # ensure_dockerfile / ensure_docker_config

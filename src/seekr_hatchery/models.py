@@ -129,3 +129,10 @@ class SessionMeta(BaseModel):
     def task_dir(self) -> Path:
         """Where the task file lives — ``hatchery_dir / tasks``."""
         return self.hatchery_dir / "tasks"
+
+    @property
+    def task_file(self) -> Path | None:
+        """The path to this task's markdown file, or None if not found."""
+        from seekr_hatchery.sessions import find_task_file
+
+        return find_task_file(self.task_dir, self.name)

@@ -1533,6 +1533,27 @@ class TestSessionMetaDerivedPaths:
         )
         assert meta.task_dir == tmp_path / 'wt' / '.hatchery' / 'tasks'
 
+    def test_task_file_resolves_dated_file(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(constants, 'HATCHERY_DIR', tmp_path)
+        meta = sessions.SessionMeta(
+            name='t', repo=str(tmp_path), worktree=str(tmp_path / 'wt'),
+            no_commit=True,
+        )
+        tasks_dir = meta.task_dir
+        tasks_dir.mkdir(parents=True)
+        task_file = tasks_dir / '2026-01-15-t.md'
+        task_file.write_text('# task\n')
+        assert meta.task_file == task_file
+
+    def test_task_file_none_when_absent(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(constants, 'HATCHERY_DIR', tmp_path)
+        meta = sessions.SessionMeta(
+            name='t', repo=str(tmp_path), worktree=str(tmp_path / 'wt'),
+            no_commit=True,
+        )
+        meta.task_dir.mkdir(parents=True)
+        assert meta.task_file is None
+
 
 # ---------------------------------------------------------------------------
 # No-commit create() — task file and docker files go to the store
@@ -1637,9 +1658,9 @@ class TestSandboxContextNoCommit:
             main_branch='main', use_docker=True,
             no_commit=True, hatchery_dir=tmp_path / 'store',
         )
-        assert 'Hatchery directory' in result
-        assert 'mounted read-write' in result
-        assert str(tmp_path / 'store') in result
+        assert 'Task record' in result
+        assert 'read-write' in result
+        assert 'read-only' in result
 
     def test_commit_mode_no_record_store_bullet(self, tmp_path):
         """sandbox_context with no_commit=False does not emit the record-store bullet."""
@@ -1648,7 +1669,7 @@ class TestSandboxContextNoCommit:
             main_branch='main', use_docker=True,
             no_commit=False,
         )
-        assert 'Hatchery directory' not in result
+        assert 'Task record' not in result
 
     def test_no_commit_no_hatchery_dir_no_bullet(self, tmp_path):
         """sandbox_context with no_commit=True but no hatchery_dir does not emit the bullet."""
@@ -1657,7 +1678,7 @@ class TestSandboxContextNoCommit:
             main_branch='main', use_docker=True,
             no_commit=True,
         )
-        assert 'Hatchery directory' not in result
+        assert 'Task record' not in result
 
 
 # ---------------------------------------------------------------------------
