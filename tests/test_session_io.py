@@ -1637,7 +1637,7 @@ class TestSandboxContextNoCommit:
             main_branch='main', use_docker=True,
             no_commit=True, hatchery_dir=tmp_path / 'store',
         )
-        assert 'Record store' in result
+        assert 'Hatchery directory' in result
         assert 'mounted read-write' in result
         assert str(tmp_path / 'store') in result
 
@@ -1648,7 +1648,7 @@ class TestSandboxContextNoCommit:
             main_branch='main', use_docker=True,
             no_commit=False,
         )
-        assert 'Record store' not in result
+        assert 'Hatchery directory' not in result
 
     def test_no_commit_no_hatchery_dir_no_bullet(self, tmp_path):
         """sandbox_context with no_commit=True but no hatchery_dir does not emit the bullet."""
@@ -1657,7 +1657,7 @@ class TestSandboxContextNoCommit:
             main_branch='main', use_docker=True,
             no_commit=True,
         )
-        assert 'Record store' not in result
+        assert 'Hatchery directory' not in result
 
 
 # ---------------------------------------------------------------------------

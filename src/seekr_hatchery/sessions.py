@@ -208,7 +208,7 @@ def sandbox_context(
     if no_commit and hatchery_dir:
         lines.append("")
         lines.append(
-            f"**Record store:** `{hatchery_dir}` is mounted read-write — "
+            f"**Hatchery directory:** `{hatchery_dir}` is mounted read-write — "
             "this is your local hatchery record (stored outside the repo, not committed). "
             "Prior task records in the same directory are available for reference."
         )
