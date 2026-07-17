@@ -561,6 +561,37 @@ class TestSessionMetaProperties:
 # ---------------------------------------------------------------------------
 
 
+class TestResolveBase:
+    """sessions._resolve_base — the ref a new task worktree forks from.
+
+    Migrated from CLI tests that reached this through the full new-command
+    stack (test_new_default_base_fetches_and_uses_origin,
+    test_new_default_base_falls_back_to_head_when_fetch_fails,
+    test_new_with_from_flag)."""
+
+    def test_default_base_uses_origin_when_fetch_succeeds(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(sessions.git, "get_default_branch", lambda repo: "main")
+        monkeypatch.setattr(sessions, "run", MagicMock(return_value=MagicMock(returncode=0)))
+        assert sessions._resolve_base(tmp_path, constants.DEFAULT_BASE, True) == "origin/main"
+
+    def test_default_base_falls_back_to_local_when_fetch_fails(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(sessions.git, "get_default_branch", lambda repo: "main")
+        monkeypatch.setattr(sessions, "run", MagicMock(return_value=MagicMock(returncode=1)))
+        assert sessions._resolve_base(tmp_path, constants.DEFAULT_BASE, True) == constants.DEFAULT_BASE
+
+    def test_explicit_base_returned_and_fetched_if_remote(self, tmp_path, monkeypatch):
+        fetch = MagicMock()
+        monkeypatch.setattr(sessions.git, "_fetch_if_remote", fetch)
+        # A fetch origin (the default-base path) must NOT run for an explicit base.
+        monkeypatch.setattr(sessions, "run", MagicMock(side_effect=AssertionError("no fetch origin for explicit base")))
+        assert sessions._resolve_base(tmp_path, "main", True) == "main"
+        assert fetch.called
+
+    def test_not_in_repo_returns_base_verbatim(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(sessions, "run", MagicMock(side_effect=AssertionError("no git calls outside a repo")))
+        assert sessions._resolve_base(tmp_path, constants.DEFAULT_BASE, False) == constants.DEFAULT_BASE
+
+
 class TestSessionCreateTask:
     """sessions.create(type='task') — real worktree creation, real docker scaffolding."""
 
@@ -644,6 +675,32 @@ class TestSessionCreateTask:
         worktree = git_repo / ".hatchery" / "worktrees" / "t"
         log = _git(worktree, "log", "--oneline").stdout
         assert "add task file" not in log
+
+    def test_docker_commit_gated_on_new_files(self, git_repo, fake_tasks_db, no_input, monkeypatch):
+        """Docker scaffolding is committed only when newly created (ensure_* -> True).
+
+        Migrated from CLI test_no_flags_dockerfile_exists_at_root_not_committed:
+        a pre-existing Dockerfile (ensure returns False) is not re-committed."""
+        monkeypatch.setattr(sessions.docker, "ensure_dockerfile", MagicMock(return_value=False))
+        monkeypatch.setattr(sessions.docker, "ensure_docker_config", MagicMock(return_value=False))
+        spy = MagicMock()
+        monkeypatch.setattr(sessions, "_commit_docker_files", spy)
+        sessions.create(name="t", repo=git_repo, type="task", backend=agent.CODEX, objective="x")
+        assert not spy.called
+
+    def test_keyboard_interrupt_rolls_back_worktree_and_branch(
+        self, git_repo, fake_tasks_db, no_input, monkeypatch
+    ):
+        """Ctrl-C after the worktree is created rolls it (and the branch) back, then re-raises.
+
+        Migrated from CLI test_keyboard_interrupt_cleans_up_worktree — the
+        rollback is create()'s own KeyboardInterrupt handler, not CLI logic."""
+        # ensure_dockerfile runs after create_worktree, inside create()'s try.
+        monkeypatch.setattr(sessions.docker, "ensure_dockerfile", MagicMock(side_effect=KeyboardInterrupt))
+        with pytest.raises(KeyboardInterrupt):
+            sessions.create(name="t", repo=git_repo, type="task", backend=agent.CODEX, objective="x")
+        assert not (git_repo / ".hatchery" / "worktrees" / "t").exists()
+        assert _git(git_repo, "rev-parse", "--verify", "hatchery/t", check=False).returncode != 0
 
 
 class TestSessionCreateChat:

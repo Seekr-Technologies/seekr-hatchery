@@ -1002,6 +1002,27 @@ def delete(meta: SessionMeta) -> None:
     ui.success(f"Task '{meta.name}' deleted.")
 
 
+def _resolve_base(repo: Path, base: str, in_repo: bool) -> str:
+    """Resolve the ref a new task worktree forks from.
+
+    With the default base inside a repo, prefer ``origin/<default>`` when a
+    ``git fetch origin`` succeeds, else fall back to the local default (e.g.
+    offline / no remote). An explicit ``--from`` ref is fetched only when it
+    looks like a remote ref.
+    """
+    resolved = base or DEFAULT_BASE
+    if resolved == DEFAULT_BASE and in_repo:
+        default = git.get_default_branch(repo)
+        fetch_result = run(["git", "fetch", "origin"], cwd=repo, check=False)
+        if fetch_result.returncode == 0:
+            resolved = f"origin/{default}"
+        else:
+            logger.debug("git fetch origin failed; using local %s as base", resolved)
+    elif in_repo:
+        git._fetch_if_remote(resolved, repo)
+    return resolved
+
+
 def create(
     *,
     name: str,
@@ -1082,16 +1103,7 @@ def create(
                 branch = f"hatchery/{name}"
                 worktree = worktrees_dir(repo) / name
                 ui.info(f"Creating task: {name}")
-                resolved_base = base or DEFAULT_BASE
-                if resolved_base == DEFAULT_BASE and in_repo:
-                    default = git.get_default_branch(repo)
-                    fetch_result = run(["git", "fetch", "origin"], cwd=repo, check=False)
-                    if fetch_result.returncode == 0:
-                        resolved_base = f"origin/{default}"
-                    else:
-                        logger.debug("git fetch origin failed; using local %s as base", resolved_base)
-                elif in_repo:
-                    git._fetch_if_remote(resolved_base, repo)
+                resolved_base = _resolve_base(repo, base, in_repo)
                 git.create_worktree(repo, branch, worktree, resolved_base)
                 cleanup_worktree = worktree
                 cleanup_branch = branch
