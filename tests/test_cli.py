@@ -205,7 +205,7 @@ def _new_env(
     with ExitStack() as stack:
         ns = SimpleNamespace(cfg=cfg)
         ns.root = stack.enter_context(
-            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path("/repo"), in_repo))
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path.home() / "repo", in_repo))
         )
         if not real_config:
             stack.enter_context(patch("seekr_hatchery.cli.user_config.UserConfig.load", return_value=cfg))
@@ -1029,10 +1029,10 @@ class TestCliNoWorktree:
             _,
             _,
         ) = mocks
-        mock_root.return_value = (Path("/repo"), in_repo)
+        mock_root.return_value = (Path.home() / "repo", in_repo)
         mock_db_path.return_value = MagicMock(exists=lambda: False)
-        mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
-        mock_write.return_value = Path("/repo/.hatchery/tasks/task.md")
+        mock_wt_dir.return_value = Path.home() / "repo" / ".hatchery" / "worktrees"
+        mock_write.return_value = Path.home() / "repo" / ".hatchery" / "tasks" / "task.md"
         mock_docker.return_value = None
         return mock_create_wt, mock_run, mock_save, mock_launch, mock_docker
 
@@ -1404,7 +1404,7 @@ class TestRunningState:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             mock_root = mocks[0]
             mock_db_path = mocks[5]
-            mock_root.return_value = (Path("/repo"), True)
+            mock_root.return_value = (Path.home() / "repo", True)
             db_mock = MagicMock()
             db_mock.exists.return_value = True
             db_mock.read_text.return_value = json.dumps({"status": "running"})
@@ -1677,7 +1677,7 @@ class TestCmdChatDispatch:
         saved_meta = {}
 
         with (
-            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path("/repo"), True)),
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path.home() / "repo", True)),
             patch("seekr_hatchery.sessions.next_chat_name", return_value="chat-1"),
             patch("seekr_hatchery.cli.docker.ensure_dockerfile", return_value=False),
             patch("seekr_hatchery.cli.docker.ensure_docker_config", return_value=False),
@@ -1701,7 +1701,7 @@ class TestCmdChatDispatch:
         saved_meta = {}
 
         with (
-            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path("/repo"), True)),
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path.home() / "repo", True)),
             patch("seekr_hatchery.cli.docker.ensure_dockerfile", return_value=False),
             patch("seekr_hatchery.cli.docker.ensure_docker_config", return_value=False),
             patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
@@ -1721,7 +1721,7 @@ class TestCmdChatDispatch:
         runner = CliRunner()
 
         with (
-            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path("/repo"), True)),
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path.home() / "repo", True)),
             patch("seekr_hatchery.sessions.next_chat_name", return_value="chat-1"),
             patch("seekr_hatchery.cli.docker.ensure_dockerfile", return_value=False),
             patch("seekr_hatchery.cli.docker.ensure_docker_config", return_value=False),
@@ -1992,10 +1992,10 @@ class TestCliNewInclude:
                 _,
                 _,
             ) = mocks
-            mock_root.return_value = (Path("/repo"), True)
+            mock_root.return_value = (Path.home() / "repo", True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
-            mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
-            mock_write.return_value = Path("/repo/.hatchery/tasks/task.md")
+            mock_wt_dir.return_value = Path.home() / "repo" / ".hatchery" / "worktrees"
+            mock_write.return_value = Path.home() / "repo" / ".hatchery" / "tasks" / "task.md"
             mock_docker.return_value = None
             mock_save.side_effect = saved_meta.update
 
@@ -2039,10 +2039,10 @@ class TestCliNewInclude:
                 _,
                 _,
             ) = mocks
-            mock_root.return_value = (Path("/repo"), True)
+            mock_root.return_value = (Path.home() / "repo", True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
-            mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
-            mock_write.return_value = Path("/repo/.hatchery/tasks/task.md")
+            mock_wt_dir.return_value = Path.home() / "repo" / ".hatchery" / "worktrees"
+            mock_write.return_value = Path.home() / "repo" / ".hatchery" / "tasks" / "task.md"
             mock_docker.return_value = None
 
             mock_create_inc = stack.enter_context(patch("seekr_hatchery.cli.git.create_include_worktrees"))
@@ -2084,10 +2084,10 @@ class TestCliNewInclude:
                 _,
                 _,
             ) = mocks
-            mock_root.return_value = (Path("/repo"), True)
+            mock_root.return_value = (Path.home() / "repo", True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
-            mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
-            mock_write.return_value = Path("/repo/.hatchery/tasks/task.md")
+            mock_wt_dir.return_value = Path.home() / "repo" / ".hatchery" / "worktrees"
+            mock_write.return_value = Path.home() / "repo" / ".hatchery" / "tasks" / "task.md"
             mock_docker.return_value = None
 
             stack.enter_context(patch("seekr_hatchery.cli.git.create_include_worktrees"))
@@ -2130,10 +2130,10 @@ class TestCliNewInclude:
                 _,
                 _,
             ) = mocks
-            mock_root.return_value = (Path("/repo"), True)
+            mock_root.return_value = (Path.home() / "repo", True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
-            mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
-            mock_write.return_value = Path("/repo/.hatchery/tasks/task.md")
+            mock_wt_dir.return_value = Path.home() / "repo" / ".hatchery" / "worktrees"
+            mock_write.return_value = Path.home() / "repo" / ".hatchery" / "tasks" / "task.md"
             mock_docker.return_value = None
             mock_launch.side_effect = KeyboardInterrupt
 
@@ -2180,10 +2180,10 @@ class TestCliNewInclude:
                 _,
                 _,
             ) = mocks
-            mock_root.return_value = (Path("/repo"), True)
+            mock_root.return_value = (Path.home() / "repo", True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
-            mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
-            mock_write.return_value = Path("/repo/.hatchery/tasks/task.md")
+            mock_wt_dir.return_value = Path.home() / "repo" / ".hatchery" / "worktrees"
+            mock_write.return_value = Path.home() / "repo" / ".hatchery" / "tasks" / "task.md"
             mock_docker.return_value = None
             mock_save.side_effect = saved_meta.update
 
@@ -2232,10 +2232,10 @@ class TestCliNewInclude:
                 _,
                 _,
             ) = mocks
-            mock_root.return_value = (Path("/repo"), True)
+            mock_root.return_value = (Path.home() / "repo", True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
-            mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
-            mock_write.return_value = Path("/repo/.hatchery/tasks/task.md")
+            mock_wt_dir.return_value = Path.home() / "repo" / ".hatchery" / "worktrees"
+            mock_write.return_value = Path.home() / "repo" / ".hatchery" / "tasks" / "task.md"
             mock_docker.return_value = None
             mock_save.side_effect = saved_meta.update
 
@@ -2266,10 +2266,10 @@ class TestCliNewInclude:
             )
             (_,)
             (_,)
-            mock_root.return_value = (Path("/repo"), True)
+            mock_root.return_value = (Path.home() / "repo", True)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
-            mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
-            mock_write.return_value = Path("/repo/.hatchery/tasks/task.md")
+            mock_wt_dir.return_value = Path.home() / "repo" / ".hatchery" / "worktrees"
+            mock_write.return_value = Path.home() / "repo" / ".hatchery" / "tasks" / "task.md"
             mock_docker.return_value = None
 
             mock_create_inc = stack.enter_context(patch("seekr_hatchery.cli.git.create_include_worktrees"))
