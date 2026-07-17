@@ -1,13 +1,13 @@
 """Tests for the Click CLI entry point and cmd_list/cmd_status."""
 
 import json
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
 
-import seekr_hatchery.constants as constants
 import seekr_hatchery.docker as docker
 import seekr_hatchery.sessions as sessions
 import seekr_hatchery.utils as utils
@@ -134,7 +134,12 @@ class TestHelp:
 
 
 def _new_patches():
-    """Common context managers for cmd_new tests.
+    """Deep-mock context managers for cmd_new *integration* tests.
+
+    Still used by the include/resume test classes below, which run the real
+    sessions.create() to assert include-worktree creation and therefore must
+    stub its whole collaborator graph. The plain dispatch tests (TestCliNew,
+    TestAutoCommitResolution) use the lighter ``_new_env`` instead.
 
     ``run`` is patched on every module that has a local ``from utils import run``
     binding (sessions, git). Both patches share a single MagicMock so tests can
@@ -164,608 +169,149 @@ def _new_patches():
     ]
 
 
-class TestCliNew:
-    def _setup_mocks(self, mocks):
+def _fake_meta(**overrides):
+    """A stand-in SessionMeta for cmd_new tests that mock sessions.create."""
+    meta = MagicMock()
+    meta.no_worktree = False
+    meta.worktree_path = Path("/repo/.hatchery/worktrees/my-task")
+    meta.branch = "hatchery/my-task"
+    meta.hatchery_dir = Path("/repo/.hatchery")
+    meta.include = []
+    meta.session_id = "sid"
+    for k, v in overrides.items():
+        setattr(meta, k, v)
+    return meta
 
-        (
-            mock_root,
-            _,
-            _,
-            _,
-            _,
-            _,
-            _,
-            mock_db_path,
-            mock_wt_dir,
-            mock_create_wt,
-            mock_run,
-            mock_write,
-            _,
-            mock_save,
-            mock_docker,
-            mock_launch,
-            _,
-            _,
-        ) = mocks
-        mock_root.return_value = (Path("/repo"), True)
-        mock_db_path.return_value = MagicMock(exists=lambda: False)
-        mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
-        mock_write.return_value = Path("/repo/.hatchery/tasks/task.md")
-        mock_docker.return_value = None
-        return mock_create_wt, mock_run, mock_save, mock_launch, mock_docker
 
-    def test_new_dispatches_with_name(self):
-        runner = CliRunner()
+@contextmanager
+def _new_env(*, in_repo=True, open_editor=False, auto_commit=True, objective="Add a login page", meta=None, real_config=False):
+    """Patch only cmd_new's *direct* collaborators and yield them as a namespace.
 
-        with ExitStack() as stack:
-            mocks = [stack.enter_context(p) for p in _new_patches()]
-            _, _, _, mock_launch, _ = self._setup_mocks(mocks)
-            result = runner.invoke(cli, ["new", "my-task"])
+    cmd_new is a thin wrapper: resolve config, call sessions.create (the real
+    orchestration, unit-tested in test_session_io.py), then _launch. These
+    tests assert that wiring — not create()'s internals — so create/_launch are
+    mocked and each test reads mocks by name, replacing the old positional
+    ``_new_patches`` unpack wall.
 
-        assert result.exit_code == 0
-        assert mock_launch.called
-
-    def test_new_default_base_fetches_and_uses_origin(self):
-        """Without --from, cmd_new fetches origin and bases the branch on origin/<default>."""
-        runner = CliRunner()
-
-        with ExitStack() as stack:
-            mocks = [stack.enter_context(p) for p in _new_patches()]
-            mock_create_wt, mock_run, _, _, _ = self._setup_mocks(mocks)
-            # Simulate successful fetch; get_default_branch returns "main".
-            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-            stack.enter_context(patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"))
-            runner.invoke(cli, ["new", "my-task"])
-
-        assert mock_create_wt.call_args[0][3] == "origin/main"
-
-    def test_new_default_base_falls_back_to_head_when_fetch_fails(self):
-        """If git fetch fails (offline/no remote), HEAD is used as base."""
-        runner = CliRunner()
-
-        with ExitStack() as stack:
-            mocks = [stack.enter_context(p) for p in _new_patches()]
-            mock_create_wt, mock_run, _, _, _ = self._setup_mocks(mocks)
-            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
-            stack.enter_context(patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"))
-            runner.invoke(cli, ["new", "my-task"])
-
-        assert mock_create_wt.call_args[0][3] == constants.DEFAULT_BASE
-
-    def test_new_with_from_flag(self):
-        runner = CliRunner()
-
-        with ExitStack() as stack:
-            mocks = [stack.enter_context(p) for p in _new_patches()]
-            mock_create_wt, _, _, _, _ = self._setup_mocks(mocks)
-            result = runner.invoke(cli, ["new", "my-task", "--from", "main"])
-
-        assert result.exit_code == 0
-        assert mock_create_wt.call_args[0][3] == "main"
-
-    def test_new_with_no_docker(self):
-        runner = CliRunner()
-
-        with ExitStack() as stack:
-            mocks = [stack.enter_context(p) for p in _new_patches()]
-            _, _, _, _, mock_docker = self._setup_mocks(mocks)
-            result = runner.invoke(cli, ["new", "my-task", "--no-docker"])
-
-        assert result.exit_code == 0
-        call_args = mock_docker.call_args
-        assert call_args[0][1] is True or call_args[1].get("no_docker") is True
-
-    def test_no_editor_skips_open_for_editing(self):
-        runner = CliRunner()
-
-        with ExitStack() as stack:
-            mocks = [stack.enter_context(p) for p in _new_patches()]
-            (
-                mock_root,
-                _,
-                _,
-                _,
-                _,
-                _,
-                _,
-                mock_db_path,
-                mock_wt_dir,
-                _,
-                _,
-                mock_write,
-                mock_open_for_editing,
-                _,
-                mock_docker,
-                _,
-                mock_prompt,
-                _,
-            ) = mocks
-
-            mock_root.return_value = (Path("/repo"), True)
-            mock_db_path.return_value = MagicMock(exists=lambda: False)
-            mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
-            mock_write.return_value = Path("/repo/.hatchery/tasks/task.md")
-            mock_docker.return_value = None
-            mock_prompt.return_value = "Add a login page"
-            result = runner.invoke(cli, ["new", "my-task", "--no-editor"])
-
-        assert result.exit_code == 0
-        assert not mock_open_for_editing.called
-        # write_task_file should have been called with the user's description
-        call_kwargs = mock_write.call_args
-        assert call_kwargs[1].get("objective") == "Add a login page" or (
-            len(call_kwargs[0]) > 3 and call_kwargs[0][3] == "Add a login page"
+    ``real_config=True`` leaves ``UserConfig.load`` unpatched so a config file
+    written to the redirected home is actually read (see TestAutoCommitResolution).
+    """
+    cfg = MagicMock()
+    cfg.resolve_backend.return_value = MagicMock(name="backend")
+    cfg.open_editor = open_editor
+    cfg.auto_commit = auto_commit
+    with ExitStack() as stack:
+        ns = SimpleNamespace(cfg=cfg)
+        ns.root = stack.enter_context(
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path("/repo"), in_repo))
         )
+        if not real_config:
+            stack.enter_context(patch("seekr_hatchery.cli.user_config.UserConfig.load", return_value=cfg))
+        stack.enter_context(patch("seekr_hatchery.cli.docker.load_docker_config", return_value=MagicMock(include=[])))
+        stack.enter_context(patch("seekr_hatchery.cli.sessions.merge_includes_with_config", return_value=[]))
+        stack.enter_context(patch("seekr_hatchery.cli.load_include_entries", return_value=[]))
+        ns.prompt = stack.enter_context(patch("seekr_hatchery.cli._prompt_objective", return_value=objective))
+        ns.create = stack.enter_context(patch("seekr_hatchery.cli.sessions.create", return_value=meta or _fake_meta()))
+        stack.enter_context(patch("seekr_hatchery.cli.docker.resolve_runtime"))
+        stack.enter_context(patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"))
+        ns.launch = stack.enter_context(patch("seekr_hatchery.cli._launch"))
+        ns.remove_worktree = stack.enter_context(patch("seekr_hatchery.cli.git.remove_worktree"))
+        ns.delete_branch = stack.enter_context(patch("seekr_hatchery.cli.git.delete_branch"))
+        stack.enter_context(patch("seekr_hatchery.cli.git.remove_include_worktrees"))
+        stack.enter_context(patch("seekr_hatchery.cli.git.delete_include_branches"))
+        yield ns
 
-    def test_default_uses_prompt_not_editor(self):
-        """With no --editor/--no-editor flag, default config (open_editor=False) uses prompt."""
-        runner = CliRunner()
 
-        with ExitStack() as stack:
-            mocks = [stack.enter_context(p) for p in _new_patches()]
-            (
-                mock_root,
-                _,
-                _,
-                _,
-                _,
-                _,
-                _,
-                mock_db_path,
-                mock_wt_dir,
-                _,
-                _,
-                mock_write,
-                mock_open_for_editing,
-                _,
-                mock_docker,
-                _,
-                mock_prompt,
-                _,
-            ) = mocks
+class TestCliNew:
+    """cmd_new is a thin wrapper over sessions.create + _launch. These tests
+    assert the CLI parses flags and delegates; create()'s behavior is covered
+    in test_session_io.py (TestSessionCreateTask, TestResolveBase). Commit-flag
+    resolution is covered in TestAutoCommitResolution."""
 
-            mock_root.return_value = (Path("/repo"), True)
-            mock_db_path.return_value = MagicMock(exists=lambda: False)
-            mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
-            mock_write.return_value = Path("/repo/.hatchery/tasks/task.md")
-            mock_docker.return_value = None
-            result = runner.invoke(cli, ["new", "my-task"])
+    def test_dispatches_to_create_and_launch(self):
+        with _new_env() as ns:
+            result = CliRunner().invoke(cli, ["new", "my-task"])
+        assert result.exit_code == 0, result.output
+        assert ns.create.call_args[1]["name"] == "my-task"
+        assert ns.create.call_args[1]["type"] == "task"
+        assert ns.launch.called
 
+    def test_from_flag_passed_as_base(self):
+        with _new_env() as ns:
+            result = CliRunner().invoke(cli, ["new", "my-task", "--from", "main"])
         assert result.exit_code == 0
-        assert not mock_open_for_editing.called
-        assert mock_prompt.called
+        assert ns.create.call_args[1]["base"] == "main"
 
-    def test_editor_flag_opens_editor(self, tmp_path):
-        """--editor flag explicitly opens the editor."""
-        runner = CliRunner()
-
-        # Create a real task file; open_for_editing mock will modify it
-        task_file = tmp_path / "task.md"
-        task_file.write_text("template content")
-
-        def fake_open_for_editing(path):
-            path.write_text("template content\n\nuser edits here")
-
-        with ExitStack() as stack:
-            mocks = [stack.enter_context(p) for p in _new_patches()]
-            (
-                mock_root,
-                _,
-                _,
-                _,
-                _,
-                _,
-                _,
-                mock_db_path,
-                mock_wt_dir,
-                _,
-                _,
-                mock_write,
-                mock_open_for_editing,
-                _,
-                mock_docker,
-                _,
-                _,
-                _,
-            ) = mocks
-            mock_root.return_value = (Path("/repo"), True)
-            mock_db_path.return_value = MagicMock(exists=lambda: False)
-            mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
-            mock_write.return_value = task_file
-            mock_docker.return_value = None
-            mock_open_for_editing.side_effect = fake_open_for_editing
-            result = runner.invoke(cli, ["new", "my-task", "--editor"])
-
+    def test_no_docker_passed_through(self):
+        with _new_env() as ns:
+            result = CliRunner().invoke(cli, ["new", "my-task", "--no-docker"])
         assert result.exit_code == 0
-        assert mock_open_for_editing.called
+        assert ns.create.call_args[1]["no_docker"] is True
 
-    def test_editor_unchanged_cancels(self, tmp_path):
-        """When editor mode produces no changes, task is cancelled."""
-        runner = CliRunner()
+    def test_no_worktree_passed_through(self):
+        with _new_env() as ns:
+            result = CliRunner().invoke(cli, ["new", "my-task", "--no-worktree"])
+        assert result.exit_code == 0
+        assert ns.create.call_args[1]["no_worktree"] is True
 
-        # Create a real task file so read_text() returns consistent content
-        task_file = tmp_path / "task.md"
-        task_file.write_text("template content")
+    def test_no_editor_prompts_and_passes_objective(self):
+        with _new_env(open_editor=False, objective="Add a login page") as ns:
+            result = CliRunner().invoke(cli, ["new", "my-task", "--no-editor"])
+        assert result.exit_code == 0
+        assert ns.prompt.called
+        assert ns.create.call_args[1]["use_editor"] is False
+        assert ns.create.call_args[1]["objective"] == "Add a login page"
 
-        with ExitStack() as stack:
-            mocks = [stack.enter_context(p) for p in _new_patches()]
-            (
-                mock_root,
-                _,
-                _,
-                _,
-                _,
-                _,
-                _,
-                mock_db_path,
-                mock_wt_dir,
-                _,
-                _,
-                mock_write,
-                mock_open_for_editing,
-                _,
-                mock_docker,
-                mock_launch,
-                _,
-                _,
-            ) = mocks
-            mock_remove_wt = stack.enter_context(patch("seekr_hatchery.cli.git.remove_worktree"))
-            mock_delete_br = stack.enter_context(patch("seekr_hatchery.cli.git.delete_branch"))
-            mock_root.return_value = (Path("/repo"), True)
-            mock_db_path.return_value = MagicMock(exists=lambda: False)
-            mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
-            mock_write.return_value = task_file
-            mock_docker.return_value = None
-            # open_for_editing is a no-op, so file stays unchanged
-            result = runner.invoke(cli, ["new", "my-task", "--editor"])
+    def test_editor_flag_skips_prompt(self):
+        with _new_env() as ns:
+            result = CliRunner().invoke(cli, ["new", "my-task", "--editor"])
+        assert result.exit_code == 0
+        assert not ns.prompt.called
+        assert ns.create.call_args[1]["use_editor"] is True
+        assert ns.create.call_args[1]["objective"] is None
 
+    def test_default_editor_follows_config(self):
+        """With no --editor/--no-editor flag, cfg.open_editor decides."""
+        with _new_env(open_editor=True) as ns:
+            result = CliRunner().invoke(cli, ["new", "my-task"])
+        assert result.exit_code == 0
+        assert not ns.prompt.called
+        assert ns.create.call_args[1]["use_editor"] is True
+
+    def test_session_cancelled_exits_nonzero(self):
+        with _new_env() as ns:
+            ns.create.side_effect = sessions.SessionCancelled
+            result = CliRunner().invoke(cli, ["new", "my-task"])
         assert result.exit_code == 1
-        assert "unchanged" in result.output.lower()
-        assert not mock_launch.called
-        assert mock_remove_wt.called
-        assert mock_delete_br.called
+        assert not ns.launch.called
 
-    def test_dockerfile_checked_against_worktree_not_repo(self):
-        """ensure_dockerfile/config are called with the worktree path, not repo root."""
-        runner = CliRunner()
-
-        with ExitStack() as stack:
-            mocks = [stack.enter_context(p) for p in _new_patches()]
-            (
-                mock_root,
-                _,
-                _,
-                _,
-                _,
-                mock_ensure_df,
-                mock_ensure_dc,
-                mock_db_path,
-                mock_wt_dir,
-                _,
-                _,
-                mock_write,
-                _,
-                _,
-                mock_docker,
-                _,
-                _,
-                _,
-            ) = mocks
-            mock_root.return_value = (Path("/repo"), True)
-            mock_db_path.return_value = MagicMock(exists=lambda: False)
-            mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
-            mock_write.return_value = Path("/repo/.hatchery/tasks/task.md")
-            mock_docker.return_value = None
-            mock_ensure_df.return_value = False
-            mock_ensure_dc.return_value = False
-            runner.invoke(cli, ["new", "my-task"])
-
-        worktree = Path("/repo/.hatchery/worktrees/my-task")
-        assert mock_ensure_df.call_args[0][0] == worktree / ".hatchery"
-        assert mock_ensure_dc.call_args[0][0] == worktree / ".hatchery"
-
-    def test_keyboard_interrupt_cleans_up_worktree(self):
-        """Ctrl-C after worktree creation removes the worktree and branch."""
-        runner = CliRunner()
-
-        with ExitStack() as stack:
-            mocks = [stack.enter_context(p) for p in _new_patches()]
-            (
-                mock_root,
-                _,
-                _,
-                _,
-                _,
-                mock_ensure_df,
-                _,
-                mock_db_path,
-                mock_wt_dir,
-                _,
-                _,
-                mock_write,
-                _,
-                _,
-                mock_docker,
-                _,
-                _,
-                _,
-            ) = mocks
-            mock_remove_wt = stack.enter_context(patch("seekr_hatchery.cli.git.remove_worktree"))
-            mock_delete_br = stack.enter_context(patch("seekr_hatchery.cli.git.delete_branch"))
-            mock_root.return_value = (Path("/repo"), True)
-            mock_db_path.return_value = MagicMock(exists=lambda: False)
-            mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
-            mock_write.return_value = Path("/repo/.hatchery/tasks/task.md")
-            mock_docker.return_value = None
-            mock_ensure_df.side_effect = KeyboardInterrupt
-            result = runner.invoke(cli, ["new", "my-task"])
-
+    def test_keyboard_interrupt_from_create_exits_without_cli_cleanup(self):
+        """create() does its own rollback on Ctrl-C; the CLI just exits 1."""
+        with _new_env() as ns:
+            ns.create.side_effect = KeyboardInterrupt
+            result = CliRunner().invoke(cli, ["new", "my-task"])
         assert result.exit_code == 1
-        assert mock_remove_wt.called
-        assert mock_delete_br.called
+        assert not ns.launch.called
+        assert not ns.remove_worktree.called
 
-    def test_keyboard_interrupt_no_worktree_skips_cleanup(self):
-        """Ctrl-C with --no-worktree does not attempt to remove any worktree."""
-        runner = CliRunner()
-
-        with ExitStack() as stack:
-            mocks = [stack.enter_context(p) for p in _new_patches()]
-            (
-                mock_root,
-                _,
-                _,
-                _,
-                _,
-                mock_ensure_df,
-                _,
-                mock_db_path,
-                mock_wt_dir,
-                _,
-                _,
-                mock_write,
-                _,
-                _,
-                mock_docker,
-                _,
-                _,
-                _,
-            ) = mocks
-            mock_remove_wt = stack.enter_context(patch("seekr_hatchery.cli.git.remove_worktree"))
-            mock_delete_br = stack.enter_context(patch("seekr_hatchery.cli.git.delete_branch"))
-            mock_root.return_value = (Path("/repo"), True)
-            mock_db_path.return_value = MagicMock(exists=lambda: False)
-            mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
-            mock_write.return_value = Path("/repo/.hatchery/tasks/task.md")
-            mock_docker.return_value = None
-            mock_ensure_df.side_effect = KeyboardInterrupt
-            result = runner.invoke(cli, ["new", "my-task", "--no-worktree"])
-
+    def test_keyboard_interrupt_during_launch_cleans_up(self):
+        with _new_env(meta=_fake_meta(no_worktree=False)) as ns:
+            ns.launch.side_effect = KeyboardInterrupt
+            result = CliRunner().invoke(cli, ["new", "my-task"])
         assert result.exit_code == 1
-        assert not mock_remove_wt.called
-        assert not mock_delete_br.called
+        assert ns.remove_worktree.called
+        assert ns.delete_branch.called
 
-    def test_committed_docker_commits_when_created(self):
-        """Without the flag, a newly generated Dockerfile is committed as normal."""
-        runner = CliRunner()
-
-        with ExitStack() as stack:
-            mocks = [stack.enter_context(p) for p in _new_patches()]
-            (
-                mock_root,
-                _,
-                _,
-                _,
-                _,
-                mock_ensure_df,
-                mock_ensure_dc,
-                mock_db_path,
-                mock_wt_dir,
-                _,
-                mock_run,
-                mock_write,
-                _,
-                _,
-                mock_docker,
-                _,
-                _,
-                _,
-            ) = mocks
-            repo = Path("/repo")
-            mock_root.return_value = (repo, True)
-            mock_db_path.return_value = MagicMock(exists=lambda: False)
-            mock_wt_dir.return_value = repo / ".hatchery/worktrees"
-            mock_write.return_value = repo / ".hatchery/tasks/task.md"
-            mock_docker.return_value = None
-            mock_ensure_df.return_value = True
-            mock_ensure_dc.return_value = False
-            result = runner.invoke(cli, ["new", "my-task"])
-
-        assert result.exit_code == 0
-        # ensure_dockerfile called exactly once
-        assert mock_ensure_df.call_count == 1
-        dockerfile_commits = [
-            c
-            for c in mock_run.call_args_list
-            if c[0][0] == ["git", "commit", "-m", "chore: add hatchery Docker configuration"]
-        ]
-        assert len(dockerfile_commits) == 1
-
-    def test_no_flags_dockerfile_exists_at_root_not_committed(self):
-        """Without flags, a Dockerfile copied from the repo root (ensure returns False)
-        is not committed — only the task file is."""
-        runner = CliRunner()
-
-        with ExitStack() as stack:
-            mocks = [stack.enter_context(p) for p in _new_patches()]
-            (
-                mock_root,
-                _,
-                _,
-                _,
-                _,
-                mock_ensure_df,
-                mock_ensure_dc,
-                mock_db_path,
-                mock_wt_dir,
-                _,
-                mock_run,
-                mock_write,
-                _,
-                _,
-                mock_docker,
-                _,
-                _,
-                _,
-            ) = mocks
-            repo = Path("/repo")
-            mock_root.return_value = (repo, True)
-            mock_db_path.return_value = MagicMock(exists=lambda: False)
-            mock_wt_dir.return_value = repo / ".hatchery/worktrees"
-            mock_write.return_value = repo / ".hatchery/tasks/task.md"
-            mock_docker.return_value = None
-            # ensure_dockerfile returns False: file copied from repo root, not newly created
-            mock_ensure_df.return_value = False
-            mock_ensure_dc.return_value = False
-            result = runner.invoke(cli, ["new", "my-task"])
-
-        assert result.exit_code == 0
-        dockerfile_commits = [
-            c
-            for c in mock_run.call_args_list
-            if c[0][0] == ["git", "commit", "-m", "chore: add hatchery Docker configuration"]
-        ]
-        assert len(dockerfile_commits) == 0
-        task_file_commits = [
-            c
-            for c in mock_run.call_args_list
-            if len(c[0][0]) >= 4 and c[0][0][:3] == ["git", "commit", "-m"] and "add task file" in c[0][0][3]
-        ]
-        assert len(task_file_commits) == 1
-
-    def test_no_commit_skips_all_commits_dockerfile_new(self):
-        """--no-commit skips docker and task-file commits even when Dockerfile is brand-new."""
-        runner = CliRunner()
-
-        with ExitStack() as stack:
-            mocks = [stack.enter_context(p) for p in _new_patches()]
-            (
-                mock_root,
-                _,
-                _,
-                _,
-                _,
-                mock_ensure_df,
-                mock_ensure_dc,
-                mock_db_path,
-                mock_wt_dir,
-                _,
-                mock_run,
-                mock_write,
-                _,
-                mock_save,
-                mock_docker,
-                _,
-                _,
-                _,
-            ) = mocks
-            repo = Path("/repo")
-            mock_root.return_value = (repo, True)
-            mock_db_path.return_value = MagicMock(exists=lambda: False)
-            mock_wt_dir.return_value = repo / ".hatchery/worktrees"
-            mock_write.return_value = repo / ".hatchery/tasks/task.md"
-            mock_docker.return_value = None
-            # Single call to the store
-            mock_ensure_df.return_value = True
-            mock_ensure_dc.return_value = True
-            result = runner.invoke(cli, ["new", "my-task", "--no-commit"])
-
-        assert result.exit_code == 0
-        all_commits = [c for c in mock_run.call_args_list if "commit" in c[0][0]]
-        assert len(all_commits) == 0
-
-    def test_no_commit_skips_all_commits_dockerfile_exists(self):
-        """--no-commit skips all commits when Dockerfile already exists at repo root."""
-        runner = CliRunner()
-
-        with ExitStack() as stack:
-            mocks = [stack.enter_context(p) for p in _new_patches()]
-            (
-                mock_root,
-                _,
-                _,
-                _,
-                _,
-                mock_ensure_df,
-                mock_ensure_dc,
-                mock_db_path,
-                mock_wt_dir,
-                _,
-                mock_run,
-                mock_write,
-                _,
-                mock_save,
-                mock_docker,
-                _,
-                _,
-                _,
-            ) = mocks
-            repo = Path("/repo")
-            mock_root.return_value = (repo, True)
-            mock_db_path.return_value = MagicMock(exists=lambda: False)
-            mock_wt_dir.return_value = repo / ".hatchery/worktrees"
-            mock_write.return_value = repo / ".hatchery/tasks/task.md"
-            mock_docker.return_value = None
-            mock_ensure_df.return_value = False
-            mock_ensure_dc.return_value = False
-            result = runner.invoke(cli, ["new", "my-task", "--no-commit"])
-
-        assert result.exit_code == 0
-        all_commits = [c for c in mock_run.call_args_list if "commit" in c[0][0]]
-        assert len(all_commits) == 0
-
-    def test_no_commit_saves_metadata_flag(self):
-        """--no-commit persists no_commit=True in task metadata."""
-        runner = CliRunner()
-
-        with ExitStack() as stack:
-            mocks = [stack.enter_context(p) for p in _new_patches()]
-            (
-                mock_root,
-                _,
-                _,
-                _,
-                _,
-                mock_ensure_df,
-                mock_ensure_dc,
-                mock_db_path,
-                mock_wt_dir,
-                _,
-                _,
-                mock_write,
-                _,
-                mock_save,
-                mock_docker,
-                _,
-                _,
-                _,
-            ) = mocks
-            repo = Path("/repo")
-            mock_root.return_value = (repo, True)
-            mock_db_path.return_value = MagicMock(exists=lambda: False)
-            mock_wt_dir.return_value = repo / ".hatchery/worktrees"
-            mock_write.return_value = repo / ".hatchery/tasks/task.md"
-            mock_docker.return_value = None
-            mock_ensure_df.return_value = False
-            mock_ensure_dc.return_value = False
-            result = runner.invoke(cli, ["new", "my-task", "--no-commit"])
-
-        assert result.exit_code == 0
-        saved_meta = mock_save.call_args[0][0]
-        assert saved_meta.get("no_commit") is True
+    def test_keyboard_interrupt_during_launch_no_worktree_skips_cleanup(self):
+        with _new_env(meta=_fake_meta(no_worktree=True)) as ns:
+            ns.launch.side_effect = KeyboardInterrupt
+            result = CliRunner().invoke(cli, ["new", "my-task"])
+        assert result.exit_code == 1
+        assert not ns.remove_worktree.called
+        assert not ns.delete_branch.called
 
     def test_no_commit_help_text(self):
-        runner = CliRunner()
-        result = runner.invoke(cli, ["new", "--help"])
+        result = CliRunner().invoke(cli, ["new", "--help"])
         assert result.exit_code == 0
         assert "--no-commit" in result.output
 
@@ -3494,18 +3040,15 @@ class TestLaunchFinalizeInclude:
 
 
 class TestAutoCommitResolution:
-    """Test that --commit/--no-commit flag resolves against auto_commit config.
+    """--commit/--no-commit resolves against the auto_commit config.
 
-    These tests write a real config file (with auto_commit set) to the
-    home-redirected config path, then invoke the CLI. The _new_patches
-    mock all filesystem-touching functions, so only the flag resolution
-    and the saved meta are exercised.
+    Writes a real config file to the home-redirected path, then asserts the
+    resolved no_commit value reaches sessions.create. real_config=True leaves
+    UserConfig.load unpatched so the file is actually read.
     """
 
     @staticmethod
     def _write_config(home, auto_commit):
-        import json
-
         path = home / ".hatchery" / "config.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"schema_version": "1", "auto_commit": auto_commit}))
@@ -3513,63 +3056,31 @@ class TestAutoCommitResolution:
     def test_no_flag_auto_commit_true(self, home):
         """No flag + auto_commit=True → no_commit=False."""
         self._write_config(home, True)
-        runner = CliRunner()
-        with ExitStack() as stack:
-            mocks = [stack.enter_context(p) for p in _new_patches()]
-            mock_root, _, _, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, mock_save, _, _, _, _ = mocks
-            mock_root.return_value = (Path("/repo"), True)
-            mock_db_path.return_value = MagicMock(exists=lambda: False)
-            mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
-            mock_write.return_value = Path("/repo/.hatchery/tasks/task.md")
-            result = runner.invoke(cli, ["new", "my-task"])
+        with _new_env(real_config=True) as ns:
+            result = CliRunner().invoke(cli, ["new", "my-task"])
         assert result.exit_code == 0, result.output
-        saved_meta = mock_save.call_args[0][0]
-        assert saved_meta.get("no_commit") is False
+        assert ns.create.call_args[1]["no_commit"] is False
 
     def test_no_flag_auto_commit_false(self, home):
         """No flag + auto_commit=False → no_commit=True."""
         self._write_config(home, False)
-        runner = CliRunner()
-        with ExitStack() as stack:
-            mocks = [stack.enter_context(p) for p in _new_patches()]
-            mock_root, _, _, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, mock_save, _, _, _, _ = mocks
-            mock_root.return_value = (Path("/repo"), True)
-            mock_db_path.return_value = MagicMock(exists=lambda: False)
-            mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
-            mock_write.return_value = Path("/repo/.hatchery/tasks/task.md")
-            result = runner.invoke(cli, ["new", "my-task"])
+        with _new_env(real_config=True) as ns:
+            result = CliRunner().invoke(cli, ["new", "my-task"])
         assert result.exit_code == 0, result.output
-        saved_meta = mock_save.call_args[0][0]
-        assert saved_meta.get("no_commit") is True
+        assert ns.create.call_args[1]["no_commit"] is True
 
     def test_explicit_commit_overrides_false(self, home):
         """--commit + auto_commit=False → no_commit=False."""
         self._write_config(home, False)
-        runner = CliRunner()
-        with ExitStack() as stack:
-            mocks = [stack.enter_context(p) for p in _new_patches()]
-            mock_root, _, _, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, mock_save, _, _, _, _ = mocks
-            mock_root.return_value = (Path("/repo"), True)
-            mock_db_path.return_value = MagicMock(exists=lambda: False)
-            mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
-            mock_write.return_value = Path("/repo/.hatchery/tasks/task.md")
-            result = runner.invoke(cli, ["new", "my-task", "--commit"])
+        with _new_env(real_config=True) as ns:
+            result = CliRunner().invoke(cli, ["new", "my-task", "--commit"])
         assert result.exit_code == 0, result.output
-        saved_meta = mock_save.call_args[0][0]
-        assert saved_meta.get("no_commit") is False
+        assert ns.create.call_args[1]["no_commit"] is False
 
     def test_explicit_no_commit_overrides_true(self, home):
         """--no-commit + auto_commit=True → no_commit=True."""
         self._write_config(home, True)
-        runner = CliRunner()
-        with ExitStack() as stack:
-            mocks = [stack.enter_context(p) for p in _new_patches()]
-            mock_root, _, _, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, mock_save, _, _, _, _ = mocks
-            mock_root.return_value = (Path("/repo"), True)
-            mock_db_path.return_value = MagicMock(exists=lambda: False)
-            mock_wt_dir.return_value = Path("/repo/.hatchery/worktrees")
-            mock_write.return_value = Path("/repo/.hatchery/tasks/task.md")
-            result = runner.invoke(cli, ["new", "my-task", "--no-commit"])
+        with _new_env(real_config=True) as ns:
+            result = CliRunner().invoke(cli, ["new", "my-task", "--no-commit"])
         assert result.exit_code == 0, result.output
-        saved_meta = mock_save.call_args[0][0]
-        assert saved_meta.get("no_commit") is True
+        assert ns.create.call_args[1]["no_commit"] is True
