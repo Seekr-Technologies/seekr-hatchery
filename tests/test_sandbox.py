@@ -92,7 +92,7 @@ def no_wt_cwd(tmp_path_factory: pytest.TempPathFactory) -> Path:
 def no_wt_image(no_wt_cwd: Path, runtime: docker.ContainerRuntime) -> str:
     """Build the no-worktree sandbox image once; remove it after the module."""
     image = sessions.image_name(no_wt_cwd, "test-no-wt")
-    docker.build_docker_image(no_wt_cwd, no_wt_cwd, image, agent.CODEX, runtime=runtime)
+    docker.build_docker_image(no_wt_cwd, no_wt_cwd / ".hatchery", image, agent.CODEX, runtime=runtime)
     yield image
     subprocess.run([runtime.binary, "rmi", "-f", image], capture_output=True)
 
@@ -200,7 +200,7 @@ def wt_worktree(wt_repo: Path) -> Path:
 def wt_image(wt_repo: Path, wt_worktree: Path, runtime: docker.ContainerRuntime) -> str:
     """Build the worktree sandbox image (alpine+git) once; remove it after the module."""
     image = sessions.image_name(wt_repo, "test-wt")
-    docker.build_docker_image(wt_repo, wt_worktree, image, agent.CODEX, runtime=runtime)
+    docker.build_docker_image(wt_repo, wt_worktree / ".hatchery", image, agent.CODEX, runtime=runtime)
     yield image
     subprocess.run([runtime.binary, "rmi", "-f", image], capture_output=True)
 
