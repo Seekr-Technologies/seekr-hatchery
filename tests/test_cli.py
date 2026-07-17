@@ -1129,10 +1129,10 @@ class TestCliNoWorktree:
                 _,
                 _,
             ) = mocks
-            mock_root.return_value = (Path("/some/dir"), False)
+            mock_root.return_value = (Path.home() / "some_dir", False)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
-            mock_wt_dir.return_value = Path("/some/dir/.hatchery/worktrees")
-            mock_write.return_value = Path("/some/dir/.hatchery/tasks/task.md")
+            mock_wt_dir.return_value = Path.home() / "some_dir" / ".hatchery" / "worktrees"
+            mock_write.return_value = Path.home() / "some_dir" / ".hatchery" / "tasks" / "task.md"
             mock_docker.return_value = None
             result = runner.invoke(cli, ["new", "my-task"])
 
@@ -1166,10 +1166,10 @@ class TestCliNoWorktree:
                 _,
                 _,
             ) = mocks
-            mock_root.return_value = (Path("/some/dir"), False)
+            mock_root.return_value = (Path.home() / "some_dir", False)
             mock_db_path.return_value = MagicMock(exists=lambda: False)
-            mock_wt_dir.return_value = Path("/some/dir/.hatchery/worktrees")
-            mock_write.return_value = Path("/some/dir/.hatchery/tasks/task.md")
+            mock_wt_dir.return_value = Path.home() / "some_dir" / ".hatchery" / "worktrees"
+            mock_write.return_value = Path.home() / "some_dir" / ".hatchery" / "tasks" / "task.md"
             mock_docker.return_value = None
             result = runner.invoke(cli, ["new", "my-task", "--no-docker"])
 
@@ -1667,7 +1667,7 @@ class TestCmdChatDispatch:
 
     def test_chat_requires_git_repo(self):
         runner = CliRunner()
-        with patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path("/some/dir"), False)):
+        with patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path.home() / "some_dir", False)):
             result = runner.invoke(cli, ["chat"])
         assert result.exit_code == 1
         assert "git repository" in result.output
