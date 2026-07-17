@@ -658,6 +658,68 @@ class TestSessionCreateChat:
         assert _git(git_repo, "rev-parse", "--verify", "hatchery/chat-1", check=False).returncode != 0
 
 
+class TestPrepareSandbox:
+    """sessions.prepare_sandbox — sandbox hatchery-dir setup + docker scaffolding.
+
+    Migrated from CLI-level sandbox tests: the mode branch, store-vs-repo
+    placement, and commit gating are session logic, exercised here directly.
+    """
+
+    def _patch_docker(self, monkeypatch, *, df_created, dc_created):
+        mdf = MagicMock(return_value=df_created)
+        mdc = MagicMock(return_value=dc_created)
+        mcommit = MagicMock()
+        monkeypatch.setattr(sessions.docker, "ensure_dockerfile", mdf)
+        monkeypatch.setattr(sessions.docker, "ensure_docker_config", mdc)
+        monkeypatch.setattr(sessions, "_commit_docker_files", mcommit)
+        return mdf, mdc, mcommit
+
+    def test_no_commit_writes_to_store_and_never_commits(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path / "h")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        mdf, mdc, mcommit = self._patch_docker(monkeypatch, df_created=True, dc_created=True)
+
+        hdir = sessions.prepare_sandbox(repo, in_repo=True, backend=agent.CODEX, no_commit=True)
+
+        store = sessions.repo_store_dir(repo)
+        assert hdir == store
+        assert mdf.call_args[0][0] == store
+        assert mdc.call_args[0][0] == store
+        assert not mcommit.called
+        # No in-tree .hatchery created for the sandbox in no-commit mode.
+        assert not (repo / ".hatchery").exists()
+
+    def test_commit_writes_to_repo_and_commits_when_created(self, tmp_path, monkeypatch):
+        repo = tmp_path / "repo"
+        (repo / ".hatchery").mkdir(parents=True)
+        mdf, mdc, mcommit = self._patch_docker(monkeypatch, df_created=True, dc_created=False)
+
+        hdir = sessions.prepare_sandbox(repo, in_repo=True, backend=agent.CODEX, no_commit=False)
+
+        assert hdir == repo / ".hatchery"
+        assert mdf.call_args[0][0] == repo / ".hatchery"
+        assert mcommit.called
+
+    def test_commit_skips_commit_when_nothing_created(self, tmp_path, monkeypatch):
+        repo = tmp_path / "repo"
+        (repo / ".hatchery").mkdir(parents=True)
+        _, _, mcommit = self._patch_docker(monkeypatch, df_created=False, dc_created=False)
+
+        sessions.prepare_sandbox(repo, in_repo=True, backend=agent.CODEX, no_commit=False)
+
+        assert not mcommit.called
+
+    def test_commit_outside_repo_skips_commit(self, tmp_path, monkeypatch):
+        repo = tmp_path / "repo"
+        (repo / ".hatchery").mkdir(parents=True)
+        _, _, mcommit = self._patch_docker(monkeypatch, df_created=True, dc_created=True)
+
+        sessions.prepare_sandbox(repo, in_repo=False, backend=agent.CODEX, no_commit=False)
+
+        assert not mcommit.called
+
+
 class TestRestoreWorktreeIfNeeded:
     """sessions.restore_worktree_if_needed — degraded-state resume recovery.
 

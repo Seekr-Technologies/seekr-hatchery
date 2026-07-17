@@ -26,7 +26,7 @@ import seekr_hatchery.sessions as sessions
 import seekr_hatchery.ui as ui
 import seekr_hatchery.user_config as user_config
 import seekr_hatchery.utils as utils
-from seekr_hatchery.constants import DEFAULT_BASE, DOCKER_CONFIG
+from seekr_hatchery.constants import DEFAULT_BASE
 from seekr_hatchery.includes import IncludeEntry, load_include_entries
 from seekr_hatchery.utils import open_for_editing
 
@@ -813,23 +813,7 @@ def cmd_sandbox(shell: str, rebuild_sandbox: bool, commit: bool | None) -> None:
     backend = cfg.resolve_backend(None)
     no_commit = (not commit) if commit is not None else (not cfg.auto_commit)
 
-    if not no_commit:
-        hdir = repo / ".hatchery"
-        sessions.ensure_tasks_dir(repo)
-        df_created = docker.ensure_dockerfile(hdir, backend)
-        dc_created = docker.ensure_docker_config(hdir)
-        if in_repo and (df_created or dc_created):
-            ui.info("  Committing...")
-            git.add_and_commit(
-                repo,
-                "chore: add hatchery Docker configuration",
-                paths=[str(docker.dockerfile_path(hdir, backend).relative_to(repo)), str(Path(".hatchery") / DOCKER_CONFIG)],
-            )
-    else:
-        sessions.ensure_repo_store(repo)
-        hdir = sessions.repo_store_dir(repo)
-        docker.ensure_dockerfile(hdir, backend)
-        docker.ensure_docker_config(hdir)
+    hdir = sessions.prepare_sandbox(repo, in_repo=in_repo, backend=backend, no_commit=no_commit)
 
     runtime = docker.detect_runtime()
     config = docker.load_docker_config(hdir)

@@ -1183,6 +1183,35 @@ def create(
     return meta
 
 
+def prepare_sandbox(
+    repo: Path,
+    *,
+    in_repo: bool,
+    backend: "AgentBackend",
+    no_commit: bool,
+) -> Path:
+    """Set up the hatchery dir + Docker scaffolding for a ``sandbox`` shell.
+
+    The sandbox counterpart to :func:`create`'s pre-task setup — there is no
+    worktree and no task file, so this just resolves the hatchery dir for the
+    mode, ensures the Dockerfile and ``docker.yaml`` exist there, and (commit
+    mode only) commits any newly created scaffolding. Returns the hatchery dir.
+    """
+    if no_commit:
+        ensure_repo_store(repo)
+        hdir = repo_store_dir(repo)
+        docker.ensure_dockerfile(hdir, backend)
+        docker.ensure_docker_config(hdir)
+    else:
+        hdir = repo / ".hatchery"
+        ensure_tasks_dir(repo)
+        df_created = docker.ensure_dockerfile(hdir, backend)
+        dc_created = docker.ensure_docker_config(hdir)
+        if in_repo and (df_created or dc_created):
+            _commit_docker_files(backend, repo)
+    return hdir
+
+
 def launch(
     meta: SessionMeta,
     *,
