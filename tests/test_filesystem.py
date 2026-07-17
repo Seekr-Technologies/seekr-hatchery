@@ -518,6 +518,7 @@ class TestEnsureDockerfile:
         assert "# USER root" in content
         assert "fuse-overlayfs" in content
 
+
 class TestEnsureDockerConfig:
     def _prep(self, repo: Path) -> None:
         """Create .hatchery/ — normally done by ensure_tasks_dir before this runs."""
@@ -587,6 +588,7 @@ class TestEnsureDockerConfig:
         content = (fake_repo / constants.DOCKER_CONFIG).read_text()
         parsed = yaml.safe_load(content)
         assert parsed["schema_version"] == "1"
+
 
 class TestDindDockerfileOk:
     def _prep(self, repo: Path) -> None:

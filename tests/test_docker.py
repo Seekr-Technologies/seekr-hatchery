@@ -1269,6 +1269,7 @@ class TestBuildMountsNoCommit:
         monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
         monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path)
         import seekr_hatchery.sessions as sessions
+
         monkeypatch.setattr(sessions, "_TASKS_DB_DIR", tmp_path / "tasks")
 
         meta = SessionMeta(
@@ -1297,8 +1298,7 @@ class TestBuildMountsNoCommit:
 
         # 3. No other RW mount under hdir (no sibling or Dockerfile RW)
         rw_under_hdir = [
-            m for m in mounts
-            if isinstance(m, mount.BindMount) and m.mode == "RW" and str(hdir) in str(m.src)
+            m for m in mounts if isinstance(m, mount.BindMount) and m.mode == "RW" and str(hdir) in str(m.src)
         ]
         assert len(rw_under_hdir) == 1
         assert str(rw_under_hdir[0].src) == str(task_file)
@@ -1324,6 +1324,7 @@ class TestBuildMountsNoCommit:
         monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
         monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path)
         import seekr_hatchery.sessions as sessions
+
         monkeypatch.setattr(sessions, "_TASKS_DB_DIR", tmp_path / "tasks")
 
         meta = SessionMeta(
@@ -1345,6 +1346,7 @@ class TestBuildMountsNoCommit:
         monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
         monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path)
         import seekr_hatchery.sessions as sessions
+
         monkeypatch.setattr(sessions, "_TASKS_DB_DIR", tmp_path / "tasks")
 
         meta = SessionMeta(
@@ -1367,8 +1369,7 @@ class TestBuildMountsNoCommit:
 
         # No RW mount under hdir
         rw_under_hdir = [
-            m for m in mounts
-            if isinstance(m, mount.BindMount) and m.mode == "RW" and str(hdir) in str(m.src)
+            m for m in mounts if isinstance(m, mount.BindMount) and m.mode == "RW" and str(hdir) in str(m.src)
         ]
         assert len(rw_under_hdir) == 0
 

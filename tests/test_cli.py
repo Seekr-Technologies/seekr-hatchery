@@ -184,7 +184,9 @@ def _fake_meta(**overrides):
 
 
 @contextmanager
-def _new_env(*, in_repo=True, open_editor=False, auto_commit=True, objective="Add a login page", meta=None, real_config=False):
+def _new_env(
+    *, in_repo=True, open_editor=False, auto_commit=True, objective="Add a login page", meta=None, real_config=False
+):
     """Patch only cmd_new's *direct* collaborators and yield them as a namespace.
 
     cmd_new is a thin wrapper: resolve config, call sessions.create (the real
@@ -667,8 +669,14 @@ class TestSandbox:
         hdir = tmp_path / "hdir"
         p_root, p_prep, p_rt, p_cfg, p_feat = self._patches(repo, hdir)
         runner = CliRunner()
-        with p_root, p_prep as mock_prep, p_rt, p_cfg, p_feat, \
-                patch("seekr_hatchery.cli.docker.launch_sandbox_shell") as mock_launch:
+        with (
+            p_root,
+            p_prep as mock_prep,
+            p_rt,
+            p_cfg,
+            p_feat,
+            patch("seekr_hatchery.cli.docker.launch_sandbox_shell") as mock_launch,
+        ):
             result = runner.invoke(cli, ["sandbox"])
 
         assert result.exit_code == 0, result.output
@@ -682,8 +690,14 @@ class TestSandbox:
         repo = tmp_path / "repo"
         p_root, p_prep, p_rt, p_cfg, p_feat = self._patches(repo, tmp_path / "hdir")
         runner = CliRunner()
-        with p_root, p_prep, p_rt, p_cfg, p_feat, \
-                patch("seekr_hatchery.cli.docker.launch_sandbox_shell") as mock_launch:
+        with (
+            p_root,
+            p_prep,
+            p_rt,
+            p_cfg,
+            p_feat,
+            patch("seekr_hatchery.cli.docker.launch_sandbox_shell") as mock_launch,
+        ):
             result = runner.invoke(cli, ["sandbox", "--shell", "/bin/sh"])
 
         assert result.exit_code == 0, result.output
@@ -694,13 +708,11 @@ class TestSandbox:
         repo = tmp_path / "repo"
         p_root, p_prep, p_rt, p_cfg, p_feat = self._patches(repo, tmp_path / "hdir")
         runner = CliRunner()
-        with p_root, p_prep as mock_prep, p_rt, p_cfg, p_feat, \
-                patch("seekr_hatchery.cli.docker.launch_sandbox_shell"):
+        with p_root, p_prep as mock_prep, p_rt, p_cfg, p_feat, patch("seekr_hatchery.cli.docker.launch_sandbox_shell"):
             result = runner.invoke(cli, ["sandbox", "--no-commit"])
 
         assert result.exit_code == 0, result.output
         assert mock_prep.call_args[1]["no_commit"] is True
-
 
 
 # ---------------------------------------------------------------------------
