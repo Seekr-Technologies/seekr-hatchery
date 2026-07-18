@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 import seekr_hatchery.agents as agent
 import seekr_hatchery.constants as constants
+import seekr_hatchery.git as git
 import seekr_hatchery.sessions as sessions
 import seekr_hatchery.utils as utils
 from seekr_hatchery.includes import IncludeEntry, IncludeItem
@@ -560,6 +561,37 @@ class TestSessionMetaProperties:
 # ---------------------------------------------------------------------------
 
 
+class TestResolveBase:
+    """sessions._resolve_base — the ref a new task worktree forks from.
+
+    Migrated from CLI tests that reached this through the full new-command
+    stack (test_new_default_base_fetches_and_uses_origin,
+    test_new_default_base_falls_back_to_head_when_fetch_fails,
+    test_new_with_from_flag)."""
+
+    def test_default_base_uses_origin_when_fetch_succeeds(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(sessions.git, "get_default_branch", lambda repo: "main")
+        monkeypatch.setattr(sessions, "run", MagicMock(return_value=MagicMock(returncode=0)))
+        assert sessions._resolve_base(tmp_path, constants.DEFAULT_BASE, True) == "origin/main"
+
+    def test_default_base_falls_back_to_local_when_fetch_fails(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(sessions.git, "get_default_branch", lambda repo: "main")
+        monkeypatch.setattr(sessions, "run", MagicMock(return_value=MagicMock(returncode=1)))
+        assert sessions._resolve_base(tmp_path, constants.DEFAULT_BASE, True) == constants.DEFAULT_BASE
+
+    def test_explicit_base_returned_and_fetched_if_remote(self, tmp_path, monkeypatch):
+        fetch = MagicMock()
+        monkeypatch.setattr(sessions.git, "_fetch_if_remote", fetch)
+        # A fetch origin (the default-base path) must NOT run for an explicit base.
+        monkeypatch.setattr(sessions, "run", MagicMock(side_effect=AssertionError("no fetch origin for explicit base")))
+        assert sessions._resolve_base(tmp_path, "main", True) == "main"
+        assert fetch.called
+
+    def test_not_in_repo_returns_base_verbatim(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(sessions, "run", MagicMock(side_effect=AssertionError("no git calls outside a repo")))
+        assert sessions._resolve_base(tmp_path, constants.DEFAULT_BASE, False) == constants.DEFAULT_BASE
+
+
 class TestSessionCreateTask:
     """sessions.create(type='task') — real worktree creation, real docker scaffolding."""
 
@@ -587,7 +619,7 @@ class TestSessionCreateTask:
             backend=agent.CODEX,
             objective="The task is to do X.",
         )
-        task_file = sessions.find_task_file(git_repo / ".hatchery" / "worktrees" / "t", "t")
+        task_file = sessions.find_task_file(git_repo / ".hatchery" / "worktrees" / "t" / ".hatchery" / "tasks", "t")
         assert task_file is not None
         assert "The task is to do X." in task_file.read_text()
 
@@ -631,7 +663,7 @@ class TestSessionCreateTask:
         log = _git(worktree, "log", "--oneline").stdout
         assert "hatchery Docker configuration" in log
 
-    def test_no_commit_skips_task_file_commit(self, git_repo, fake_tasks_db, no_input):
+    def test_not_committed_skips_task_file_commit(self, git_repo, fake_tasks_db, no_input):
         sessions.create(
             name="t",
             repo=git_repo,
@@ -644,6 +676,30 @@ class TestSessionCreateTask:
         log = _git(worktree, "log", "--oneline").stdout
         assert "add task file" not in log
 
+    def test_docker_commit_gated_on_new_files(self, git_repo, fake_tasks_db, no_input, monkeypatch):
+        """Docker scaffolding is committed only when newly created (ensure_* -> True).
+
+        Migrated from CLI test_no_flags_dockerfile_exists_at_root_not_committed:
+        a pre-existing Dockerfile (ensure returns False) is not re-committed."""
+        monkeypatch.setattr(sessions.docker, "ensure_dockerfile", MagicMock(return_value=False))
+        monkeypatch.setattr(sessions.docker, "ensure_docker_config", MagicMock(return_value=False))
+        spy = MagicMock()
+        monkeypatch.setattr(sessions, "_commit_docker_files", spy)
+        sessions.create(name="t", repo=git_repo, type="task", backend=agent.CODEX, objective="x")
+        assert not spy.called
+
+    def test_keyboard_interrupt_rolls_back_worktree_and_branch(self, git_repo, fake_tasks_db, no_input, monkeypatch):
+        """Ctrl-C after the worktree is created rolls it (and the branch) back, then re-raises.
+
+        Migrated from CLI test_keyboard_interrupt_cleans_up_worktree — the
+        rollback is create()'s own KeyboardInterrupt handler, not CLI logic."""
+        # ensure_dockerfile runs after create_worktree, inside create()'s try.
+        monkeypatch.setattr(sessions.docker, "ensure_dockerfile", MagicMock(side_effect=KeyboardInterrupt))
+        with pytest.raises(KeyboardInterrupt):
+            sessions.create(name="t", repo=git_repo, type="task", backend=agent.CODEX, objective="x")
+        assert not (git_repo / ".hatchery" / "worktrees" / "t").exists()
+        assert _git(git_repo, "rev-parse", "--verify", "hatchery/t", check=False).returncode != 0
+
 
 class TestSessionCreateChat:
     """sessions.create(type='chat') — no worktree, no task file."""
@@ -653,8 +709,70 @@ class TestSessionCreateChat:
         assert meta.is_chat
         assert meta.no_worktree is True
         assert not (git_repo / ".hatchery" / "worktrees" / "chat-1").exists()
-        assert sessions.find_task_file(git_repo, "chat-1") is None
+        assert sessions.find_task_file(git_repo / ".hatchery" / "tasks", "chat-1") is None
         assert _git(git_repo, "rev-parse", "--verify", "hatchery/chat-1", check=False).returncode != 0
+
+
+class TestPrepareSandbox:
+    """sessions.prepare_sandbox — sandbox hatchery-dir setup + docker scaffolding.
+
+    Migrated from CLI-level sandbox tests: the mode branch, store-vs-repo
+    placement, and commit gating are session logic, exercised here directly.
+    """
+
+    def _patch_docker(self, monkeypatch, *, df_created, dc_created):
+        mdf = MagicMock(return_value=df_created)
+        mdc = MagicMock(return_value=dc_created)
+        mcommit = MagicMock()
+        monkeypatch.setattr(sessions.docker, "ensure_dockerfile", mdf)
+        monkeypatch.setattr(sessions.docker, "ensure_docker_config", mdc)
+        monkeypatch.setattr(sessions, "_commit_docker_files", mcommit)
+        return mdf, mdc, mcommit
+
+    def test_no_commit_writes_to_store_and_never_commits(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path / "h")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        mdf, mdc, mcommit = self._patch_docker(monkeypatch, df_created=True, dc_created=True)
+
+        hdir = sessions.prepare_sandbox(repo, in_repo=True, backend=agent.CODEX, no_commit=True)
+
+        store = sessions.repo_store_dir(repo)
+        assert hdir == store
+        assert mdf.call_args[0][0] == store
+        assert mdc.call_args[0][0] == store
+        assert not mcommit.called
+        # No in-tree .hatchery created for the sandbox in no-commit mode.
+        assert not (repo / ".hatchery").exists()
+
+    def test_commit_writes_to_repo_and_commits_when_created(self, tmp_path, monkeypatch):
+        repo = tmp_path / "repo"
+        (repo / ".hatchery").mkdir(parents=True)
+        mdf, mdc, mcommit = self._patch_docker(monkeypatch, df_created=True, dc_created=False)
+
+        hdir = sessions.prepare_sandbox(repo, in_repo=True, backend=agent.CODEX, no_commit=False)
+
+        assert hdir == repo / ".hatchery"
+        assert mdf.call_args[0][0] == repo / ".hatchery"
+        assert mcommit.called
+
+    def test_commit_skips_commit_when_nothing_created(self, tmp_path, monkeypatch):
+        repo = tmp_path / "repo"
+        (repo / ".hatchery").mkdir(parents=True)
+        _, _, mcommit = self._patch_docker(monkeypatch, df_created=False, dc_created=False)
+
+        sessions.prepare_sandbox(repo, in_repo=True, backend=agent.CODEX, no_commit=False)
+
+        assert not mcommit.called
+
+    def test_commit_outside_repo_skips_commit(self, tmp_path, monkeypatch):
+        repo = tmp_path / "repo"
+        (repo / ".hatchery").mkdir(parents=True)
+        _, _, mcommit = self._patch_docker(monkeypatch, df_created=True, dc_created=True)
+
+        sessions.prepare_sandbox(repo, in_repo=False, backend=agent.CODEX, no_commit=False)
+
+        assert not mcommit.called
 
 
 class TestRestoreWorktreeIfNeeded:
@@ -830,32 +948,34 @@ class TestResolveRecreateBase:
 class TestUpdateTaskFileStatus:
     """update_task_file_status rewrites the front-matter Status line."""
 
-    def _write_task(self, worktree, name, status):
-        d = worktree / ".hatchery" / "tasks"
-        d.mkdir(parents=True, exist_ok=True)
-        p = d / f"2026-01-01-{name}.md"
+    def _write_task(self, tasks_dir, name, status):
+        tasks_dir.mkdir(parents=True, exist_ok=True)
+        p = tasks_dir / f"2026-01-01-{name}.md"
         p.write_text(f"# Task: {name}\n\n**Status**: {status}\n**Branch**: x\n\nBody\n")
         return p
 
     def test_replaces_complete_with_in_progress(self, tmp_path):
-        p = self._write_task(tmp_path, "t", "complete")
-        sessions.update_task_file_status(tmp_path, "t", "in-progress")
+        tasks_dir = tmp_path / ".hatchery" / "tasks"
+        p = self._write_task(tasks_dir, "t", "complete")
+        sessions.update_task_file_status(tasks_dir, "t", "in-progress")
         assert "**Status**: in-progress" in p.read_text()
         assert "**Status**: complete" not in p.read_text()
 
     def test_noop_when_already_matches(self, tmp_path):
-        p = self._write_task(tmp_path, "t", "in-progress")
+        tasks_dir = tmp_path / ".hatchery" / "tasks"
+        p = self._write_task(tasks_dir, "t", "in-progress")
         before = p.read_text()
-        sessions.update_task_file_status(tmp_path, "t", "in-progress")
+        sessions.update_task_file_status(tasks_dir, "t", "in-progress")
         assert p.read_text() == before
 
     def test_noop_when_file_missing(self, tmp_path):
         # Doesn't raise.
-        sessions.update_task_file_status(tmp_path, "no-such", "in-progress")
+        sessions.update_task_file_status(tmp_path / ".hatchery" / "tasks", "no-such", "in-progress")
 
     def test_preserves_other_lines(self, tmp_path):
-        p = self._write_task(tmp_path, "t", "complete")
-        sessions.update_task_file_status(tmp_path, "t", "in-progress")
+        tasks_dir = tmp_path / ".hatchery" / "tasks"
+        p = self._write_task(tasks_dir, "t", "complete")
+        sessions.update_task_file_status(tasks_dir, "t", "in-progress")
         text = p.read_text()
         assert "# Task: t" in text
         assert "**Branch**: x" in text
@@ -1417,3 +1537,340 @@ class TestMergeIncludesWithConfig:
         result = sessions.merge_includes_with_config([], config, tmp_path)
         assert len(result) == 1
         assert result[0].path == ref.resolve()
+
+
+# ---------------------------------------------------------------------------
+# Out-of-tree store path helpers
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# hatchery_dir resolver
+# ---------------------------------------------------------------------------
+
+
+class TestHatcheryDir:
+    def test_no_commit_uses_store(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path)
+        monkeypatch.setattr(sessions, "_TASKS_DB_DIR", tmp_path / "tasks")
+        repo = tmp_path / "myrepo"
+        worktree = repo / ".hatchery" / "worktrees" / "t"
+        result = sessions.hatchery_dir(repo, worktree, no_commit=True, no_worktree=False)
+        assert result == sessions.repo_store_dir(repo)
+
+    def test_commit_worktree(self, tmp_path):
+        repo = tmp_path / "myrepo"
+        worktree = repo / ".hatchery" / "worktrees" / "t"
+        result = sessions.hatchery_dir(repo, worktree, no_commit=False, no_worktree=False)
+        assert result == worktree / ".hatchery"
+
+    def test_commit_no_worktree(self, tmp_path):
+        repo = tmp_path / "myrepo"
+        result = sessions.hatchery_dir(repo, repo, no_commit=False, no_worktree=True)
+        assert result == repo / ".hatchery"
+
+
+# ---------------------------------------------------------------------------
+# repo_store_dir / ensure_repo_store
+# ---------------------------------------------------------------------------
+
+
+class TestRepoStorePaths:
+    def test_repo_store_dir_composes_correctly(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path)
+        monkeypatch.setattr(sessions, "_TASKS_DB_DIR", tmp_path / "tasks")
+        repo = tmp_path / "myrepo"
+        result = sessions.repo_store_dir(repo)
+        assert result == tmp_path / "repos" / utils.repo_id(repo)
+
+
+class TestEnsureRepoStore:
+    def test_creates_dirs_and_repo_json(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path)
+        monkeypatch.setattr(sessions, "_TASKS_DB_DIR", tmp_path / "tasks")
+        repo = tmp_path / "myrepo"
+        sessions.ensure_repo_store(repo)
+        store = sessions.repo_store_dir(repo)
+        assert (store / "tasks").is_dir()
+        repo_meta = json.loads((store / "repo.json").read_text())
+        assert repo_meta == {"path": str(repo), "name": repo.name}
+
+    def test_idempotent(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path)
+        monkeypatch.setattr(sessions, "_TASKS_DB_DIR", tmp_path / "tasks")
+        repo = tmp_path / "myrepo"
+        sessions.ensure_repo_store(repo)
+        sessions.ensure_repo_store(repo)
+        store = sessions.repo_store_dir(repo)
+        assert (store / "repo.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# SessionMeta derived properties (hatchery_dir, task_dir)
+# ---------------------------------------------------------------------------
+
+
+class TestSessionMetaDerivedPaths:
+    def test_hatchery_dir_no_commit(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path)
+        meta = sessions.SessionMeta(
+            name="t",
+            repo=str(tmp_path),
+            worktree=str(tmp_path / "wt"),
+            no_commit=True,
+        )
+        assert meta.hatchery_dir == sessions.repo_store_dir(tmp_path)
+
+    def test_hatchery_dir_committed_no_worktree(self, tmp_path):
+        meta = sessions.SessionMeta(
+            name="t",
+            repo=str(tmp_path),
+            worktree=str(tmp_path),
+            no_commit=False,
+            no_worktree=True,
+        )
+        assert meta.hatchery_dir == tmp_path / ".hatchery"
+
+    def test_hatchery_dir_committed_worktree(self, tmp_path):
+        wt = tmp_path / "wt"
+        meta = sessions.SessionMeta(
+            name="t",
+            repo=str(tmp_path),
+            worktree=str(wt),
+            no_commit=False,
+        )
+        assert meta.hatchery_dir == wt / ".hatchery"
+
+    def test_task_dir_no_commit(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path)
+        meta = sessions.SessionMeta(
+            name="t",
+            repo=str(tmp_path),
+            worktree=str(tmp_path / "wt"),
+            no_commit=True,
+        )
+        assert meta.task_dir == meta.hatchery_dir / "tasks"
+
+    def test_task_dir_committed(self, tmp_path):
+        meta = sessions.SessionMeta(
+            name="t",
+            repo=str(tmp_path),
+            worktree=str(tmp_path / "wt"),
+            no_commit=False,
+        )
+        assert meta.task_dir == tmp_path / "wt" / ".hatchery" / "tasks"
+
+    def test_task_file_resolves_dated_file(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path)
+        meta = sessions.SessionMeta(
+            name="t",
+            repo=str(tmp_path),
+            worktree=str(tmp_path / "wt"),
+            no_commit=True,
+        )
+        tasks_dir = meta.task_dir
+        tasks_dir.mkdir(parents=True)
+        task_file = tasks_dir / "2026-01-15-t.md"
+        task_file.write_text("# task\n")
+        assert meta.task_file == task_file
+
+    def test_task_file_none_when_absent(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path)
+        meta = sessions.SessionMeta(
+            name="t",
+            repo=str(tmp_path),
+            worktree=str(tmp_path / "wt"),
+            no_commit=True,
+        )
+        meta.task_dir.mkdir(parents=True)
+        assert meta.task_file is None
+
+
+# ---------------------------------------------------------------------------
+# No-commit create() — task file and docker files go to the store
+# ---------------------------------------------------------------------------
+
+
+class TestCreateNoCommit:
+    def test_task_file_in_store_not_worktree(self, git_repo, fake_tasks_db, no_input, monkeypatch):
+        """In no-commit mode, the task file lives in the store, not the worktree."""
+        meta = sessions.create(
+            name="t",
+            repo=git_repo,
+            type="task",
+            backend=agent.CODEX,
+            no_commit=True,
+            objective="do stuff",
+        )
+        task_file = meta.hatchery_dir / "tasks" / sessions.task_file_name("t")
+        assert task_file.exists()
+        wt_tasks = meta.worktree_path / ".hatchery" / "tasks"
+        assert not wt_tasks.exists() or not list(wt_tasks.glob("*.md"))
+
+    def test_no_git_commit_called(self, git_repo, fake_tasks_db, no_input, monkeypatch):
+        """In no-commit mode, git.add_and_commit is never called."""
+        commit_calls = []
+        original = git.add_and_commit
+
+        def spy(repo, msg, **kw):
+            commit_calls.append(msg)
+            return original(repo, msg, **kw)
+
+        monkeypatch.setattr(git, "add_and_commit", spy)
+        monkeypatch.setattr("seekr_hatchery.sessions.git.add_and_commit", spy)
+        sessions.create(
+            name="t",
+            repo=git_repo,
+            type="task",
+            backend=agent.CODEX,
+            no_commit=True,
+            objective="x",
+        )
+        assert commit_calls == []
+
+    def test_no_ensure_tasks_dir_called(self, git_repo, fake_tasks_db, no_input, monkeypatch):
+        """In no-commit mode, ensure_tasks_dir is not called."""
+        called = []
+        original = sessions.ensure_tasks_dir
+
+        def spy(repo):
+            called.append(repo)
+            return original(repo)
+
+        monkeypatch.setattr(sessions, "ensure_tasks_dir", spy)
+        sessions.create(
+            name="t",
+            repo=git_repo,
+            type="task",
+            backend=agent.CODEX,
+            no_commit=True,
+            objective="x",
+        )
+        assert called == []
+
+    def test_docker_files_in_store_not_worktree(self, git_repo, fake_tasks_db, no_input, monkeypatch):
+        """In no-commit mode, docker files are in the store, not the worktree."""
+        meta = sessions.create(
+            name="t",
+            repo=git_repo,
+            type="task",
+            backend=agent.CODEX,
+            no_commit=True,
+            objective="x",
+        )
+        hdir = meta.hatchery_dir
+        assert (hdir / "Dockerfile.codex").exists()
+        assert (hdir / "docker.yaml").exists()
+        wt_df = meta.worktree_path / ".hatchery" / "Dockerfile.codex"
+        assert not wt_df.exists()
+
+    def test_git_exclude_used(self, git_repo, fake_tasks_db, no_input, monkeypatch):
+        """In no-commit mode, ensure_git_exclude is called, not ensure_gitignore."""
+        exclude_called = []
+        gitignore_called = []
+        monkeypatch.setattr(sessions, "ensure_git_exclude", lambda repo, entry: exclude_called.append((repo, entry)))
+        monkeypatch.setattr(sessions, "ensure_gitignore", lambda repo: gitignore_called.append(repo))
+        sessions.create(
+            name="t",
+            repo=git_repo,
+            type="task",
+            backend=agent.CODEX,
+            no_commit=True,
+            objective="x",
+        )
+        assert len(exclude_called) == 1
+        assert ".hatchery/worktrees/" in exclude_called[0][1]
+        assert gitignore_called == []
+
+
+class TestRecordSurvivesDone:
+    def test_record_survives_mark_done(self, git_repo, fake_tasks_db, no_input, monkeypatch):
+        """After create(no_commit=True) + mark_done, the record file still exists."""
+        meta = sessions.create(
+            name="t",
+            repo=git_repo,
+            type="task",
+            backend=agent.CODEX,
+            no_commit=True,
+            objective="x",
+        )
+        task_file = meta.hatchery_dir / "tasks" / sessions.task_file_name("t")
+        assert task_file.exists()
+        sessions.mark_done(meta, commit_changes=False)
+        assert task_file.exists()
+
+
+# ---------------------------------------------------------------------------
+# sandbox_context no-commit branch
+# ---------------------------------------------------------------------------
+
+
+class TestSandboxContextNoCommit:
+    def test_no_commit_emits_record_store_bullet(self, tmp_path):
+        """sandbox_context with no_commit=True + hatchery_dir emits the record-store bullet."""
+        result = sessions.sandbox_context(
+            name="t",
+            branch="hatchery/t",
+            worktree=tmp_path / "wt",
+            repo=tmp_path,
+            main_branch="main",
+            use_docker=True,
+            no_commit=True,
+            hatchery_dir=tmp_path / "store",
+        )
+        assert "Task record" in result
+        assert "read-write" in result
+        assert "read-only" in result
+
+    def test_commit_mode_no_record_store_bullet(self, tmp_path):
+        """sandbox_context with no_commit=False does not emit the record-store bullet."""
+        result = sessions.sandbox_context(
+            name="t",
+            branch="hatchery/t",
+            worktree=tmp_path / "wt",
+            repo=tmp_path,
+            main_branch="main",
+            use_docker=True,
+            no_commit=False,
+        )
+        assert "Task record" not in result
+
+    def test_no_commit_no_hatchery_dir_no_bullet(self, tmp_path):
+        """sandbox_context with no_commit=True but no hatchery_dir does not emit the bullet."""
+        result = sessions.sandbox_context(
+            name="t",
+            branch="hatchery/t",
+            worktree=tmp_path / "wt",
+            repo=tmp_path,
+            main_branch="main",
+            use_docker=True,
+            no_commit=True,
+        )
+        assert "Task record" not in result
+
+
+# ---------------------------------------------------------------------------
+# not-in-repo + not-committed path agreement
+# ---------------------------------------------------------------------------
+
+
+class TestCreateNoCommitNotInRepo:
+    def test_docker_files_go_to_store_when_not_in_repo(self, tmp_path, fake_tasks_db, no_input, monkeypatch):
+        """When not in a repo and not committed, docker files go to the store."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+
+        meta = sessions.create(
+            name="t",
+            repo=repo,
+            type="task",
+            backend=agent.CODEX,
+            no_commit=True,
+            no_worktree=True,
+            in_repo=False,
+            objective="x",
+        )
+        hdir = meta.hatchery_dir
+        assert (hdir / "Dockerfile.codex").exists()
+        assert (hdir / "docker.yaml").exists()
+        assert not (repo / ".hatchery" / "Dockerfile.codex").exists()

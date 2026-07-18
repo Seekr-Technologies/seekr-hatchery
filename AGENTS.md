@@ -67,7 +67,7 @@ def test_default_agent_is_none():  assert model.default_agent is None
 
 # Good — one test, full output
 def test_defaults():
-    assert UserConfigModel().model_dump() == {"schema_version": "1", "default_agent": None}
+    assert UserConfigModel().model_dump() == {"schema_version": "1", "default_agent": None, "open_editor": False, "auto_commit": True}
 ```
 
 For functions with multiple call variants, write one test *per variant* and

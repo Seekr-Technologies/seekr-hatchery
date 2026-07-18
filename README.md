@@ -97,6 +97,7 @@ All `new` / `resume` commands accept:
 `new` also accepts:
 - `--from <ref>` — fork from a specific branch or commit (default: `HEAD`)
 - `--editor / --no-editor` — force editor or prompt mode for the task objective. By default, hatchery prompts in the terminal; set `"open_editor": true` in `~/.hatchery/config.json` to default to `$EDITOR`. If the editor is opened and the file is unchanged on close, the task is cancelled.
+- `--commit / --no-commit` — control whether hatchery auto-commits its scaffolding (task file, Docker configuration). Default: from config (`auto_commit: true`). Use `--no-commit` to keep all hatchery files out of the tracked repo — task records and Docker files are stored under `~/.hatchery/repos/<repo-id>/` instead. Set `"auto_commit": false` in `~/.hatchery/config.json` to make no-commit the default for every repo.
 - `--agent [codex]` — choose the AI agent (auto-detected from installed agents)
 
 The chosen agent is stored in task metadata and re-used automatically on `resume`.
@@ -258,13 +259,16 @@ Then output `"$top\n$hatchery_line\n$bottom"` when `$hatchery_line` is non-empty
 
 ```
 <repo>/
-  .hatchery/
+  .hatchery/               # in commit mode: Dockerfile, docker.yaml, tasks/ are committed
     Dockerfile             # optional sandbox definition
     docker.yaml            # optional Docker config (custom mounts, etc.)
     tasks/                 # permanent task records (tracked in git)
-    worktrees/             # active worktrees (gitignored)
+    worktrees/             # active worktrees (gitignored via .gitignore or .git/info/exclude)
+                           # in no-commit mode: only worktrees/ exists; everything else
+                           # is stored under ~/.hatchery/repos/<repo-id>/
 
 ~/.hatchery/
+  config.json               # user config (default_agent, open_editor, auto_commit)
   meta.json                # DB schema version
   hatchery.log             # always-on rotating log file (5 MB × 3 backups)
   tasks/                   # all per-task state, namespaced by repository
@@ -277,6 +281,12 @@ Then output `"$top\n$hatchery_line\n$bottom"` when `$hatchery_line` is non-empty
         COMMIT_EDITMSG     # Docker session: git sentinel file
         ORIG_HEAD          # Docker session: git sentinel file
         git_ptr            # Docker session: container-path .git pointer
+  repos/                   # out-of-tree store (no-commit mode only)
+    <repo-id>/
+      repo.json            # { "path": "...", "name": "..." }
+      docker/              # Dockerfile.<agent> + docker.yaml (when no-commit)
+      records/             # task-file ADR store (when no-commit)
+        YYYY-MM-DD-<name>.md
 ```
 
 ## Logging

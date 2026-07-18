@@ -106,3 +106,33 @@ class SessionMeta(BaseModel):
     @property
     def include_entries(self) -> list[IncludeEntry]:
         return load_include_entries({"include": self.include})
+
+    @property
+    def hatchery_dir(self) -> Path:
+        """The directory that holds this session's hatchery files.
+
+        No-commit mode: out-of-tree store (``~/.hatchery/repos/<id>/``).
+        Commit + no_worktree: ``<repo>/.hatchery``.
+        Commit + worktree: ``<worktree>/.hatchery``.
+
+        All derived paths (tasks, Dockerfile, docker.yaml) come from this.
+        """
+        from seekr_hatchery.sessions import repo_store_dir
+
+        if self.no_commit:
+            return repo_store_dir(self.repo_path)
+        if self.no_worktree:
+            return self.repo_path / ".hatchery"
+        return self.worktree_path / ".hatchery"
+
+    @property
+    def task_dir(self) -> Path:
+        """Where the task file lives — ``hatchery_dir / tasks``."""
+        return self.hatchery_dir / "tasks"
+
+    @property
+    def task_file(self) -> Path | None:
+        """The path to this task's markdown file, or None if not found."""
+        from seekr_hatchery.sessions import find_task_file
+
+        return find_task_file(self.task_dir, self.name)

@@ -148,7 +148,7 @@ class TestResolveRuntime:
         repo.mkdir()
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        result = docker.resolve_runtime(repo, worktree, no_docker=True)
+        result = docker.resolve_runtime(worktree, no_docker=True)
         assert result is None
 
     def test_exits_when_no_dockerfile_and_docker_not_disabled(self, tmp_path, capsys):
@@ -158,7 +158,7 @@ class TestResolveRuntime:
         worktree.mkdir()
         # No Dockerfile in worktree — should error, not silently run natively
         with pytest.raises(SystemExit) as exc_info:
-            docker.resolve_runtime(repo, worktree, no_docker=False)
+            docker.resolve_runtime(worktree, no_docker=False)
         assert exc_info.value.code == 1
         assert "No Dockerfile found" in capsys.readouterr().err
 
@@ -167,11 +167,9 @@ class TestResolveRuntime:
         repo.mkdir()
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        dockerfile_dir = worktree / ".hatchery"
-        dockerfile_dir.mkdir()
-        (dockerfile_dir / "Dockerfile.codex").write_text("FROM debian\n")
+        (worktree / "Dockerfile.codex").write_text("FROM debian\n")
         monkeypatch.setattr(docker, "detect_runtime", lambda: docker.PodmanRuntime())
-        result = docker.resolve_runtime(repo, worktree, no_docker=False)
+        result = docker.resolve_runtime(worktree, no_docker=False)
         assert isinstance(result, docker.PodmanRuntime)
 
     def test_returns_docker_when_dockerfile_and_docker_available(self, tmp_path, monkeypatch):
@@ -179,11 +177,9 @@ class TestResolveRuntime:
         repo.mkdir()
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        dockerfile_dir = worktree / ".hatchery"
-        dockerfile_dir.mkdir()
-        (dockerfile_dir / "Dockerfile.codex").write_text("FROM debian\n")
+        (worktree / "Dockerfile.codex").write_text("FROM debian\n")
         monkeypatch.setattr(docker, "detect_runtime", lambda: docker.DockerRuntime())
-        result = docker.resolve_runtime(repo, worktree, no_docker=False)
+        result = docker.resolve_runtime(worktree, no_docker=False)
         assert isinstance(result, docker.DockerRuntime)
 
     def test_exits_when_dockerfile_present_but_no_runtime(self, tmp_path, monkeypatch, capsys):
@@ -191,12 +187,9 @@ class TestResolveRuntime:
         repo.mkdir()
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        dockerfile_dir = worktree / ".hatchery"
-        dockerfile_dir.mkdir()
-        (dockerfile_dir / "Dockerfile.codex").write_text("FROM debian\n")
         monkeypatch.setattr(docker, "detect_runtime", lambda: (_ for _ in ()).throw(SystemExit(1)))
         with pytest.raises(SystemExit) as exc_info:
-            docker.resolve_runtime(repo, worktree, no_docker=False)
+            docker.resolve_runtime(worktree, no_docker=False)
         assert exc_info.value.code == 1
 
     def test_stderr_message_when_no_runtime(self, tmp_path, monkeypatch, capsys):
@@ -204,9 +197,6 @@ class TestResolveRuntime:
         repo.mkdir()
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        dockerfile_dir = worktree / ".hatchery"
-        dockerfile_dir.mkdir()
-        (dockerfile_dir / "Dockerfile.codex").write_text("FROM debian\n")
 
         def _exit():
             print("Error: neither Podman nor Docker is running.", file=_sys.stderr)
@@ -214,7 +204,7 @@ class TestResolveRuntime:
 
         monkeypatch.setattr(docker, "detect_runtime", _exit)
         with pytest.raises(SystemExit):
-            docker.resolve_runtime(repo, worktree, no_docker=False)
+            docker.resolve_runtime(worktree, no_docker=False)
         captured = capsys.readouterr()
         assert "Podman" in captured.err or "Docker" in captured.err
 
@@ -224,10 +214,7 @@ class TestResolveRuntime:
         worktree = tmp_path / "worktree"
         worktree.mkdir()
         # Even with Dockerfile present, no_docker=True returns None
-        dockerfile_dir = worktree / ".hatchery"
-        dockerfile_dir.mkdir()
-        (dockerfile_dir / "Dockerfile.codex").write_text("FROM debian\n")
-        result = docker.resolve_runtime(repo, worktree, no_docker=True)
+        result = docker.resolve_runtime(worktree, no_docker=True)
         assert result is None
 
     def test_agent_specific_dockerfile_detected(self, tmp_path, monkeypatch):
@@ -235,9 +222,7 @@ class TestResolveRuntime:
         (worktree / ".hatchery").mkdir(parents=True)
         docker.dockerfile_path(worktree, agent.CODEX).write_text("FROM debian\n")
         monkeypatch.setattr(docker, "detect_runtime", lambda: docker.DockerRuntime())
-        assert isinstance(
-            docker.resolve_runtime(tmp_path, worktree, no_docker=False, backend=agent.CODEX), docker.DockerRuntime
-        )
+        assert isinstance(docker.resolve_runtime(worktree, no_docker=False, backend=agent.CODEX), docker.DockerRuntime)
 
 
 # ---------------------------------------------------------------------------
@@ -1268,89 +1253,155 @@ class TestBuildMountsIncludesVolumes:
         assert expected in mounts
 
 
-# ensure_docker_files_uncommitted
+# ---------------------------------------------------------------------------
+# I9: build_mounts — record store RW mount in no-commit mode
 # ---------------------------------------------------------------------------
 
 
-class TestEnsureDockerFilesUncommitted:
-    def test_copies_from_repo_root_when_worktree_missing(self, tmp_path, monkeypatch):
-        """When files exist in repo root but not in worktree, they are copied."""
-        repo = tmp_path / "repo"
-        worktree = tmp_path / "worktree"
-        for d in (repo / ".hatchery", worktree / ".hatchery"):
-            d.mkdir(parents=True)
+class TestBuildMountsNoCommit:
+    def _make_backend(self):
+        b = MagicMock()
+        b.construct_mounts = MagicMock(return_value=[])
+        return b
 
-        # Place files only in repo root
-        (repo / ".hatchery" / "Dockerfile.codex").write_text("FROM debian\n")
-        (repo / constants.DOCKER_CONFIG).write_text("schema_version: '1'\n")
+    def test_no_commit_task_has_ro_store_and_rw_task_file(self, tmp_path, monkeypatch):
+        """No-commit task: RO store mount + RW own-task-file mount."""
+        monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
+        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path)
+        import seekr_hatchery.sessions as sessions
 
-        # suppress interactive prompts (shouldn't be hit, but be safe)
-        monkeypatch.setattr("builtins.input", lambda _: "n")
+        monkeypatch.setattr(sessions, "_TASKS_DB_DIR", tmp_path / "tasks")
 
-        docker.ensure_docker_files_uncommitted(repo, worktree, agent.CODEX)
+        meta = SessionMeta(
+            name="t",
+            repo=str(tmp_path),
+            worktree=str(tmp_path / "wt"),
+            no_commit=True,
+            type="task",
+        )
+        # Create the task file so meta.task_file resolves
+        hdir = meta.hatchery_dir
+        (hdir / "tasks").mkdir(parents=True)
+        task_file = hdir / "tasks" / "2026-01-01-t.md"
+        task_file.write_text("# task\n")
 
-        assert (worktree / ".hatchery" / "Dockerfile.codex").exists()
-        assert (worktree / constants.DOCKER_CONFIG).exists()
+        cfg = docker.DockerConfig()
+        mounts = docker.build_mounts(meta, self._make_backend(), tmp_path / "sd", cfg)
 
-    def test_copies_from_source_when_target_parent_dir_missing(self, tmp_path, monkeypatch):
-        """``ensure_dockerfile(target, source=...)`` must create target/.hatchery/
-        before shutil.copy2 lands. Regression for the bug where the mkdir ran
-        only on the generate-from-template path and the source-copy path failed
-        with FileNotFoundError if .hatchery/ didn't exist in the target.
+        # 1. RO mount of the whole hatchery_dir
+        expected_ro = mount.BindMount(src=str(hdir), dst=str(hdir), mode="RO")
+        assert expected_ro in mounts
+
+        # 2. RW mount of the task file
+        expected_rw = mount.BindMount(src=str(task_file), dst=str(task_file), mode="RW")
+        assert expected_rw in mounts
+
+        # 3. No other RW mount under hdir (no sibling or Dockerfile RW)
+        rw_under_hdir = [
+            m for m in mounts if isinstance(m, mount.BindMount) and m.mode == "RW" and str(hdir) in str(m.src)
+        ]
+        assert len(rw_under_hdir) == 1
+        assert str(rw_under_hdir[0].src) == str(task_file)
+
+    def test_commit_mode_no_store_mount(self, tmp_path, monkeypatch):
+        """Commit mode: no hatchery_dir mount at all."""
+        monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
+        meta = SessionMeta(
+            name="t",
+            repo=str(tmp_path),
+            worktree=str(tmp_path / "wt"),
+            no_commit=False,
+            type="task",
+        )
+        cfg = docker.DockerConfig()
+        mounts = docker.build_mounts(meta, self._make_backend(), tmp_path / "sd", cfg)
+        for m in mounts:
+            if hasattr(m, "src") and "repos" in str(m.src):
+                assert False, "hatchery_dir mount should not be present in commit mode"
+
+    def test_no_commit_chat_no_store_mount(self, tmp_path, monkeypatch):
+        """Chat type: no store mount even in no-commit mode."""
+        monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
+        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path)
+        import seekr_hatchery.sessions as sessions
+
+        monkeypatch.setattr(sessions, "_TASKS_DB_DIR", tmp_path / "tasks")
+
+        meta = SessionMeta(
+            name="t",
+            repo=str(tmp_path),
+            worktree=str(tmp_path),
+            no_commit=True,
+            type="chat",
+            no_worktree=True,
+        )
+        cfg = docker.DockerConfig()
+        mounts = docker.build_mounts(meta, self._make_backend(), tmp_path / "sd", cfg)
+        for m in mounts:
+            if hasattr(m, "src") and "repos" in str(m.src):
+                assert False, "hatchery_dir mount should not be present for chat type"
+
+    def test_no_commit_task_file_missing_ro_only(self, tmp_path, monkeypatch):
+        """If find_task_file returns None, only the RO store mount is present."""
+        monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
+        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path)
+        import seekr_hatchery.sessions as sessions
+
+        monkeypatch.setattr(sessions, "_TASKS_DB_DIR", tmp_path / "tasks")
+
+        meta = SessionMeta(
+            name="t",
+            repo=str(tmp_path),
+            worktree=str(tmp_path / "wt"),
+            no_commit=True,
+            type="task",
+        )
+        # No task file created — meta.task_file will be None
+        hdir = meta.hatchery_dir
+        hdir.mkdir(parents=True, exist_ok=True)
+
+        cfg = docker.DockerConfig()
+        mounts = docker.build_mounts(meta, self._make_backend(), tmp_path / "sd", cfg)
+
+        # RO mount present
+        expected_ro = mount.BindMount(src=str(hdir), dst=str(hdir), mode="RO")
+        assert expected_ro in mounts
+
+        # No RW mount under hdir
+        rw_under_hdir = [
+            m for m in mounts if isinstance(m, mount.BindMount) and m.mode == "RW" and str(hdir) in str(m.src)
+        ]
+        assert len(rw_under_hdir) == 0
+
+
+# ensure_dockerfile / ensure_docker_config
+# ---------------------------------------------------------------------------
+
+
+class TestEnsureDockerfileGenerate:
+    def test_generates_when_parent_dir_missing(self, tmp_path, monkeypatch):
+        """``ensure_dockerfile(target)`` must create target/.hatchery/
+        before writing the Dockerfile, even if .hatchery/ doesn't exist yet.
         """
-        source = tmp_path / "source"
         target = tmp_path / "target"
-        (source / ".hatchery").mkdir(parents=True)
         target.mkdir()  # target exists but has NO .hatchery/ subdir
-        (source / ".hatchery" / "Dockerfile.codex").write_text("FROM debian\n")
-        (source / constants.DOCKER_CONFIG).write_text("schema_version: '1'\n")
 
         monkeypatch.setattr("builtins.input", lambda _: "n")
 
-        # Should not raise FileNotFoundError; should copy both files.
-        docker.ensure_dockerfile(target, agent.CODEX, source=source)
-        docker.ensure_docker_config(target, source=source)
+        created = docker.ensure_dockerfile(target, agent.CODEX)
 
-        assert (target / ".hatchery" / "Dockerfile.codex").exists()
-        assert (target / constants.DOCKER_CONFIG).exists()
-        # Content matches the source (we copied, not generated from template).
-        assert (target / ".hatchery" / "Dockerfile.codex").read_text() == "FROM debian\n"
+        assert created is True
+        assert (target / "Dockerfile.codex").exists()
 
-    def test_generates_when_repo_root_also_missing(self, tmp_path, monkeypatch):
-        """When neither repo root nor worktree has files, generates from template."""
-        repo = tmp_path / "repo"
-        worktree = tmp_path / "worktree"
-        for d in (repo / ".hatchery", worktree / ".hatchery"):
-            d.mkdir(parents=True)
+    def test_returns_false_when_already_exists(self, tmp_path, monkeypatch):
+        target = tmp_path / "target"
+        target.mkdir()
+        (target / "Dockerfile.codex").write_text("FROM debian\n")
 
         monkeypatch.setattr("builtins.input", lambda _: "n")
 
-        docker.ensure_docker_files_uncommitted(repo, worktree, agent.CODEX)
-
-        assert (repo / ".hatchery" / "Dockerfile.codex").exists()
-        assert (worktree / ".hatchery" / "Dockerfile.codex").exists()
-        assert (repo / constants.DOCKER_CONFIG).exists()
-        assert (worktree / constants.DOCKER_CONFIG).exists()
-
-    def test_worktree_files_unchanged_when_already_present(self, tmp_path, monkeypatch):
-        """When worktree already has files, they are not overwritten."""
-        repo = tmp_path / "repo"
-        worktree = tmp_path / "worktree"
-        for d in (repo / ".hatchery", worktree / ".hatchery"):
-            d.mkdir(parents=True)
-
-        original_df = "FROM custom-image\n"
-        original_cfg = "schema_version: '1'\nmounts: []\n"
-        (worktree / ".hatchery" / "Dockerfile.codex").write_text(original_df)
-        (worktree / constants.DOCKER_CONFIG).write_text(original_cfg)
-
-        monkeypatch.setattr("builtins.input", lambda _: "n")
-
-        docker.ensure_docker_files_uncommitted(repo, worktree, agent.CODEX)
-
-        # Worktree files should be untouched
-        assert (worktree / ".hatchery" / "Dockerfile.codex").read_text() == original_df
-        assert (worktree / constants.DOCKER_CONFIG).read_text() == original_cfg
+        created = docker.ensure_dockerfile(target, agent.CODEX)
+        assert created is False
 
 
 # ---------------------------------------------------------------------------

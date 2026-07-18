@@ -24,7 +24,7 @@ class TestWriteTaskFile:
         worktree.mkdir()
         with patch("seekr_hatchery.sessions.datetime") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 1, 15, 10, 30)
-            path = sessions.write_task_file(worktree, "my-task", "hatchery/my-task")
+            path = sessions.write_task_file(worktree / ".hatchery" / "tasks", "my-task", "hatchery/my-task")
         assert path.exists()
 
     def test_correct_path(self, tmp_path):
@@ -32,42 +32,42 @@ class TestWriteTaskFile:
         worktree.mkdir()
         with patch("seekr_hatchery.sessions.datetime") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 1, 15, 10, 30)
-            path = sessions.write_task_file(worktree, "my-task", "hatchery/my-task")
+            path = sessions.write_task_file(worktree / ".hatchery" / "tasks", "my-task", "hatchery/my-task")
         expected = worktree / ".hatchery" / "tasks" / "2026-01-15-my-task.md"
         assert path == expected
 
     def test_contains_task_name(self, tmp_path):
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        path = sessions.write_task_file(worktree, "my-task", "hatchery/my-task")
+        path = sessions.write_task_file(worktree / ".hatchery" / "tasks", "my-task", "hatchery/my-task")
         content = path.read_text()
         assert "my-task" in content
 
     def test_contains_branch(self, tmp_path):
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        path = sessions.write_task_file(worktree, "my-task", "hatchery/my-task")
+        path = sessions.write_task_file(worktree / ".hatchery" / "tasks", "my-task", "hatchery/my-task")
         content = path.read_text()
         assert "hatchery/my-task" in content
 
     def test_contains_status_in_progress(self, tmp_path):
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        path = sessions.write_task_file(worktree, "my-task", "hatchery/my-task")
+        path = sessions.write_task_file(worktree / ".hatchery" / "tasks", "my-task", "hatchery/my-task")
         content = path.read_text()
         assert "in-progress" in content
 
     def test_contains_task_heading(self, tmp_path):
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        path = sessions.write_task_file(worktree, "my-task", "hatchery/my-task")
+        path = sessions.write_task_file(worktree / ".hatchery" / "tasks", "my-task", "hatchery/my-task")
         content = path.read_text()
         assert "# Task:" in content
 
     def test_contains_section_headings(self, tmp_path):
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        path = sessions.write_task_file(worktree, "my-task", "hatchery/my-task")
+        path = sessions.write_task_file(worktree / ".hatchery" / "tasks", "my-task", "hatchery/my-task")
         content = path.read_text()
         assert "## Objective" in content
         assert "## Context" in content
@@ -77,35 +77,41 @@ class TestWriteTaskFile:
     def test_contains_branch_label(self, tmp_path):
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        path = sessions.write_task_file(worktree, "my-task", "hatchery/my-task")
+        path = sessions.write_task_file(worktree / ".hatchery" / "tasks", "my-task", "hatchery/my-task")
         content = path.read_text()
         assert "**Branch**:" in content
 
     def test_contains_status_label(self, tmp_path):
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        path = sessions.write_task_file(worktree, "my-task", "hatchery/my-task")
+        path = sessions.write_task_file(worktree / ".hatchery" / "tasks", "my-task", "hatchery/my-task")
         content = path.read_text()
         assert "**Status**:" in content
 
     def test_objective_param_injects_text(self, tmp_path):
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        path = sessions.write_task_file(worktree, "my-task", "hatchery/my-task", objective="Add a login page")
+        path = sessions.write_task_file(
+            worktree / ".hatchery" / "tasks", "my-task", "hatchery/my-task", objective="Add a login page"
+        )
         content = path.read_text()
         assert "Add a login page" in content
 
     def test_objective_param_omits_context_section(self, tmp_path):
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        path = sessions.write_task_file(worktree, "my-task", "hatchery/my-task", objective="Add a login page")
+        path = sessions.write_task_file(
+            worktree / ".hatchery" / "tasks", "my-task", "hatchery/my-task", objective="Add a login page"
+        )
         content = path.read_text()
         assert "## Context" not in content
 
     def test_objective_param_omits_todo_placeholder(self, tmp_path):
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        path = sessions.write_task_file(worktree, "my-task", "hatchery/my-task", objective="Add a login page")
+        path = sessions.write_task_file(
+            worktree / ".hatchery" / "tasks", "my-task", "hatchery/my-task", objective="Add a login page"
+        )
         content = path.read_text()
         assert "TODO" not in content
 
@@ -190,6 +196,56 @@ class TestEnsureGitignore:
         sessions.ensure_gitignore(fake_repo)
         content = gitignore.read_text()
         assert content.count(".hatchery/worktrees/") == 1
+
+
+# ---------------------------------------------------------------------------
+# I9: ensure_git_exclude — writes to .git/info/exclude (real fs)
+# ---------------------------------------------------------------------------
+
+
+class TestEnsureGitExclude:
+    def test_creates_exclude_when_absent(self, fake_repo):
+        sessions.ensure_git_exclude(fake_repo, ".hatchery/worktrees/")
+        exclude = fake_repo / ".git" / "info" / "exclude"
+        assert exclude.exists()
+        assert ".hatchery/worktrees/" in exclude.read_text()
+
+    def test_appends_to_existing_exclude(self, fake_repo):
+        exclude = fake_repo / ".git" / "info"
+        exclude.mkdir(parents=True)
+        (exclude / "exclude").write_text("*.pyc\n")
+        sessions.ensure_git_exclude(fake_repo, ".hatchery/worktrees/")
+        content = (fake_repo / ".git" / "info" / "exclude").read_text()
+        assert "*.pyc" in content
+        assert ".hatchery/worktrees/" in content
+
+    def test_idempotent_no_duplicate(self, fake_repo):
+        sessions.ensure_git_exclude(fake_repo, ".hatchery/worktrees/")
+        sessions.ensure_git_exclude(fake_repo, ".hatchery/worktrees/")
+        content = (fake_repo / ".git" / "info" / "exclude").read_text()
+        assert content.count(".hatchery/worktrees/") == 1
+
+    def test_handles_missing_trailing_newline(self, fake_repo):
+        exclude = fake_repo / ".git" / "info"
+        exclude.mkdir(parents=True)
+        (exclude / "exclude").write_text("*.pyc")  # no trailing newline
+        sessions.ensure_git_exclude(fake_repo, ".hatchery/worktrees/")
+        content = (fake_repo / ".git" / "info" / "exclude").read_text()
+        lines = content.splitlines()
+        assert "*.pyc" in lines
+        assert ".hatchery/worktrees/" in lines
+
+    def test_custom_entry(self, fake_repo):
+        sessions.ensure_git_exclude(fake_repo, "some/custom/path/")
+        content = (fake_repo / ".git" / "info" / "exclude").read_text()
+        assert "some/custom/path/" in content
+
+    def test_does_not_touch_committed_gitignore(self, fake_repo):
+        """ensure_git_exclude must never write to .gitignore (committed)."""
+        gitignore = fake_repo / ".gitignore"
+        gitignore.write_text("existing\n")
+        sessions.ensure_git_exclude(fake_repo, ".hatchery/worktrees/")
+        assert gitignore.read_text() == "existing\n"
 
 
 class TestRemoveWorktree:
@@ -288,9 +344,7 @@ class TestRemoveWorktree:
 
 class TestLoadDockerConfig:
     def _write_config(self, repo: Path, content: str) -> None:
-        config_dir = repo / ".hatchery"
-        config_dir.mkdir(exist_ok=True)
-        (config_dir / "docker.yaml").write_text(content)
+        (repo / "docker.yaml").write_text(content)
 
     def test_returns_empty_config_when_no_file(self, fake_repo):
         result = docker.load_docker_config(fake_repo)
@@ -464,62 +518,6 @@ class TestEnsureDockerfile:
         assert "# USER root" in content
         assert "fuse-overlayfs" in content
 
-    def test_source_copies_file_when_exists_in_source(self, tmp_path):
-        """source= copies the Dockerfile from source into repo when missing from repo."""
-        source = tmp_path / "source"
-        repo = tmp_path / "repo"
-        source.mkdir()
-        repo.mkdir()
-        (source / ".hatchery").mkdir()
-        (repo / ".hatchery").mkdir()
-        docker.dockerfile_path(source, agent.CODEX).write_text("FROM custom\n")
-        docker.ensure_dockerfile(repo, agent.CODEX, source=source)
-        assert docker.dockerfile_path(repo, agent.CODEX).read_text() == "FROM custom\n"
-
-    def test_source_returns_false_when_copied(self, tmp_path):
-        """Copying from source returns False so callers skip auto-commit."""
-        source = tmp_path / "source"
-        repo = tmp_path / "repo"
-        source.mkdir()
-        repo.mkdir()
-        (source / ".hatchery").mkdir()
-        (repo / ".hatchery").mkdir()
-        docker.dockerfile_path(source, agent.CODEX).write_text("FROM custom\n")
-        result = docker.ensure_dockerfile(repo, agent.CODEX, source=source)
-        assert result is False
-
-    def test_source_falls_through_to_template_when_not_in_source(self, tmp_path, monkeypatch):
-        """When source has no Dockerfile, the template is generated as normal."""
-        source = tmp_path / "source"
-        repo = tmp_path / "repo"
-        source.mkdir()
-        repo.mkdir()
-        (source / ".hatchery").mkdir()
-        (repo / ".hatchery").mkdir()
-        monkeypatch.setattr("builtins.input", lambda _: "n")
-        result = docker.ensure_dockerfile(repo, agent.CODEX, source=source)
-        assert result is True
-        assert docker.dockerfile_path(repo, agent.CODEX).exists()
-
-    def test_source_ignored_when_dest_already_exists(self, tmp_path):
-        """If destination already has a Dockerfile, source= is irrelevant."""
-        source = tmp_path / "source"
-        repo = tmp_path / "repo"
-        source.mkdir()
-        repo.mkdir()
-        (source / ".hatchery").mkdir()
-        (repo / ".hatchery").mkdir()
-        docker.dockerfile_path(source, agent.CODEX).write_text("FROM source\n")
-        docker.dockerfile_path(repo, agent.CODEX).write_text("FROM existing\n")
-        result = docker.ensure_dockerfile(repo, agent.CODEX, source=source)
-        assert result is False
-        assert docker.dockerfile_path(repo, agent.CODEX).read_text() == "FROM existing\n"
-
-
-# ---------------------------------------------------------------------------
-# ensure_docker_config
-# ---------------------------------------------------------------------------
-
 
 class TestEnsureDockerConfig:
     def _prep(self, repo: Path) -> None:
@@ -590,62 +588,6 @@ class TestEnsureDockerConfig:
         content = (fake_repo / constants.DOCKER_CONFIG).read_text()
         parsed = yaml.safe_load(content)
         assert parsed["schema_version"] == "1"
-
-    def test_source_copies_config_when_exists_in_source(self, tmp_path):
-        """source= copies docker.yaml from source into repo when missing from repo."""
-        source = tmp_path / "source"
-        repo = tmp_path / "repo"
-        source.mkdir()
-        repo.mkdir()
-        (source / ".hatchery").mkdir()
-        (repo / ".hatchery").mkdir()
-        (source / constants.DOCKER_CONFIG).write_text("custom: true\n")
-        docker.ensure_docker_config(repo, source=source)
-        assert (repo / constants.DOCKER_CONFIG).read_text() == "custom: true\n"
-
-    def test_source_returns_false_when_copied(self, tmp_path):
-        """Copying from source returns False so callers skip auto-commit."""
-        source = tmp_path / "source"
-        repo = tmp_path / "repo"
-        source.mkdir()
-        repo.mkdir()
-        (source / ".hatchery").mkdir()
-        (repo / ".hatchery").mkdir()
-        (source / constants.DOCKER_CONFIG).write_text("custom: true\n")
-        result = docker.ensure_docker_config(repo, source=source)
-        assert result is False
-
-    def test_source_falls_through_to_template_when_not_in_source(self, tmp_path, monkeypatch):
-        """When source has no docker.yaml, the template is generated as normal."""
-        source = tmp_path / "source"
-        repo = tmp_path / "repo"
-        source.mkdir()
-        repo.mkdir()
-        (source / ".hatchery").mkdir()
-        (repo / ".hatchery").mkdir()
-        monkeypatch.setattr("builtins.input", lambda _: "n")
-        result = docker.ensure_docker_config(repo, source=source)
-        assert result is True
-        assert (repo / constants.DOCKER_CONFIG).exists()
-
-    def test_source_ignored_when_dest_already_exists(self, tmp_path):
-        """If destination already has docker.yaml, source= is irrelevant."""
-        source = tmp_path / "source"
-        repo = tmp_path / "repo"
-        source.mkdir()
-        repo.mkdir()
-        (source / ".hatchery").mkdir()
-        (repo / ".hatchery").mkdir()
-        (source / constants.DOCKER_CONFIG).write_text("from: source\n")
-        (repo / constants.DOCKER_CONFIG).write_text("existing: true\n")
-        result = docker.ensure_docker_config(repo, source=source)
-        assert result is False
-        assert (repo / constants.DOCKER_CONFIG).read_text() == "existing: true\n"
-
-
-# ---------------------------------------------------------------------------
-# _dind_dockerfile_ok
-# ---------------------------------------------------------------------------
 
 
 class TestDindDockerfileOk:

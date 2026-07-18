@@ -33,6 +33,7 @@ class UserConfigModel(BaseModel):
     schema_version: Literal["1"] = "1"
     default_agent: str | None = None
     open_editor: bool = False
+    auto_commit: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +162,14 @@ class UserConfig:
     def set_open_editor(self, value: bool) -> None:
         """Set the open_editor preference in memory.  Call :meth:`save` to persist."""
         self._model = self._model.model_copy(update={"open_editor": value})
+
+    @property
+    def auto_commit(self) -> bool:
+        return self._model.auto_commit
+
+    def set_auto_commit(self, value: bool) -> None:
+        """Set the auto_commit preference in memory.  Call :meth:`save` to persist."""
+        self._model = self._model.model_copy(update={"auto_commit": value})
 
     # ── Domain methods ────────────────────────────────────────────────────────
 
