@@ -144,28 +144,36 @@ class KubectlConfig(BaseModel):
 # ── URL parsing ───────────────────────────────────────────────────────────────
 
 
-def parse_k8s_url(path: str) -> tuple[str, str, str]:
-    """Parse a Kubernetes API URL into ``(namespace, resource, subresource)``.
+def parse_k8s_url(path: str) -> tuple[str, str, str, bool]:
+    """Parse a Kubernetes API URL into ``(namespace, resource, subresource, has_name)``.
 
-    Returns ``("", "", "")`` for discovery / non-resource endpoints
+    ``has_name`` is ``True`` when the path names a specific object (e.g.
+    ``.../pods/my-pod``) rather than a bare collection (e.g. ``.../pods``) —
+    this is what distinguishes a ``get`` request from a ``list``/``watch``
+    request on an otherwise-identical HTTP GET.
+
+    Returns ``("", "", "", False)`` for discovery / non-resource endpoints
     (``/api``, ``/apis``, ``/healthz``, ``/version``, etc.).
 
     Examples::
 
         parse_k8s_url("/api/v1/namespaces/default/pods")
-        # → ("default", "pods", "")
+        # → ("default", "pods", "", False)
+
+        parse_k8s_url("/api/v1/namespaces/default/pods/foo")
+        # → ("default", "pods", "", True)
 
         parse_k8s_url("/api/v1/namespaces/default/pods/foo/exec")
-        # → ("default", "pods", "exec")
+        # → ("default", "pods", "exec", True)
 
         parse_k8s_url("/api/v1/nodes")
-        # → ("", "nodes", "")
+        # → ("", "nodes", "", False)
 
         parse_k8s_url("/apis/apps/v1/namespaces/staging/deployments/my-dep")
-        # → ("staging", "deployments", "")
+        # → ("staging", "deployments", "", True)
 
         parse_k8s_url("/apis/apps/v1/deployments")
-        # → ("", "deployments", "")
+        # → ("", "deployments", "", False)
     """
     # Strip query string and trailing slash.
     path = path.split("?", 1)[0].rstrip("/")
@@ -173,51 +181,58 @@ def parse_k8s_url(path: str) -> tuple[str, str, str]:
     # ── Core API: /api/v1/... ─────────────────────────────────────────────────
     # Namespaced: /api/v1/namespaces/{ns}/{resource}[/{name}[/{sub}]]
     m = re.match(
-        r"^/api/[^/]+/namespaces/([^/]+)/([^/]+)(?:/[^/]+(?:/([^/]+))?)?$",
+        r"^/api/[^/]+/namespaces/([^/]+)/([^/]+)(?:/([^/]+)(?:/([^/]+))?)?$",
         path,
     )
     if m:
-        return m.group(1), m.group(2), m.group(3) or ""
+        return m.group(1), m.group(2), m.group(4) or "", bool(m.group(3))
 
     # Cluster-scoped: /api/v1/{resource}[/{name}]
-    m = re.match(r"^/api/[^/]+/([^/]+)(?:/[^/]+)?$", path)
+    m = re.match(r"^/api/[^/]+/([^/]+)(?:/([^/]+))?$", path)
     if m:
-        return "", m.group(1), ""
+        return "", m.group(1), "", bool(m.group(2))
 
     # ── Group API: /apis/{group}/{version}/... ────────────────────────────────
     # Namespaced: /apis/{group}/{version}/namespaces/{ns}/{resource}[/{name}[/{sub}]]
     m = re.match(
-        r"^/apis/[^/]+/[^/]+/namespaces/([^/]+)/([^/]+)(?:/[^/]+(?:/([^/]+))?)?$",
+        r"^/apis/[^/]+/[^/]+/namespaces/([^/]+)/([^/]+)(?:/([^/]+)(?:/([^/]+))?)?$",
         path,
     )
     if m:
-        return m.group(1), m.group(2), m.group(3) or ""
+        return m.group(1), m.group(2), m.group(4) or "", bool(m.group(3))
 
     # Cluster-scoped: /apis/{group}/{version}/{resource}[/{name}]
-    m = re.match(r"^/apis/[^/]+/[^/]+/([^/]+)(?:/[^/]+)?$", path)
+    m = re.match(r"^/apis/[^/]+/[^/]+/([^/]+)(?:/([^/]+))?$", path)
     if m:
-        return "", m.group(1), ""
+        return "", m.group(1), "", bool(m.group(2))
 
     # Discovery / non-resource endpoints (/api, /apis, /healthz, /version, ...)
-    return "", "", ""
+    return "", "", "", False
 
 
 # ── Verb mapping ──────────────────────────────────────────────────────────────
 
 
-def http_method_to_k8s_verbs(method: str) -> list[str]:
+def http_method_to_k8s_verbs(method: str, has_name: bool) -> list[str]:
     """Map an HTTP method to the corresponding Kubernetes RBAC verbs.
+
+    *has_name* (from :func:`parse_k8s_url`) distinguishes a GET on a named
+    object (``get``) from a GET on a bare collection (``list``/``watch``) —
+    without it, every GET would be indistinguishable and a ``list``-only
+    rule would also grant ``get``.
 
     The caller should check whether *any* of the returned verbs is permitted
     by the configured rules.
     """
+    method = method.upper()
+    if method == "GET":
+        return ["get"] if has_name else ["list", "watch"]
     return {
-        "GET": ["get", "list", "watch"],
         "POST": ["create"],
         "PUT": ["update"],
         "PATCH": ["patch"],
         "DELETE": ["delete", "deletecollection"],
-    }.get(method.upper(), [method.lower()])
+    }.get(method, [method.lower()])
 
 
 # ── RBAC checking ─────────────────────────────────────────────────────────────
@@ -297,7 +312,7 @@ class _RBACProxyHandler(http.server.BaseHTTPRequestHandler):
             return
 
         # ── 1. Parse the k8s API URL ──────────────────────────────────────────
-        namespace, resource, subresource = parse_k8s_url(self.path)
+        namespace, resource, subresource, has_name = parse_k8s_url(self.path)
 
         # ── 2. Block dangerous subresources unconditionally ───────────────────
         if subresource in _BLOCKED_SUBRESOURCES:
@@ -309,7 +324,7 @@ class _RBACProxyHandler(http.server.BaseHTTPRequestHandler):
 
         # ── 3. Apply RBAC allowlist (skip for discovery endpoints) ────────────
         if resource:  # non-empty resource means it's a resource endpoint
-            verbs = http_method_to_k8s_verbs(self.command)
+            verbs = http_method_to_k8s_verbs(self.command, has_name)
             if not check_rbac(self.rules, verbs, resource, namespace):
                 verb_str = "/".join(verbs)
                 ns_str = namespace if namespace else "<cluster-scoped>"

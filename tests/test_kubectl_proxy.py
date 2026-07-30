@@ -28,75 +28,88 @@ from seekr_hatchery.kubectl_proxy import (
 
 class TestParseK8sUrl:
     def test_core_namespaced_collection(self) -> None:
-        assert parse_k8s_url("/api/v1/namespaces/default/pods") == ("default", "pods", "")
+        assert parse_k8s_url("/api/v1/namespaces/default/pods") == ("default", "pods", "", False)
 
     def test_core_namespaced_named_resource(self) -> None:
-        assert parse_k8s_url("/api/v1/namespaces/staging/pods/my-pod") == ("staging", "pods", "")
+        assert parse_k8s_url("/api/v1/namespaces/staging/pods/my-pod") == ("staging", "pods", "", True)
 
     def test_core_namespaced_subresource(self) -> None:
-        assert parse_k8s_url("/api/v1/namespaces/default/pods/my-pod/exec") == ("default", "pods", "exec")
+        assert parse_k8s_url("/api/v1/namespaces/default/pods/my-pod/exec") == ("default", "pods", "exec", True)
 
     def test_core_namespaced_log_subresource(self) -> None:
-        assert parse_k8s_url("/api/v1/namespaces/default/pods/my-pod/log") == ("default", "pods", "log")
+        assert parse_k8s_url("/api/v1/namespaces/default/pods/my-pod/log") == ("default", "pods", "log", True)
 
     def test_core_cluster_scoped(self) -> None:
-        assert parse_k8s_url("/api/v1/nodes") == ("", "nodes", "")
+        assert parse_k8s_url("/api/v1/nodes") == ("", "nodes", "", False)
 
     def test_core_cluster_scoped_named(self) -> None:
-        assert parse_k8s_url("/api/v1/nodes/my-node") == ("", "nodes", "")
+        assert parse_k8s_url("/api/v1/nodes/my-node") == ("", "nodes", "", True)
 
     def test_group_namespaced_collection(self) -> None:
-        assert parse_k8s_url("/apis/apps/v1/namespaces/default/deployments") == ("default", "deployments", "")
+        assert parse_k8s_url("/apis/apps/v1/namespaces/default/deployments") == ("default", "deployments", "", False)
 
     def test_group_namespaced_named(self) -> None:
-        assert parse_k8s_url("/apis/apps/v1/namespaces/staging/deployments/my-dep") == ("staging", "deployments", "")
+        assert parse_k8s_url("/apis/apps/v1/namespaces/staging/deployments/my-dep") == (
+            "staging",
+            "deployments",
+            "",
+            True,
+        )
 
     def test_group_cluster_scoped(self) -> None:
-        assert parse_k8s_url("/apis/apps/v1/deployments") == ("", "deployments", "")
+        assert parse_k8s_url("/apis/apps/v1/deployments") == ("", "deployments", "", False)
 
     def test_discovery_api(self) -> None:
-        assert parse_k8s_url("/api") == ("", "", "")
+        assert parse_k8s_url("/api") == ("", "", "", False)
 
     def test_discovery_apis(self) -> None:
-        assert parse_k8s_url("/apis") == ("", "", "")
+        assert parse_k8s_url("/apis") == ("", "", "", False)
 
     def test_healthz(self) -> None:
-        assert parse_k8s_url("/healthz") == ("", "", "")
+        assert parse_k8s_url("/healthz") == ("", "", "", False)
 
     def test_version(self) -> None:
-        assert parse_k8s_url("/version") == ("", "", "")
+        assert parse_k8s_url("/version") == ("", "", "", False)
 
     def test_query_string_stripped(self) -> None:
-        assert parse_k8s_url("/api/v1/namespaces/default/pods?watch=true") == ("default", "pods", "")
+        assert parse_k8s_url("/api/v1/namespaces/default/pods?watch=true") == ("default", "pods", "", False)
 
     def test_trailing_slash_stripped(self) -> None:
-        assert parse_k8s_url("/api/v1/namespaces/default/pods/") == ("default", "pods", "")
+        assert parse_k8s_url("/api/v1/namespaces/default/pods/") == ("default", "pods", "", False)
 
     def test_portforward_subresource(self) -> None:
-        assert parse_k8s_url("/api/v1/namespaces/default/pods/my-pod/portforward") == ("default", "pods", "portforward")
+        assert parse_k8s_url("/api/v1/namespaces/default/pods/my-pod/portforward") == (
+            "default",
+            "pods",
+            "portforward",
+            True,
+        )
 
 
 # ── HTTP verb mapping ─────────────────────────────────────────────────────────
 
 
 class TestHttpMethodToK8sVerbs:
-    def test_get(self) -> None:
-        assert http_method_to_k8s_verbs("GET") == ["get", "list", "watch"]
+    def test_get_collection(self) -> None:
+        assert http_method_to_k8s_verbs("GET", has_name=False) == ["list", "watch"]
+
+    def test_get_named(self) -> None:
+        assert http_method_to_k8s_verbs("GET", has_name=True) == ["get"]
 
     def test_post(self) -> None:
-        assert http_method_to_k8s_verbs("POST") == ["create"]
+        assert http_method_to_k8s_verbs("POST", has_name=False) == ["create"]
 
     def test_put(self) -> None:
-        assert http_method_to_k8s_verbs("PUT") == ["update"]
+        assert http_method_to_k8s_verbs("PUT", has_name=True) == ["update"]
 
     def test_patch(self) -> None:
-        assert http_method_to_k8s_verbs("PATCH") == ["patch"]
+        assert http_method_to_k8s_verbs("PATCH", has_name=True) == ["patch"]
 
     def test_delete(self) -> None:
-        assert http_method_to_k8s_verbs("DELETE") == ["delete", "deletecollection"]
+        assert http_method_to_k8s_verbs("DELETE", has_name=True) == ["delete", "deletecollection"]
 
     def test_case_insensitive(self) -> None:
-        assert http_method_to_k8s_verbs("get") == ["get", "list", "watch"]
+        assert http_method_to_k8s_verbs("get", has_name=False) == ["list", "watch"]
 
 
 # ── RBAC checking ─────────────────────────────────────────────────────────────
@@ -151,6 +164,28 @@ class TestCheckRbac:
     def test_wildcard_resource(self) -> None:
         rules = [KubectlRBACRule(verbs=["get"], resources=["*"], namespaces=["*"])]
         assert check_rbac(rules, ["get", "list", "watch"], "secrets", "kube-system") is True
+
+    def test_list_only_rule_permits_list_verbs(self) -> None:
+        rules = [KubectlRBACRule(verbs=["list"], resources=["secrets"], namespaces=["*"])]
+        assert check_rbac(rules, ["list", "watch"], "secrets", "default") is True
+
+    def test_list_only_rule_denies_get_verb(self) -> None:
+        """A list-only rule must not also grant get (the bug this suite guards against)."""
+        rules = [KubectlRBACRule(verbs=["list"], resources=["secrets"], namespaces=["*"])]
+        assert check_rbac(rules, ["get"], "secrets", "default") is False
+
+    def test_get_only_rule_permits_get_verb(self) -> None:
+        rules = [KubectlRBACRule(verbs=["get"], resources=["secrets"], namespaces=["*"])]
+        assert check_rbac(rules, ["get"], "secrets", "default") is True
+
+    def test_get_only_rule_denies_list_verbs(self) -> None:
+        rules = [KubectlRBACRule(verbs=["get"], resources=["secrets"], namespaces=["*"])]
+        assert check_rbac(rules, ["list", "watch"], "secrets", "default") is False
+
+    def test_get_list_watch_rule_permits_both(self) -> None:
+        rules = [KubectlRBACRule(verbs=["get", "list", "watch"], resources=["secrets"], namespaces=["*"])]
+        assert check_rbac(rules, ["get"], "secrets", "default") is True
+        assert check_rbac(rules, ["list", "watch"], "secrets", "default") is True
 
 
 # ── KubectlConfig model ───────────────────────────────────────────────────────
@@ -367,6 +402,56 @@ class TestRBACProxyIntegration:
     def test_allows_version_endpoint(self, rbac_proxy: tuple) -> None:
         _, port, token, cert_pem = rbac_proxy
         status, _ = _request(port, "/version", token=token, cert_pem=cert_pem)
+        assert status == 200
+
+
+@pytest.fixture()
+def list_only_rbac_proxy(mock_kubectl_proxy: tuple[http.server.HTTPServer, int]):
+    """RBAC proxy with a list-only rule on secrets — get must be denied."""
+    _, kube_port = mock_kubectl_proxy
+    rules = [
+        KubectlRBACRule(verbs=["list"], resources=["secrets"], namespaces=["*"]),
+    ]
+    token = "test-token-list-only"
+    server, port, cert_pem = start_rbac_proxy(rules, token, kube_port)
+    yield server, port, token, cert_pem
+    stop_rbac_proxy(server)
+
+
+@pytest.fixture()
+def get_only_rbac_proxy(mock_kubectl_proxy: tuple[http.server.HTTPServer, int]):
+    """RBAC proxy with a get-only rule on secrets — list must be denied."""
+    _, kube_port = mock_kubectl_proxy
+    rules = [
+        KubectlRBACRule(verbs=["get"], resources=["secrets"], namespaces=["*"]),
+    ]
+    token = "test-token-get-only"
+    server, port, cert_pem = start_rbac_proxy(rules, token, kube_port)
+    yield server, port, token, cert_pem
+    stop_rbac_proxy(server)
+
+
+class TestRBACProxyGetListDistinction:
+    """Regression coverage: a list-only rule must not also grant get, and vice versa."""
+
+    def test_list_only_allows_collection(self, list_only_rbac_proxy: tuple) -> None:
+        _, port, token, cert_pem = list_only_rbac_proxy
+        status, _ = _request(port, "/api/v1/namespaces/default/secrets", token=token, cert_pem=cert_pem)
+        assert status == 200
+
+    def test_list_only_denies_named_object(self, list_only_rbac_proxy: tuple) -> None:
+        _, port, token, cert_pem = list_only_rbac_proxy
+        status, _ = _request(port, "/api/v1/namespaces/default/secrets/my-secret", token=token, cert_pem=cert_pem)
+        assert status == 403
+
+    def test_get_only_denies_collection(self, get_only_rbac_proxy: tuple) -> None:
+        _, port, token, cert_pem = get_only_rbac_proxy
+        status, _ = _request(port, "/api/v1/namespaces/default/secrets", token=token, cert_pem=cert_pem)
+        assert status == 403
+
+    def test_get_only_allows_named_object(self, get_only_rbac_proxy: tuple) -> None:
+        _, port, token, cert_pem = get_only_rbac_proxy
+        status, _ = _request(port, "/api/v1/namespaces/default/secrets/my-secret", token=token, cert_pem=cert_pem)
         assert status == 200
 
 
