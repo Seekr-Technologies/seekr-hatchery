@@ -28,25 +28,37 @@ from seekr_hatchery.kubectl_proxy import (
 
 class TestParseK8sUrl:
     def test_core_namespaced_collection(self) -> None:
-        assert parse_k8s_url("/api/v1/namespaces/default/pods") == ("default", "pods", "", False)
+        assert parse_k8s_url("/api/v1/namespaces/default/pods") == ("default", "pods", "", False, False)
 
     def test_core_namespaced_named_resource(self) -> None:
-        assert parse_k8s_url("/api/v1/namespaces/staging/pods/my-pod") == ("staging", "pods", "", True)
+        assert parse_k8s_url("/api/v1/namespaces/staging/pods/my-pod") == ("staging", "pods", "", True, False)
 
     def test_core_namespaced_subresource(self) -> None:
-        assert parse_k8s_url("/api/v1/namespaces/default/pods/my-pod/exec") == ("default", "pods", "exec", True)
+        assert parse_k8s_url("/api/v1/namespaces/default/pods/my-pod/exec") == (
+            "default",
+            "pods",
+            "exec",
+            True,
+            False,
+        )
 
     def test_core_namespaced_log_subresource(self) -> None:
-        assert parse_k8s_url("/api/v1/namespaces/default/pods/my-pod/log") == ("default", "pods", "log", True)
+        assert parse_k8s_url("/api/v1/namespaces/default/pods/my-pod/log") == ("default", "pods", "log", True, False)
 
     def test_core_cluster_scoped(self) -> None:
-        assert parse_k8s_url("/api/v1/nodes") == ("", "nodes", "", False)
+        assert parse_k8s_url("/api/v1/nodes") == ("", "nodes", "", False, False)
 
     def test_core_cluster_scoped_named(self) -> None:
-        assert parse_k8s_url("/api/v1/nodes/my-node") == ("", "nodes", "", True)
+        assert parse_k8s_url("/api/v1/nodes/my-node") == ("", "nodes", "", True, False)
 
     def test_group_namespaced_collection(self) -> None:
-        assert parse_k8s_url("/apis/apps/v1/namespaces/default/deployments") == ("default", "deployments", "", False)
+        assert parse_k8s_url("/apis/apps/v1/namespaces/default/deployments") == (
+            "default",
+            "deployments",
+            "",
+            False,
+            False,
+        )
 
     def test_group_namespaced_named(self) -> None:
         assert parse_k8s_url("/apis/apps/v1/namespaces/staging/deployments/my-dep") == (
@@ -54,28 +66,26 @@ class TestParseK8sUrl:
             "deployments",
             "",
             True,
+            False,
         )
 
     def test_group_cluster_scoped(self) -> None:
-        assert parse_k8s_url("/apis/apps/v1/deployments") == ("", "deployments", "", False)
+        assert parse_k8s_url("/apis/apps/v1/deployments") == ("", "deployments", "", False, False)
 
     def test_discovery_api(self) -> None:
-        assert parse_k8s_url("/api") == ("", "", "", False)
+        assert parse_k8s_url("/api") == ("", "", "", False, False)
 
     def test_discovery_apis(self) -> None:
-        assert parse_k8s_url("/apis") == ("", "", "", False)
+        assert parse_k8s_url("/apis") == ("", "", "", False, False)
 
     def test_healthz(self) -> None:
-        assert parse_k8s_url("/healthz") == ("", "", "", False)
+        assert parse_k8s_url("/healthz") == ("", "", "", False, False)
 
     def test_version(self) -> None:
-        assert parse_k8s_url("/version") == ("", "", "", False)
-
-    def test_query_string_stripped(self) -> None:
-        assert parse_k8s_url("/api/v1/namespaces/default/pods?watch=true") == ("default", "pods", "", False)
+        assert parse_k8s_url("/version") == ("", "", "", False, False)
 
     def test_trailing_slash_stripped(self) -> None:
-        assert parse_k8s_url("/api/v1/namespaces/default/pods/") == ("default", "pods", "", False)
+        assert parse_k8s_url("/api/v1/namespaces/default/pods/") == ("default", "pods", "", False, False)
 
     def test_portforward_subresource(self) -> None:
         assert parse_k8s_url("/api/v1/namespaces/default/pods/my-pod/portforward") == (
@@ -83,7 +93,48 @@ class TestParseK8sUrl:
             "pods",
             "portforward",
             True,
+            False,
         )
+
+    def test_watch_query_collection(self) -> None:
+        assert parse_k8s_url("/api/v1/namespaces/default/pods?watch=true") == (
+            "default",
+            "pods",
+            "",
+            False,
+            True,
+        )
+
+    def test_watch_query_named_resource(self) -> None:
+        """Watching a single named object still resolves to has_name=True, is_watch=True."""
+        assert parse_k8s_url("/api/v1/namespaces/default/pods/my-pod?watch=true") == (
+            "default",
+            "pods",
+            "",
+            True,
+            True,
+        )
+
+    def test_watch_query_false_is_not_watch(self) -> None:
+        assert parse_k8s_url("/api/v1/namespaces/default/pods?watch=false") == (
+            "default",
+            "pods",
+            "",
+            False,
+            False,
+        )
+
+    def test_watch_query_other_params_ignored(self) -> None:
+        assert parse_k8s_url("/api/v1/namespaces/default/pods?labelSelector=app%3Dfoo") == (
+            "default",
+            "pods",
+            "",
+            False,
+            False,
+        )
+
+    def test_no_query_string_is_not_watch(self) -> None:
+        assert parse_k8s_url("/api/v1/namespaces/default/pods") == ("default", "pods", "", False, False)
 
 
 # ── HTTP verb mapping ─────────────────────────────────────────────────────────
@@ -91,25 +142,35 @@ class TestParseK8sUrl:
 
 class TestHttpMethodToK8sVerbs:
     def test_get_collection(self) -> None:
-        assert http_method_to_k8s_verbs("GET", has_name=False) == ["list", "watch"]
+        assert http_method_to_k8s_verbs("GET", has_name=False, is_watch=False) == ["list"]
 
     def test_get_named(self) -> None:
-        assert http_method_to_k8s_verbs("GET", has_name=True) == ["get"]
+        assert http_method_to_k8s_verbs("GET", has_name=True, is_watch=False) == ["get"]
+
+    def test_get_watch_collection(self) -> None:
+        assert http_method_to_k8s_verbs("GET", has_name=False, is_watch=True) == ["watch"]
+
+    def test_get_watch_named(self) -> None:
+        """Watch takes precedence over has_name — watching one object is still 'watch'."""
+        assert http_method_to_k8s_verbs("GET", has_name=True, is_watch=True) == ["watch"]
 
     def test_post(self) -> None:
-        assert http_method_to_k8s_verbs("POST", has_name=False) == ["create"]
+        assert http_method_to_k8s_verbs("POST", has_name=False, is_watch=False) == ["create"]
 
     def test_put(self) -> None:
-        assert http_method_to_k8s_verbs("PUT", has_name=True) == ["update"]
+        assert http_method_to_k8s_verbs("PUT", has_name=True, is_watch=False) == ["update"]
 
     def test_patch(self) -> None:
-        assert http_method_to_k8s_verbs("PATCH", has_name=True) == ["patch"]
+        assert http_method_to_k8s_verbs("PATCH", has_name=True, is_watch=False) == ["patch"]
 
-    def test_delete(self) -> None:
-        assert http_method_to_k8s_verbs("DELETE", has_name=True) == ["delete", "deletecollection"]
+    def test_delete_named(self) -> None:
+        assert http_method_to_k8s_verbs("DELETE", has_name=True, is_watch=False) == ["delete"]
+
+    def test_delete_collection(self) -> None:
+        assert http_method_to_k8s_verbs("DELETE", has_name=False, is_watch=False) == ["deletecollection"]
 
     def test_case_insensitive(self) -> None:
-        assert http_method_to_k8s_verbs("get", has_name=False) == ["list", "watch"]
+        assert http_method_to_k8s_verbs("get", has_name=False, is_watch=False) == ["list"]
 
 
 # ── RBAC checking ─────────────────────────────────────────────────────────────
@@ -277,7 +338,13 @@ class _MockKubectlProxyHandler(http.server.BaseHTTPRequestHandler):
         pass
 
     def do_GET(self) -> None:  # noqa: N802
-        body = json.dumps({"path": self.path, "method": "GET"}).encode()
+        self._echo("GET")
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        self._echo("DELETE")
+
+    def _echo(self, method: str) -> None:
+        body = json.dumps({"path": self.path, "method": method}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -453,6 +520,101 @@ class TestRBACProxyGetListDistinction:
         _, port, token, cert_pem = get_only_rbac_proxy
         status, _ = _request(port, "/api/v1/namespaces/default/secrets/my-secret", token=token, cert_pem=cert_pem)
         assert status == 200
+
+
+@pytest.fixture()
+def watch_only_rbac_proxy(mock_kubectl_proxy: tuple[http.server.HTTPServer, int]):
+    """RBAC proxy with a watch-only rule on secrets — get/list must be denied."""
+    _, kube_port = mock_kubectl_proxy
+    rules = [
+        KubectlRBACRule(verbs=["watch"], resources=["secrets"], namespaces=["*"]),
+    ]
+    token = "test-token-watch-only"
+    server, port, cert_pem = start_rbac_proxy(rules, token, kube_port)
+    yield server, port, token, cert_pem
+    stop_rbac_proxy(server)
+
+
+class TestRBACProxyWatchDistinction:
+    """Regression coverage: watch is a distinct verb from get/list, not implied by either."""
+
+    def test_watch_only_allows_watch_on_collection(self, watch_only_rbac_proxy: tuple) -> None:
+        _, port, token, cert_pem = watch_only_rbac_proxy
+        status, _ = _request(port, "/api/v1/namespaces/default/secrets?watch=true", token=token, cert_pem=cert_pem)
+        assert status == 200
+
+    def test_watch_only_denies_plain_list(self, watch_only_rbac_proxy: tuple) -> None:
+        _, port, token, cert_pem = watch_only_rbac_proxy
+        status, _ = _request(port, "/api/v1/namespaces/default/secrets", token=token, cert_pem=cert_pem)
+        assert status == 403
+
+    def test_watch_only_denies_plain_get(self, watch_only_rbac_proxy: tuple) -> None:
+        _, port, token, cert_pem = watch_only_rbac_proxy
+        status, _ = _request(port, "/api/v1/namespaces/default/secrets/my-secret", token=token, cert_pem=cert_pem)
+        assert status == 403
+
+    def test_list_only_denies_watch(self, list_only_rbac_proxy: tuple) -> None:
+        _, port, token, cert_pem = list_only_rbac_proxy
+        status, _ = _request(port, "/api/v1/namespaces/default/secrets?watch=true", token=token, cert_pem=cert_pem)
+        assert status == 403
+
+
+@pytest.fixture()
+def delete_only_rbac_proxy(mock_kubectl_proxy: tuple[http.server.HTTPServer, int]):
+    """RBAC proxy with a delete-only rule on secrets — deletecollection must be denied."""
+    _, kube_port = mock_kubectl_proxy
+    rules = [
+        KubectlRBACRule(verbs=["delete"], resources=["secrets"], namespaces=["*"]),
+    ]
+    token = "test-token-delete-only"
+    server, port, cert_pem = start_rbac_proxy(rules, token, kube_port)
+    yield server, port, token, cert_pem
+    stop_rbac_proxy(server)
+
+
+@pytest.fixture()
+def deletecollection_only_rbac_proxy(mock_kubectl_proxy: tuple[http.server.HTTPServer, int]):
+    """RBAC proxy with a deletecollection-only rule on secrets — delete must be denied."""
+    _, kube_port = mock_kubectl_proxy
+    rules = [
+        KubectlRBACRule(verbs=["deletecollection"], resources=["secrets"], namespaces=["*"]),
+    ]
+    token = "test-token-deletecollection-only"
+    server, port, cert_pem = start_rbac_proxy(rules, token, kube_port)
+    yield server, port, token, cert_pem
+    stop_rbac_proxy(server)
+
+
+class TestRBACProxyDeleteDistinction:
+    """Regression coverage: delete and deletecollection must be independently grantable."""
+
+    def test_delete_only_allows_named_delete(self, delete_only_rbac_proxy: tuple) -> None:
+        _, port, token, cert_pem = delete_only_rbac_proxy
+        status, _ = _request(
+            port, "/api/v1/namespaces/default/secrets/my-secret", method="DELETE", token=token, cert_pem=cert_pem
+        )
+        assert status == 200
+
+    def test_delete_only_denies_deletecollection(self, delete_only_rbac_proxy: tuple) -> None:
+        _, port, token, cert_pem = delete_only_rbac_proxy
+        status, _ = _request(
+            port, "/api/v1/namespaces/default/secrets", method="DELETE", token=token, cert_pem=cert_pem
+        )
+        assert status == 403
+
+    def test_deletecollection_only_allows_collection_delete(self, deletecollection_only_rbac_proxy: tuple) -> None:
+        _, port, token, cert_pem = deletecollection_only_rbac_proxy
+        status, _ = _request(
+            port, "/api/v1/namespaces/default/secrets", method="DELETE", token=token, cert_pem=cert_pem
+        )
+        assert status == 200
+
+    def test_deletecollection_only_denies_named_delete(self, deletecollection_only_rbac_proxy: tuple) -> None:
+        _, port, token, cert_pem = deletecollection_only_rbac_proxy
+        status, _ = _request(
+            port, "/api/v1/namespaces/default/secrets/my-secret", method="DELETE", token=token, cert_pem=cert_pem
+        )
+        assert status == 403
 
 
 class TestCertGeneration:
