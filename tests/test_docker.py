@@ -1279,10 +1279,10 @@ class TestBuildMountsNoCommit:
             no_commit=True,
             type="task",
         )
-        # Create the task file so meta.task_file resolves
+        # Create the task file (in its per-task subdirectory) so meta.task_file resolves
         hdir = meta.hatchery_dir
-        (hdir / "tasks").mkdir(parents=True)
-        task_file = hdir / "tasks" / "2026-01-01-t.md"
+        (hdir / "tasks" / "t").mkdir(parents=True)
+        task_file = hdir / "tasks" / "t" / "2026-01-01-t.md"
         task_file.write_text("# task\n")
 
         cfg = docker.DockerConfig()
@@ -1292,16 +1292,17 @@ class TestBuildMountsNoCommit:
         expected_ro = mount.BindMount(src=str(hdir), dst=str(hdir), mode="RO")
         assert expected_ro in mounts
 
-        # 2. RW mount of the task file
-        expected_rw = mount.BindMount(src=str(task_file), dst=str(task_file), mode="RW")
+        # 2. RW mount of the task's subdirectory (not the file itself — a
+        #    directory-level mount is required for atomic tmpfile+rename saves)
+        expected_rw = mount.BindMount(src=str(task_file.parent), dst=str(task_file.parent), mode="RW")
         assert expected_rw in mounts
 
-        # 3. No other RW mount under hdir (no sibling or Dockerfile RW)
+        # 3. No other RW mount under hdir (no sibling task or Dockerfile RW)
         rw_under_hdir = [
             m for m in mounts if isinstance(m, mount.BindMount) and m.mode == "RW" and str(hdir) in str(m.src)
         ]
         assert len(rw_under_hdir) == 1
-        assert str(rw_under_hdir[0].src) == str(task_file)
+        assert str(rw_under_hdir[0].src) == str(task_file.parent)
 
     def test_commit_mode_no_store_mount(self, tmp_path, monkeypatch):
         """Commit mode: no hatchery_dir mount at all."""

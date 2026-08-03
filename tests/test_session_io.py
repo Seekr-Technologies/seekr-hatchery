@@ -949,8 +949,9 @@ class TestUpdateTaskFileStatus:
     """update_task_file_status rewrites the front-matter Status line."""
 
     def _write_task(self, tasks_dir, name, status):
-        tasks_dir.mkdir(parents=True, exist_ok=True)
-        p = tasks_dir / f"2026-01-01-{name}.md"
+        task_subdir = tasks_dir / name
+        task_subdir.mkdir(parents=True, exist_ok=True)
+        p = task_subdir / f"2026-01-01-{name}.md"
         p.write_text(f"# Task: {name}\n\n**Status**: {status}\n**Branch**: x\n\nBody\n")
         return p
 
@@ -1669,10 +1670,31 @@ class TestSessionMetaDerivedPaths:
             no_commit=True,
         )
         tasks_dir = meta.task_dir
-        tasks_dir.mkdir(parents=True)
-        task_file = tasks_dir / "2026-01-15-t.md"
+        task_subdir = tasks_dir / "t"
+        task_subdir.mkdir(parents=True)
+        task_file = task_subdir / "2026-01-15-t.md"
         task_file.write_text("# task\n")
         assert meta.task_file == task_file
+
+    def test_task_file_migrates_legacy_flat_file(self, tmp_path, monkeypatch):
+        """Tasks created before the per-task-subdir layout are lazily migrated."""
+        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path)
+        meta = sessions.SessionMeta(
+            name="t",
+            repo=str(tmp_path),
+            worktree=str(tmp_path / "wt"),
+            no_commit=True,
+        )
+        tasks_dir = meta.task_dir
+        tasks_dir.mkdir(parents=True)
+        legacy_file = tasks_dir / "2026-01-15-t.md"
+        legacy_file.write_text("# task\n")
+
+        resolved = meta.task_file
+
+        assert resolved == tasks_dir / "t" / "2026-01-15-t.md"
+        assert resolved.read_text() == "# task\n"
+        assert not legacy_file.exists()
 
     def test_task_file_none_when_absent(self, tmp_path, monkeypatch):
         monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path)
@@ -1702,7 +1724,7 @@ class TestCreateNoCommit:
             no_commit=True,
             objective="do stuff",
         )
-        task_file = meta.hatchery_dir / "tasks" / sessions.task_file_name("t")
+        task_file = meta.hatchery_dir / "tasks" / "t" / sessions.task_file_name("t")
         assert task_file.exists()
         wt_tasks = meta.worktree_path / ".hatchery" / "tasks"
         assert not wt_tasks.exists() or not list(wt_tasks.glob("*.md"))
@@ -1794,7 +1816,7 @@ class TestRecordSurvivesDone:
             no_commit=True,
             objective="x",
         )
-        task_file = meta.hatchery_dir / "tasks" / sessions.task_file_name("t")
+        task_file = meta.hatchery_dir / "tasks" / "t" / sessions.task_file_name("t")
         assert task_file.exists()
         sessions.mark_done(meta, commit_changes=False)
         assert task_file.exists()
