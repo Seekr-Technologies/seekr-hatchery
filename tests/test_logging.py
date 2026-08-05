@@ -2,6 +2,7 @@
 
 import logging
 import logging.handlers
+import warnings
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,32 @@ def hatchery_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     d = tmp_path / ".hatchery"
     monkeypatch.setattr(constants, "HATCHERY_DIR", d)
     return d
+
+
+@pytest.fixture()
+def clean_warnings_logger():
+    """Reset the py.warnings logger and captureWarnings state before/after each test.
+
+    pytest wraps every test in its own ``warnings.catch_warnings()``, which
+    restores ``warnings.showwarning`` to the stdlib default at each test's
+    teardown. ``logging.captureWarnings()`` only re-arms ``showwarning`` when
+    its internal "already capturing" flag is unset, so once any earlier test
+    in the session has called it, later calls silently no-op and
+    ``warnings.warn()`` falls through to the real default instead of
+    logging. Force that flag off before *and* after this test so
+    ``configure_logging()``'s ``captureWarnings(True)`` call actually takes
+    effect here, regardless of what ran before. This reset dance is purely a
+    test artifact — in real usage configure_logging() runs once per process.
+    """
+    logging.captureWarnings(False)
+    logger = logging.getLogger("py.warnings")
+    saved_handlers = logger.handlers[:]
+    saved_level = logger.level
+    logger.handlers = []
+    yield logger
+    logger.handlers = saved_handlers
+    logger.setLevel(saved_level)
+    logging.captureWarnings(False)
 
 
 # ---------------------------------------------------------------------------
@@ -250,3 +277,48 @@ class TestDetachConsoleHandler:
         captured = capsys.readouterr()
         assert "after-detach" not in captured.err
         assert "after-detach" in (hatchery_dir / "hatchery.log").read_text()
+
+
+# ---------------------------------------------------------------------------
+# warnings.warn() capture (e.g. urllib3's InsecureRequestWarning)
+# ---------------------------------------------------------------------------
+
+
+class TestWarningsCapture:
+    """warnings.warn() is routed through logging instead of straight to stderr.
+
+    A raw ``warnings.warn()`` write bypasses the ``seekr_hatchery`` logger
+    entirely, so without ``logging.captureWarnings``, it would land on
+    stderr even after ``detach_console_handler()`` — corrupting the agent's
+    TUI, which shares the same terminal as the host process.
+    """
+
+    def test_warnings_go_to_file(self, clean_logger, clean_warnings_logger, hatchery_dir):
+        """warnings.warn() is captured by logging and lands in the log file.
+
+        Before detach_console_handler, it also reaches stderr — same as any
+        other WARNING-level log line at this point (pre-launch diagnostics
+        are meant to be visible). The critical property is checked by
+        test_warnings_suppressed_after_detach below: once detached, it must
+        not reach stderr, since that's the terminal shared with the agent.
+        """
+        logging_.configure_logging("INFO")
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("always")
+            warnings.warn("test-warning-message", UserWarning)
+
+        assert "test-warning-message" in (hatchery_dir / "hatchery.log").read_text()
+
+    def test_warnings_suppressed_after_detach(self, clean_logger, clean_warnings_logger, hatchery_dir, capsys):
+        """After detach_console_handler, warnings still reach the file but not stderr."""
+        logging_.configure_logging("INFO")
+        logging_.detach_console_handler()
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("always")
+            warnings.warn("post-detach-warning", UserWarning)
+
+        captured = capsys.readouterr()
+        assert "post-detach-warning" not in captured.err
+        assert "post-detach-warning" in (hatchery_dir / "hatchery.log").read_text()

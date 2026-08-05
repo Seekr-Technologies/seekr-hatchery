@@ -324,6 +324,16 @@ class _ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
     daemon_threads = True
 
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        """Log request-handling exceptions instead of printing to stderr.
+
+        The ``socketserver`` default prints a traceback straight to
+        ``sys.stderr`` via ``print``/``traceback.print_exc()``, bypassing the
+        logging module entirely — a raw write from this background thread
+        corrupts the agent's TUI, which shares the same terminal.
+        """
+        logger.warning("Error handling request from %s", client_address, exc_info=True)
+
 
 class APIServer:
     """Public handle for a running API proxy server.
