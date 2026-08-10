@@ -109,6 +109,16 @@ parent-dir-mount + symlink approach instead (deliberately not
 implemented here; the one consumer of `is_file=True` so far happens
 to fall back to in-place writes on rename failure).
 
+> **Amended 2026-08-10** (`2026-08-10-fix-codex`): the `EBUSY` hazard is
+> not specific to `is_file=True`. It bites *any* single-file mount,
+> including a plain `BindMount` of a host file layered over a volume —
+> the target is a mount point either way, and RW does not help. That is
+> what broke codex's `~/.codex/config.toml` persistence. The fix there
+> was neither symlinks nor `is_file`: the file is simply seeded into the
+> surrounding volume so it is an ordinary file with no mount at its path.
+> Prefer that whenever the agent owns the file. A single-file mount is
+> only safe for paths the agent exclusively reads.
+
 The seed callable for `is_file=True` returns raw `bytes`; the
 lifecycle keys them under `basename(dst)` inside the volume so the
 subpath mount finds them.

@@ -168,15 +168,41 @@ This means a jailbroken or adversarially-prompted agent that reads its API key e
 
 The proxy token is stable per-task (persisted across container restarts) so cached credentials stay valid on subsequent `resume` launches.
 
+### The container's `~/.codex`
+
+The sandbox gets its own `~/.codex`, backed by a per-task volume rather
+than your real one. On first launch hatchery seeds it with a
+`config.toml` derived from your host config: settings like `model`,
+`model_reasoning_effort`, MCP servers and TUI preferences carry over,
+while every `base_url` and `experimental_bearer_token` is replaced with a
+placeholder and the per-task proxy token. The agent's working directory
+is marked trusted so codex doesn't prompt on startup.
+
+Codex owns the file from then on — it can save a default model or a TUI
+preference and those survive `resume`. Two consequences worth knowing:
+
+- The sandbox never writes back to your host `~/.codex/config.toml`.
+- Host config edits are picked up by *new* tasks, not by tasks that
+  already exist.
+
+`config.toml` is deliberately not a bind mount. Codex saves it
+atomically — write a tmp file, then `rename()` over the target — and a
+rename onto a single-file bind mount fails with `EBUSY` because the
+target is a kernel mount point. That is what produced `failed to persist
+config at ~/.codex/config.toml`.
+
+`memories/` and `skills/` *are* bind-mounted RW, so those cross task
+boundaries and stay in sync with the host; `model-catalog.json` is
+mounted read-only.
+
 ### Custom Codex providers
 
 If `~/.codex/config.toml` configures a custom provider via
 `experimental_bearer_token` (any non-OpenAI provider with a static
 bearer), hatchery routes the host-side proxy at that provider instead of
 OpenAI. Detection is automatic — there is no flag to set. The bearer
-token stays on the host: the container only sees a per-task proxy token,
-and a sanitized `config.toml` is mounted RO at `~/.codex/config.toml`
-inside the sandbox (the host file is **not** bind-mounted in this mode).
+token stays on the host: the container only ever sees the per-task proxy
+token, in the scrubbed `config.toml` described above.
 
 TLS verification uses the OS native trust store via
 [`truststore`](https://truststore.readthedocs.io/) — macOS Keychain,
@@ -276,7 +302,6 @@ Then output `"$top\n$hatchery_line\n$bottom"` when `$hatchery_line` is non-empty
       <task-name>/         # one directory per task
         hatchery.log        # per-task log file (during runs)
         meta.json          # task metadata
-        codex_auth.json    # Docker session: proxy-token auth config
         proxy_token        # Docker session: stable API proxy UUID
         COMMIT_EDITMSG     # Docker session: git sentinel file
         ORIG_HEAD          # Docker session: git sentinel file

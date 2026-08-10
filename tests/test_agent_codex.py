@@ -4,6 +4,7 @@ import json
 import subprocess
 import threading
 import time
+import tomllib
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -286,11 +287,18 @@ class TestOnNewTask:
 
 
 class TestOnBeforeContainerStart:
-    """No longer does anything — auth.json synthesis moved into the
-    VolumeMount.seed callable. Method stays as a required abstract
-    method on the base."""
+    """No longer does anything — both auth.json and config.toml are
+    synthesised by the VolumeMount.seed callable. Method stays as a
+    required abstract method on the base."""
 
-    def test_is_noop(self, tmp_path):
+    def test_is_noop(self, home, tmp_path):
+        session_dir = tmp_path / "session"
+        session_dir.mkdir()
+        agent.CODEX.on_before_container_start(session_dir, "proxy-tok", "/workdir")
+        assert list(session_dir.iterdir()) == []
+
+    def test_is_noop_with_custom_provider(self, home, tmp_path):
+        _make_custom_provider_config(home)
         session_dir = tmp_path / "session"
         session_dir.mkdir()
         agent.CODEX.on_before_container_start(session_dir, "proxy-tok", "/workdir")
@@ -335,21 +343,33 @@ class TestConstructMounts:
             assert m.mode == "RW"
             assert m.src == home / ".codex" / name
 
-    def test_cross_task_files_bind_when_present(self, home, tmp_path):
+    def test_config_and_cache_are_never_mounted(self, home, tmp_path):
+        """config.toml and models_cache.json must stay ordinary files
+        inside the volume. Codex rewrites both via tmp-file + rename, and
+        a rename onto a single-file bind mount fails with EBUSY — that is
+        the "failed to persist config" bug."""
         (home / ".codex").mkdir()
         (home / ".codex" / "config.toml").write_text("")
         (home / ".codex" / "models_cache.json").write_text("{}")
         mounts = agent.CODEX.construct_mounts(tmp_path)
         by_dst = _kinds_by_dst(mounts)
         for name in ("config.toml", "models_cache.json"):
-            m = by_dst[f"{agent.CONTAINER_HOME}/.codex/{name}"]
-            assert isinstance(m, mount.BindMount)
-            assert m.mode == "RW"
-            assert m.src == home / ".codex" / name
+            assert f"{agent.CONTAINER_HOME}/.codex/{name}" not in by_dst
+
+    def test_model_catalog_binds_ro_when_present(self, home, tmp_path):
+        """Read-only in codex (it is the target of model_catalog_json),
+        so no rename ever lands on it."""
+        (home / ".codex").mkdir()
+        (home / ".codex" / "model-catalog.json").write_text("{}")
+        mounts = agent.CODEX.construct_mounts(tmp_path)
+        m = _kinds_by_dst(mounts)[f"{agent.CONTAINER_HOME}/.codex/model-catalog.json"]
+        assert isinstance(m, mount.BindMount)
+        assert m.mode == "RO"
+        assert m.src == home / ".codex" / "model-catalog.json"
 
 
 # ---------------------------------------------------------------------------
-# _seed_codex_dir — only auth.json is synthesised
+# _seed_codex_dir — auth.json + config.toml are synthesised
 # ---------------------------------------------------------------------------
 
 
@@ -361,9 +381,14 @@ class TestSeedCodexDir:
             container_workdir="/workspace",
         )
 
-    def test_returns_only_auth_json(self, home):
+    def test_returns_auth_json_and_config_toml(self, home):
         out = agent.CodexBackend._seed_codex_dir(self._ctx())
-        assert set(out.keys()) == {"auth.json"}
+        assert set(out.keys()) == {"auth.json", "config.toml"}
+
+    def test_seeded_config_is_valid_toml_and_trusts_workdir(self, home):
+        out = agent.CodexBackend._seed_codex_dir(self._ctx())
+        data = tomllib.loads(out["config.toml"].decode())
+        assert data["projects"]["/workspace"]["trust_level"] == "trusted"
 
     def test_auth_json_uses_proxy_token(self, home):
         out = agent.CodexBackend._seed_codex_dir(self._ctx(token="my-proxy-123"))
@@ -605,6 +630,11 @@ class TestCustomProviderDockerWrapper:
         # Legacy openai_base_url branch must still be present
         assert "openai_base_url" in wrapper
 
+    def test_pins_model_provider(self):
+        """Provider selection must not depend on what codex later
+        rewrites into its own copy of config.toml."""
+        assert 'model_provider=\\"${HATCHERY_CODEX_PROVIDER}\\"' in agent.CodexBackend._DOCKER_WRAPPER
+
 
 class TestCustomProviderConstructMounts:
     def test_skips_host_config_toml(self, home, tmp_path):
@@ -616,19 +646,12 @@ class TestCustomProviderConstructMounts:
         # No RW bind from the host config.toml — it contains the real bearer.
         assert str(home / ".codex" / "config.toml") not in bind_srcs
 
-    def test_includes_synthesized_config_path(self, home, tmp_path):
+    def test_config_toml_is_not_mounted_at_all(self, home, tmp_path):
+        """The container-side config is seeded into the volume, never
+        mounted — a mount point cannot receive codex's atomic rename."""
         _make_custom_provider_config(home)
         mounts = agent.CODEX.construct_mounts(tmp_path)
-        synth = [
-            m
-            for m in mounts
-            if isinstance(m, mount.BindMount) and m.dst == f"{agent.CONTAINER_HOME}/.codex/config.toml"
-        ]
-        assert len(synth) == 1
-        assert synth[0].src == tmp_path / "codex_config.toml"
-        # RW so codex can persist project trust / model selection / TUI
-        # prefs into its own scratch copy of the file.
-        assert synth[0].mode == "RW"
+        assert not [m for m in mounts if m.dst == f"{agent.CONTAINER_HOME}/.codex/config.toml"]
 
     def test_includes_catalog_when_present(self, home, tmp_path):
         _make_custom_provider_config(home)
@@ -643,90 +666,144 @@ class TestCustomProviderConstructMounts:
         assert catalog[0].mode == "RO"
 
 
-class TestCustomProviderOnBeforeContainerStart:
-    def test_writes_sanitized_config(self, home, tmp_path):
+# ---------------------------------------------------------------------------
+# _render_container_config — one path for every host setup
+# ---------------------------------------------------------------------------
+
+
+def _render(workdir="/workdir", token="proxy-tok"):
+    return tomllib.loads(agent.CodexBackend._render_container_config(token, workdir))
+
+
+class TestRenderContainerConfigCustomProvider:
+    def test_scrubs_real_bearer_and_base_url(self, home):
         _make_custom_provider_config(home, bearer="real-bearer-NEVER-IN-CONTAINER")
-        session_dir = tmp_path / "session"
-        agent.CODEX.on_before_container_start(session_dir, "proxy-tok-XYZ", "/workdir")
-        out = session_dir / "codex_config.toml"
-        assert out.exists()
-        content = out.read_text()
-        # Sanity-checks on the synthesised TOML
-        assert 'model = "some/Model"' in content
-        assert 'model_provider = "dev-adapter"' in content
-        assert "[model_providers.dev-adapter]" in content
-        assert 'wire_api = "responses"' in content
-        assert 'base_url = "http://placeholder/"' in content
-        assert 'experimental_bearer_token = "proxy-tok-XYZ"' in content
-        # Critical: the real bearer must NEVER appear in the file
-        assert "real-bearer-NEVER-IN-CONTAINER" not in content
+        raw = agent.CodexBackend._render_container_config("proxy-tok-XYZ", "/workdir")
+        # Critical: the real bearer must NEVER appear in the file.
+        assert "real-bearer-NEVER-IN-CONTAINER" not in raw
+        assert "adapter.example.com" not in raw
+        data = tomllib.loads(raw)
+        section = data["model_providers"]["dev-adapter"]
+        assert section["experimental_bearer_token"] == "proxy-tok-XYZ"
+        assert section["base_url"] == "http://placeholder/"
 
-    def test_noop_when_not_custom_provider(self, home, tmp_path):
-        # No config.toml on host → not in custom-provider mode → no file written
-        session_dir = tmp_path / "session"
-        agent.CODEX.on_before_container_start(session_dir, "proxy-tok", "/workdir")
-        assert not session_dir.exists() or not (session_dir / "codex_config.toml").exists()
-
-    def test_includes_catalog_path_only_when_host_catalog_exists(self, home, tmp_path):
+    def test_carries_provider_selection_and_wire_api(self, home):
         _make_custom_provider_config(home)
-        session_dir = tmp_path / "session"
-        agent.CODEX.on_before_container_start(session_dir, "proxy-tok", "/workdir")
-        content = (session_dir / "codex_config.toml").read_text()
-        assert "model_catalog_json" not in content
+        data = _render()
+        assert data["model"] == "some/Model"
+        assert data["model_provider"] == "dev-adapter"
+        assert data["model_reasoning_effort"] == "high"
+        assert data["model_providers"]["dev-adapter"]["wire_api"] == "responses"
 
-        # Now add the host catalog and re-run
+    def test_scrubs_every_provider_not_just_the_active_one(self, home):
+        """An inactive provider is still reachable from the TUI's model
+        picker, so its credentials must not ride along either."""
+        _make_custom_provider_config(home)
+        with (home / ".codex" / "config.toml").open("a") as f:
+            f.write('\n[model_providers.other]\nbase_url = "https://other.example.com/v1"\n')
+            f.write('experimental_bearer_token = "other-real-bearer"\n')
+        codex_backend._host_config_data.cache_clear()
+        raw = agent.CodexBackend._render_container_config("proxy-tok", "/workdir")
+        assert "other-real-bearer" not in raw
+        assert "other.example.com" not in raw
+
+    def test_catalog_path_only_when_host_catalog_exists(self, home):
+        _make_custom_provider_config(home)
+        assert "model_catalog_json" not in _render()
+
         (home / ".codex" / "model-catalog.json").write_text('{"models": []}')
-        agent.CODEX.on_before_container_start(session_dir, "proxy-tok", "/workdir")
-        content = (session_dir / "codex_config.toml").read_text()
-        assert f'model_catalog_json = "{agent.CONTAINER_HOME}/.codex/model-catalog.json"' in content
+        assert _render()["model_catalog_json"] == f"{agent.CONTAINER_HOME}/.codex/model-catalog.json"
 
-    def test_synthesized_config_pre_trusts_workdir(self, home, tmp_path):
-        """The workdir is added as a trusted project so codex doesn't
-        prompt on startup (and doesn't try to persist the answer back
-        to config.toml)."""
-        import tomllib
-
+    def test_host_catalog_path_is_dropped_when_file_missing(self, home):
+        """A host path that doesn't exist in the container would only
+        produce a load error."""
         _make_custom_provider_config(home)
-        session_dir = tmp_path / "session"
-        workdir = "/Users/me/code/myrepo/.hatchery/worktrees/feature-x"
-        agent.CODEX.on_before_container_start(session_dir, "proxy-tok", workdir)
-        data = tomllib.loads((session_dir / "codex_config.toml").read_text())
-        assert data["projects"][workdir] == {"trust_level": "trusted"}
+        with (home / ".codex" / "config.toml").open("a") as f:
+            f.write('\nmodel_catalog_json = "/Users/me/.codex/model-catalog.json"\n')
+        codex_backend._host_config_data.cache_clear()
+        assert "model_catalog_json" not in _render()
 
-    def test_synthesized_config_does_not_carry_host_trust_entries(self, home, tmp_path):
+
+class TestRenderContainerConfigStandard:
+    def test_empty_when_no_host_config(self, home):
+        assert _render(workdir="") == {}
+
+    def test_host_settings_survive_the_round_trip(self, home):
+        """Standard-mode users used to get their whole host config
+        bind-mounted; everything semantic must still come through."""
+        (home / ".codex").mkdir()
+        (home / ".codex" / "config.toml").write_text(
+            """\
+# a comment
+model = "gpt-5-codex"
+model_reasoning_effort = "high"
+hide_agent_reasoning = false
+
+[tui]
+notifications = true
+
+[mcp_servers.fetch]
+command = "uvx"
+args = ["mcp-server-fetch"]
+"""
+        )
+        data = _render()
+        assert data["model"] == "gpt-5-codex"
+        assert data["model_reasoning_effort"] == "high"
+        assert data["hide_agent_reasoning"] is False
+        assert data["tui"] == {"notifications": True}
+        assert data["mcp_servers"]["fetch"] == {"command": "uvx", "args": ["mcp-server-fetch"]}
+
+    def test_openai_base_url_is_placeholdered(self, home):
+        """The wrapper injects the real proxy URL at exec time; a host
+        value left in place could route the sandbox off-proxy."""
+        (home / ".codex").mkdir()
+        (home / ".codex" / "config.toml").write_text('openai_base_url = "https://api.openai.com/v1"\n')
+        assert _render()["openai_base_url"] == "http://placeholder/"
+
+    def test_malformed_host_toml_does_not_raise(self, home):
+        (home / ".codex").mkdir()
+        (home / ".codex" / "config.toml").write_text("this is not = = toml\n")
+        assert _render() == {"projects": {"/workdir": {"trust_level": "trusted"}}}
+
+
+class TestRenderContainerConfigProjectTrust:
+    def test_pre_trusts_workdir(self, home):
+        """Pre-trusting stops codex showing its first-run "Do you trust
+        this directory?" prompt."""
+        _make_custom_provider_config(home)
+        workdir = "/Users/me/code/myrepo/.hatchery/worktrees/feature-x"
+        assert _render(workdir=workdir)["projects"][workdir] == {"trust_level": "trusted"}
+
+    def test_drops_host_trust_entries(self, home):
         """Only the workdir is trusted — other host entries don't exist
         inside the container, so copying them would be inert noise."""
-        import tomllib
-
         (home / ".codex").mkdir()
         (home / ".codex" / "config.toml").write_text(
             """\
 model = "some/Model"
-model_provider = "dev-adapter"
-
-[model_providers.dev-adapter]
-wire_api = "responses"
-base_url = "https://adapter.example.com/v1"
-experimental_bearer_token = "real-bearer"
 
 [projects."/Users/me/other-repo"]
 trust_level = "trusted"
 """
         )
-        session_dir = tmp_path / "session"
-        agent.CODEX.on_before_container_start(session_dir, "proxy-tok", "/workdir")
-        data = tomllib.loads((session_dir / "codex_config.toml").read_text())
-        assert set(data["projects"]) == {"/workdir"}
+        assert set(_render()["projects"]) == {"/workdir"}
 
-    def test_synthesized_config_is_valid_toml(self, home, tmp_path):
-        import tomllib
-
+    def test_no_projects_table_without_a_workdir(self, home):
         _make_custom_provider_config(home)
-        session_dir = tmp_path / "session"
-        agent.CODEX.on_before_container_start(session_dir, "proxy-tok", "/workdir")
-        data = tomllib.loads((session_dir / "codex_config.toml").read_text())
-        assert data["model_provider"] == "dev-adapter"
-        assert data["model_providers"]["dev-adapter"]["experimental_bearer_token"] == "proxy-tok"
+        assert "projects" not in _render(workdir="")
+
+
+class TestRenderContainerConfigPurity:
+    def test_does_not_mutate_the_cached_host_config(self, home):
+        """``_host_config_data`` is process-cached and shared with
+        ``_read_custom_provider`` / ``container_env``."""
+        _make_custom_provider_config(home, bearer="real-bearer-1234")
+        agent.CodexBackend._render_container_config("proxy-tok", "/workdir")
+        cached = codex_backend._host_config_data()
+        assert cached["model_providers"]["dev-adapter"]["experimental_bearer_token"] == "real-bearer-1234"
+        assert cached["model_providers"]["dev-adapter"]["base_url"] == "https://adapter.example.com/v1"
+        assert "projects" not in cached
 
 
 # ---------------------------------------------------------------------------
