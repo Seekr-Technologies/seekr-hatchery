@@ -175,6 +175,7 @@ def _fake_meta(**overrides):
     meta.no_worktree = False
     meta.worktree_path = Path("/repo/.hatchery/worktrees/my-task")
     meta.branch = "hatchery/my-task"
+    meta.branch_owned = True
     meta.hatchery_dir = Path("/repo/.hatchery")
     meta.include = []
     meta.session_id = "sid"

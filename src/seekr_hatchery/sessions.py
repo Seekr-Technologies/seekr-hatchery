@@ -1009,7 +1009,9 @@ def delete(meta: SessionMeta) -> None:
     if not meta.no_worktree:
         if meta.worktree_path.exists():
             git.remove_worktree(meta.repo_path, meta.worktree_path, force=True)
-        if git.delete_branch(meta.repo_path, meta.branch):
+        if not meta.branch_owned:
+            ui.info(f"Branch {meta.branch} was reused, not created — leaving it in place")
+        elif git.delete_branch(meta.repo_path, meta.branch):
             ui.info(f"Branch deleted: {meta.branch}")
         else:
             ui.info(f"Could not delete branch {meta.branch} (may already be gone)")
@@ -1050,6 +1052,7 @@ def create(
     type: Literal["task", "chat"],
     backend: "AgentBackend",
     base: str | None = None,
+    branch: str | None = None,
     no_worktree: bool = False,
     no_commit: bool = False,
     no_docker: bool = False,
@@ -1068,6 +1071,12 @@ def create(
     For ``type="chat"``: no worktree/branch, no task file. ``no_worktree`` is
     forced to True; ``worktree`` in the meta points at ``repo``.
 
+    ``branch``, if given, names the branch to use instead of the default
+    ``hatchery/<name>``. If it already exists (locally or on ``origin``) the
+    worktree attaches to it as-is and ``meta.branch_owned`` is set False, so
+    later cleanup never deletes it. Ignored (with a warning) if
+    ``no_worktree`` is True.
+
     Raises ``SessionCancelled`` if ``use_editor`` is True and the user saves
     the task file unchanged — the worktree, branch, and include worktrees
     are rolled back first.
@@ -1079,6 +1088,8 @@ def create(
     """
     include_entries = list(include_entries or [])
     is_chat = type == "chat"
+    branch_opt = branch
+    branch_owned = True
     # Backends that accept a session id at launch (claude) get a pre-generated
     # UUID here. Backends that generate their own id at runtime (codex) leave
     # session_id empty until the background_threads poller captures the real
@@ -1119,14 +1130,22 @@ def create(
                 worktree = repo
                 branch = ""
                 ui.info(f"Creating task: {name}")
+                if branch_opt:
+                    ui.warn("--branch is ignored with --no-worktree")
             else:
-                branch = f"hatchery/{name}"
                 worktree = worktrees_dir(repo) / name
                 ui.info(f"Creating task: {name}")
                 resolved_base = _resolve_base(repo, base, in_repo)
-                git.create_worktree(repo, branch, worktree, resolved_base)
+                if branch_opt:
+                    branch = branch_opt
+                    branch_owned = git.create_worktree(repo, branch, worktree, resolved_base, allow_reuse=True)
+                    if not branch_owned:
+                        ui.note(f"Using existing branch {branch!r}")
+                else:
+                    branch = f"hatchery/{name}"
+                    git.create_worktree(repo, branch, worktree, resolved_base)
                 cleanup_worktree = worktree
-                cleanup_branch = branch
+                cleanup_branch = branch if branch_owned else None
 
             if include_entries:
                 git.create_include_worktrees(include_entries, name)
@@ -1200,6 +1219,7 @@ def create(
         type=type,
         status="in-progress",
         branch=branch,
+        branch_owned=branch_owned,
         created=datetime.now().isoformat(),
         session_id=session_id,
         no_worktree=no_worktree,

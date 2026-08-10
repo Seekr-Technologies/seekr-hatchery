@@ -455,6 +455,17 @@ def cli(log_level: str) -> None:
     metavar="REF",
     help=f"Branch or commit to fork from (default: {DEFAULT_BASE})",
 )
+@click.option(
+    "--branch",
+    "branch",
+    default=None,
+    metavar="BRANCH",
+    help=(
+        "Use this branch name instead of hatchery/<name>. If it already "
+        "exists (locally or on origin) it's checked out as-is; otherwise "
+        "it's created fresh from --from, like the default branch."
+    ),
+)
 @click.option("--no-docker", is_flag=True, help="Run agent directly, even if a Dockerfile is present")
 @click.option(
     "--no-worktree",
@@ -524,6 +535,7 @@ def cli(log_level: str) -> None:
 def cmd_new(
     name: str,
     base: str,
+    branch: str | None,
     no_docker: bool,
     no_worktree: bool,
     editor: bool | None,
@@ -564,6 +576,7 @@ def cmd_new(
             type="task",
             backend=backend,
             base=base,
+            branch=branch,
             no_worktree=no_worktree,
             no_commit=no_commit,
             no_docker=no_docker,
@@ -595,7 +608,8 @@ def cmd_new(
     except KeyboardInterrupt:
         if not meta.no_worktree:
             git.remove_worktree(repo, meta.worktree_path)
-            git.delete_branch(repo, meta.branch)
+            if meta.branch_owned:
+                git.delete_branch(repo, meta.branch)
         if include_repos:
             git.remove_include_worktrees(include_repos, meta.name)
             git.delete_include_branches(include_repos, meta.name)

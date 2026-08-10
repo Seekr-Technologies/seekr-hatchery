@@ -56,15 +56,38 @@ def git_root_or_cwd() -> tuple[Path, bool]:
     return Path.cwd(), False
 
 
-def create_worktree(repo: Path, branch: str, worktree: Path, base: str) -> None:
-    """Create a git worktree on *branch* (force-reset to *base*).
+def create_worktree(repo: Path, branch: str, worktree: Path, base: str, allow_reuse: bool = False) -> bool:
+    """Create a git worktree on *branch*.
+
+    By default (*allow_reuse* False), force-resets *branch* to *base* via
+    ``-B`` — used for hatchery-owned branches that always start fresh.
+
+    When *allow_reuse* is True, first checks whether *branch* already exists
+    locally, or on ``origin`` after a fetch, and if so attaches the worktree
+    to it as-is (no reset) so existing commits are preserved; *base* is only
+    used when the branch doesn't exist yet.
 
     Removes any stale worktree registration for *worktree* first so that a
     previous failed run doesn't block re-creation.  Exits cleanly with an
     informative message if *base* does not exist in *repo*.
+
+    Returns True if a fresh branch was created, False if an existing branch
+    was reused.
     """
     worktree.parent.mkdir(parents=True, exist_ok=True)
     run(["git", "worktree", "remove", "--force", str(worktree)], cwd=repo, check=False)
+
+    if allow_reuse:
+        if branch_exists(repo, branch):
+            run(["git", "worktree", "add", str(worktree), branch], cwd=repo)
+            logger.debug("Worktree attached to existing local branch %s at %s", branch, worktree)
+            return False
+        fetch_remote(repo)
+        if remote_branch_exists(repo, branch):
+            run(["git", "worktree", "add", "-b", branch, str(worktree), f"origin/{branch}"], cwd=repo)
+            logger.debug("Worktree created tracking origin/%s at %s", branch, worktree)
+            return False
+
     try:
         run(["git", "worktree", "add", "-B", branch, str(worktree), base], cwd=repo)
     except subprocess.CalledProcessError as e:
@@ -73,6 +96,7 @@ def create_worktree(repo: Path, branch: str, worktree: Path, base: str) -> None:
             sys.exit(1)
         raise
     logger.debug("Worktree created at %s", worktree)
+    return True
 
 
 def remove_worktree(repo: Path, worktree: Path, force: bool = False) -> None:
