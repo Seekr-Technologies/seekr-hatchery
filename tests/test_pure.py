@@ -32,7 +32,7 @@ def _make_mutator(key: str = "test-key"):
 
 class TestFindTaskFile:
     def test_finds_matching_file(self, tmp_path):
-        task_file = tmp_path / ".hatchery" / "tasks" / "2026-01-15-my-task.md"
+        task_file = tmp_path / ".hatchery" / "tasks" / "my-task" / "2026-01-15-my-task.md"
         task_file.parent.mkdir(parents=True)
         task_file.write_text("contents")
         assert sessions.find_task_file(tmp_path / ".hatchery" / "tasks", "my-task") == task_file
@@ -43,11 +43,24 @@ class TestFindTaskFile:
 
     def test_returns_latest_when_multiple(self, tmp_path):
         tasks_dir = tmp_path / ".hatchery" / "tasks"
-        tasks_dir.mkdir(parents=True)
-        (tasks_dir / "2026-01-10-my-task.md").write_text("old")
-        (tasks_dir / "2026-03-04-my-task.md").write_text("new")
+        task_subdir = tasks_dir / "my-task"
+        task_subdir.mkdir(parents=True)
+        (task_subdir / "2026-01-10-my-task.md").write_text("old")
+        (task_subdir / "2026-03-04-my-task.md").write_text("new")
         result = sessions.find_task_file(tasks_dir, "my-task")
-        assert result == tasks_dir / "2026-03-04-my-task.md"
+        assert result == task_subdir / "2026-03-04-my-task.md"
+
+    def test_migrates_legacy_flat_file(self, tmp_path):
+        tasks_dir = tmp_path / ".hatchery" / "tasks"
+        tasks_dir.mkdir(parents=True)
+        legacy_file = tasks_dir / "2026-01-15-my-task.md"
+        legacy_file.write_text("contents")
+
+        result = sessions.find_task_file(tasks_dir, "my-task")
+
+        assert result == tasks_dir / "my-task" / "2026-01-15-my-task.md"
+        assert result.read_text() == "contents"
+        assert not legacy_file.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -137,11 +150,11 @@ class TestSessionPrompt:
         return SessionMeta(name=name, repo=str(worktree), worktree=str(worktree))
 
     def test_contains_task_file_path(self, tmp_path):
-        task_file = tmp_path / ".hatchery" / "tasks" / "2026-01-15-my-task.md"
+        task_file = tmp_path / ".hatchery" / "tasks" / "my-task" / "2026-01-15-my-task.md"
         task_file.parent.mkdir(parents=True)
         task_file.write_text("task contents")
         result = sessions.session_prompt(self._meta(tmp_path, "my-task"))
-        assert ".hatchery/tasks/2026-01-15-my-task.md" in result
+        assert ".hatchery/tasks/my-task/2026-01-15-my-task.md" in result
 
     def test_is_string(self, tmp_path):
         task_file = tmp_path / ".hatchery" / "tasks" / "2026-01-15-foo.md"

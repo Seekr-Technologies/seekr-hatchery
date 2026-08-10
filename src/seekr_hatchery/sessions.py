@@ -244,9 +244,29 @@ def find_task_file(tasks_dir: Path, name: str) -> Path | None:
     *tasks_dir* is the resolved task-file directory — either the in-tree
     ``.hatchery/tasks/`` (commit mode) or the out-of-tree record store
     (no-commit mode). Use ``SessionMeta.task_dir`` to get the right one.
+
+    Task files live in a per-task subdirectory (``tasks_dir/<name>/``) so
+    that no-commit mode can bind-mount just that subdirectory read-write —
+    a directory-level RW mount is required for atomic saves (tmp file +
+    rename), which a single-file RW mount can't support since rename/unlink
+    need write permission on the containing directory. Tasks created before
+    this layout existed have a flat file directly under ``tasks_dir``; if
+    found, it's lazily migrated into the per-task subdirectory here.
     """
-    matches = sorted(tasks_dir.glob(f"*-{name}.md"))
-    return matches[-1] if matches else None
+    matches = sorted((tasks_dir / name).glob(f"*-{name}.md"))
+    if matches:
+        return matches[-1]
+
+    legacy_matches = sorted(tasks_dir.glob(f"*-{name}.md"))
+    if not legacy_matches:
+        return None
+    legacy_path = legacy_matches[-1]
+    task_subdir = tasks_dir / name
+    task_subdir.mkdir(parents=True, exist_ok=True)
+    new_path = task_subdir / legacy_path.name
+    legacy_path.rename(new_path)
+    logger.info("Migrated task file %s -> %s", legacy_path, new_path)
+    return new_path
 
 
 def session_prompt(meta: SessionMeta, extra_note: str = "") -> str:
@@ -1417,8 +1437,9 @@ def repo_tasks_for_current_repo(repo: Path) -> list[dict]:
 
 
 def write_task_file(tasks_dir: Path, name: str, branch: str, objective: str | None = None) -> Path:
-    tasks_dir.mkdir(parents=True, exist_ok=True)
-    task_path = tasks_dir / task_file_name(name)
+    task_subdir = tasks_dir / name
+    task_subdir.mkdir(parents=True, exist_ok=True)
+    task_path = task_subdir / task_file_name(name)
     logger.debug("Task file written at %s", task_path)
     branch_line = f"**Branch**: {branch}" if branch else "**Branch**: (none — no-worktree mode)"
     if objective is not None:

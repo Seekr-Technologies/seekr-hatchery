@@ -1028,22 +1028,24 @@ def build_mounts(
 
     # In no-commit mode, layer two mounts: the whole store read-only (sibling
     # task records + Dockerfile/docker.yaml are readable but immutable) and the
-    # agent's own task file read-write on top (more-specific path wins).
+    # agent's own task subdirectory read-write on top (more-specific path wins,
+    # same trick used for .git/ above).
     #
-    # Caveat: a single-file bind mount is tied to the file's inode. If a writer
-    # saves by "write temp + rename over" (vim and some editors do this), the
-    # rename swaps the inode and the change won't reach the host file. The
-    # task-file workflow edits in place (truncate/write same inode), so this is
-    # safe for the normal path. If a backend ever does atomic saves and loses
-    # task-file edits, fall back to per-task subdirs (tasks/<name>/…) with a
-    # dir RW mount — dir mounts survive rename.
+    # The RW mount must be the task's *directory*, not the file itself: atomic
+    # saves (write a tmp file, then rename() over the target — vim and many
+    # editors/agents do this) need write permission on the containing
+    # directory, since rename()/unlink() are directory operations in POSIX.
+    # A single-file RW mount can't satisfy that even though the file's
+    # content is writable. Task files live one-per-subdirectory
+    # (tasks/<name>/...) precisely so this directory-level RW mount doesn't
+    # expose any other task's files.
     if meta.no_commit and meta.type != "chat":
         hdir = meta.hatchery_dir
         hdir.mkdir(parents=True, exist_ok=True)
         mounts.append(BindMount(src=str(hdir), dst=str(hdir), mode="RO"))
         task_file = meta.task_file
         if task_file is not None:
-            mounts.append(BindMount(src=str(task_file), dst=str(task_file), mode="RW"))
+            mounts.append(BindMount(src=str(task_file.parent), dst=str(task_file.parent), mode="RW"))
 
     if include_entries:
         mounts.extend(_docker_mounts_includes(include_entries, meta.name, session_dir, no_worktree=meta.no_worktree))
