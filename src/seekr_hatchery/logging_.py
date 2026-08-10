@@ -25,6 +25,14 @@ import seekr_hatchery.ui as ui
 # Parent logger for the whole package.
 _pkg_logger = logging.getLogger("seekr_hatchery")
 
+# ``logging.captureWarnings(True)`` (enabled in configure_logging) routes
+# ``warnings.warn()`` through this logger instead of straight to stderr via
+# ``warnings.showwarning``.  Managed alongside _pkg_logger so warnings get
+# the same file/console handling (and the same detach-before-launch safety).
+_warnings_logger = logging.getLogger("py.warnings")
+
+_MANAGED_LOGGERS = (_pkg_logger, _warnings_logger)
+
 # Global log file: always-on rotating file handler at ~/.hatchery/hatchery.log.
 _LOG_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
 _LOG_BACKUP_COUNT = 3
@@ -76,6 +84,12 @@ def configure_logging(level: str) -> None:
     always captures at least INFO, so debuggable signal is on disk even when the
     console is quiet.  When ``level="DEBUG"``, both handlers get DEBUG.
 
+    Also enables ``logging.captureWarnings`` so ``warnings.warn()`` calls
+    (e.g. urllib3's ``InsecureRequestWarning``) are routed through these same
+    handlers instead of being printed straight to stderr — a raw stderr write
+    from a background thread (like the API proxy) would otherwise corrupt the
+    agent's TUI, which shares the same terminal.
+
     Call :func:`detach_console_handler` before launching the agent sandbox —
     console output after that point corrupts the agent's TUI.
 
@@ -92,7 +106,8 @@ def configure_logging(level: str) -> None:
     console = logging.StreamHandler(sys.stderr)
     console.setLevel(log_level)
     console.setFormatter(ui.ColorFormatter(_LOG_FMT, datefmt=_LOG_DATEFMT))
-    _pkg_logger.addHandler(console)
+    for logger in _MANAGED_LOGGERS:
+        logger.addHandler(console)
 
     # File handler — always on, rotating.
     try:
@@ -102,23 +117,29 @@ def configure_logging(level: str) -> None:
         )
         file_handler.setLevel(file_level)
         file_handler.setFormatter(_HatcheryFormatter(_LOG_FMT, datefmt=_LOG_DATEFMT))
-        _pkg_logger.addHandler(file_handler)
+        for logger in _MANAGED_LOGGERS:
+            logger.addHandler(file_handler)
     except OSError:
         # Non-fatal: console logging still works.
         pass
 
-    _pkg_logger.setLevel(min(log_level, file_level))
+    for logger in _MANAGED_LOGGERS:
+        logger.setLevel(min(log_level, file_level))
+
+    logging.captureWarnings(True)
 
 
 def detach_console_handler() -> None:
-    """Remove all console (StreamHandler) handlers from the package logger.
+    """Remove all console (StreamHandler) handlers from the managed loggers.
 
     Call this right before launching the agent sandbox so logging output
-    doesn't corrupt the agent's TUI.  File handlers are untouched.
+    (including captured ``warnings.warn()`` calls) doesn't corrupt the
+    agent's TUI.  File handlers are untouched.
     """
-    for h in list(_pkg_logger.handlers):
-        if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.handlers.RotatingFileHandler):
-            _pkg_logger.removeHandler(h)
+    for logger in _MANAGED_LOGGERS:
+        for h in list(logger.handlers):
+            if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.handlers.RotatingFileHandler):
+                logger.removeHandler(h)
 
 
 def get_file_handlers() -> list[logging.handlers.RotatingFileHandler]:
@@ -147,9 +168,11 @@ def task_log(session_dir: Path, level: int = logging.INFO) -> Generator[None, No
     )
     task_fh.setLevel(level)
     task_fh.setFormatter(_HatcheryFormatter(_LOG_FMT, datefmt=_LOG_DATEFMT))
-    _pkg_logger.addHandler(task_fh)
+    for logger in _MANAGED_LOGGERS:
+        logger.addHandler(task_fh)
     try:
         yield
     finally:
-        _pkg_logger.removeHandler(task_fh)
+        for logger in _MANAGED_LOGGERS:
+            logger.removeHandler(task_fh)
         task_fh.close()
