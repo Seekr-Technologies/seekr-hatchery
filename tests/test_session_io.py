@@ -637,6 +637,53 @@ class TestSessionCreateTask:
         assert meta.no_worktree is True
         assert meta.branch == ""
 
+    def test_branch_opt_creates_fresh_branch(self, git_repo, fake_tasks_db, no_input):
+        meta = sessions.create(
+            name="t",
+            repo=git_repo,
+            type="task",
+            backend=agent.CODEX,
+            branch="custom-branch",
+            objective="x",
+        )
+        assert meta.branch == "custom-branch"
+        assert meta.branch_owned is True
+        assert _git(git_repo, "rev-parse", "--verify", "custom-branch", check=False).returncode == 0
+
+    def test_branch_opt_reuses_existing_local_branch(self, git_repo, fake_tasks_db, no_input):
+        _git(git_repo, "checkout", "-b", "existing-branch")
+        _git(git_repo, "commit", "--allow-empty", "-m", "prior work")
+        _git(git_repo, "checkout", "main")
+        sha_before = _git(git_repo, "rev-parse", "existing-branch").stdout.strip()
+
+        meta = sessions.create(
+            name="t",
+            repo=git_repo,
+            type="task",
+            backend=agent.CODEX,
+            branch="existing-branch",
+            objective="x",
+        )
+        assert meta.branch == "existing-branch"
+        assert meta.branch_owned is False
+        # hatchery's own scaffolding commits land on top; the prior commit
+        # must still be an ancestor (not reset away via -B).
+        assert _git(git_repo, "merge-base", "--is-ancestor", sha_before, "existing-branch", check=False).returncode == 0
+
+    def test_branch_opt_ignored_with_no_worktree(self, git_repo, fake_tasks_db, no_input):
+        meta = sessions.create(
+            name="t",
+            repo=git_repo,
+            type="task",
+            backend=agent.CODEX,
+            no_worktree=True,
+            branch="ignored-branch",
+            objective="x",
+        )
+        assert meta.branch == ""
+        assert meta.branch_owned is True
+        assert _git(git_repo, "rev-parse", "--verify", "ignored-branch", check=False).returncode != 0
+
     def test_in_progress_collision_exits(self, git_repo, fake_tasks_db, no_input):
         sessions.create(name="t", repo=git_repo, type="task", backend=agent.CODEX, objective="x")
         with pytest.raises(SystemExit):

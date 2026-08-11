@@ -47,6 +47,12 @@ class SessionMeta(BaseModel):
     no_worktree: bool = False
     no_commit: bool = False
 
+    # False when --branch pointed at a branch that already existed (local or
+    # remote) and the worktree attached to it instead of creating it.
+    # delete()/rollback paths must never `git branch -D` a branch hatchery
+    # doesn't own.
+    branch_owned: bool = True
+
     # Deliberately permissive: meta.json files in the wild contain include
     # entries in two on-disk shapes — legacy ``list[str]`` (each entry is a
     # path; mode defaults to "worktree") and current ``list[dict]`` with
