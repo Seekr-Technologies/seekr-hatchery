@@ -17,7 +17,9 @@ import seekr_hatchery.agents as agent
 import seekr_hatchery.docker as docker
 import seekr_hatchery.proxy as proxy_mod
 import seekr_hatchery.sessions as sessions
+from seekr_hatchery.models import SessionMeta
 from seekr_hatchery.mount import Mount, VolumeMount
+from seekr_hatchery.seeded_volumes import prepare_volume_mounts
 
 pytestmark = pytest.mark.integration
 
@@ -116,12 +118,9 @@ def no_wt_run(
     session_dir = sessions.task_session_dir(no_wt_cwd, "test-no-wt")
     session_dir.mkdir(parents=True, exist_ok=True)
     agent.CODEX.on_new_task(session_dir)
-    # Codex's home_mounts requires codex_auth.json (created by on_before_container_start)
-    # and ~/.codex to exist.
     container_cwd = str(no_wt_cwd)
     agent.CODEX.on_before_container_start(session_dir, "test-proxy-token", container_cwd)
     (Path.home() / ".codex").mkdir(parents=True, exist_ok=True)
-    from seekr_hatchery.models import SessionMeta
 
     no_wt_meta = SessionMeta(name="test-no-wt", repo=str(no_wt_cwd), worktree=str(no_wt_cwd), no_worktree=True)
     mounts = docker.build_mounts(no_wt_meta, agent.CODEX, session_dir, docker.DockerConfig())
@@ -247,8 +246,6 @@ def wt_run(
     # No .git pointer rewrite needed: under host-path mirroring, the
     # worktree's existing .git file (gitdir: <host_repo>/.git/worktrees/<name>)
     # already resolves correctly inside the container.
-
-    from seekr_hatchery.models import SessionMeta
 
     wt_meta = SessionMeta(name=task_name, repo=str(wt_repo), worktree=str(wt_worktree), no_worktree=False)
     mounts = docker.build_mounts(
@@ -862,3 +859,81 @@ class TestFileMountSymlink:
         assert read_result is not None
         assert read_result.returncode == 0, f"read failed:\nstderr={read_result.stderr}"
         assert "updated" in read_result.stdout
+
+
+# ---------------------------------------------------------------------------
+# TestCodexConfigPersistence
+# ---------------------------------------------------------------------------
+
+
+class TestCodexConfigPersistence:
+    """Codex must be able to save ~/.codex/config.toml from inside the sandbox.
+
+    Regression test for "failed to persist config at
+    ~/.codex/config.toml". Codex saves atomically — write a sibling tmp
+    file, then rename() over the target — and while config.toml was a
+    single-file bind mount that rename could never land: the target was a
+    kernel mount point (EBUSY), on a different filesystem from the tmp
+    file besides (EXDEV). The fix was to stop mounting it and seed it into
+    the ~/.codex volume instead.
+
+    ``TestConstructMounts::test_config_and_cache_are_never_mounted``
+    covers the mount list; this covers what the list actually produces on
+    a real filesystem.
+    """
+
+    def test_seeded_config_survives_an_atomic_save(
+        self,
+        home: Path,
+        no_wt_cwd: Path,
+        no_wt_image: str,
+        runtime: docker.ContainerRuntime,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(type(runtime), "_engine_flags", lambda self, spec: [])
+        (home / ".codex").mkdir(parents=True, exist_ok=True)
+        (home / ".codex" / "config.toml").write_text('model = "gpt-5-codex"\n')
+
+        meta = SessionMeta(name="test-no-wt", repo=str(no_wt_cwd), worktree=str(no_wt_cwd), no_worktree=True)
+        session_dir = sessions.task_session_dir(no_wt_cwd, "test-no-wt")
+        session_dir.mkdir(parents=True, exist_ok=True)
+        cfg = f"{agent.CONTAINER_HOME}/.codex/config.toml"
+
+        mounts = prepare_volume_mounts(
+            runtime.binary,
+            agent.CODEX.construct_mounts(session_dir),
+            meta,
+            session_dir,
+            "test-proxy-token",
+            str(no_wt_cwd),
+        )
+        try:
+            spec = docker.build_spec(
+                image=no_wt_image,
+                mounts=mounts,
+                workdir="/",
+                name="test-codex-config",
+                hatchery_repo="/",
+                container_name=None,
+                mutator=None,
+                proxy_token=None,
+                proxy_port=None,
+                agent_cmd=[],
+                command_override=[
+                    "sh",
+                    "-c",
+                    # The seed must have landed, then codex's save must work.
+                    f'test -s {cfg} || {{ echo "config.toml missing or empty"; exit 1; }}; '
+                    f"grep -q gpt-5-codex {cfg} || {{ echo 'host settings did not carry over'; exit 1; }}; "
+                    f"printf 'model = \"saved-by-codex\"\\n' > {cfg}.tmp && mv {cfg}.tmp {cfg} && cat {cfg}",
+                ],
+            )
+            result = runtime.run(spec)
+            assert result is not None
+            assert result.returncode == 0, f"atomic save failed:\nstdout={result.stdout}\nstderr={result.stderr}"
+            assert "saved-by-codex" in result.stdout
+        finally:
+            subprocess.run(
+                [runtime.binary, "volume", "rm", "--force", f"{meta.container_name}-vol-codex-dir"],
+                capture_output=True,
+            )

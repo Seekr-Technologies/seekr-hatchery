@@ -1,5 +1,6 @@
 """OpenAI Codex CLI backend."""
 
+import copy
 import functools
 import json
 import logging
@@ -13,6 +14,8 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlsplit
+
+import tomli_w
 
 from seekr_hatchery.agents.agent_backend import CONTAINER_HOME, AgentBackend
 from seekr_hatchery.locks import hatchery_lock
@@ -57,6 +60,14 @@ _STAT_NEWEST_ROLLOUT_SH: str = (
 # without letting truly stale rollouts through.
 _MTIME_GRACE_SECONDS: float = 5.0
 
+# Every ``base_url`` in the container-side config.toml.  ``_DOCKER_WRAPPER``
+# overrides the active provider's from ``$OPENAI_BASE_URL`` at exec time;
+# anything it misses points somewhere unroutable rather than a real upstream.
+_PLACEHOLDER_BASE_URL: str = "http://placeholder/"
+
+# In-container path of the RO-bound host ``model-catalog.json``.
+_CONTAINER_MODEL_CATALOG: str = f"{CONTAINER_HOME}/.codex/model-catalog.json"
+
 
 @functools.lru_cache(maxsize=1)
 def _host_config_data() -> dict:
@@ -65,8 +76,8 @@ def _host_config_data() -> dict:
     Cached for the lifetime of the Python process so the same launch
     reads the host config exactly once — avoids drift between
     ``proxy_kwargs`` / ``make_header_mutator`` / ``container_env`` /
-    ``construct_mounts`` / ``on_before_container_start`` if the file is
-    rewritten mid-launch (e.g. by a token-rotation script).
+    ``_render_container_config`` if the file is rewritten mid-launch
+    (e.g. by a token-rotation script).
 
     Returns ``{}`` if the file is absent, unreadable, mis-encoded, or
     not valid TOML.
@@ -255,6 +266,8 @@ class CodexBackend(AgentBackend):
     # through the hatchery proxy with the proxy token.  Provider names are
     # validated against ``_PROVIDER_NAME_RE`` before being placed in the env
     # var, so interpolating ``$HATCHERY_CODEX_PROVIDER`` here is shell-safe.
+    # ``model_provider`` is pinned on the same branch so provider selection
+    # survives whatever codex later rewrites into its own ``config.toml``.
     # ``check_for_update_on_startup=false`` suppresses the interactive
     # "Update available" prompt that otherwise blocks resume launches
     # while codex waits for the user to press enter. The Codex image is
@@ -263,6 +276,7 @@ class CodexBackend(AgentBackend):
         'if [ -n "${HATCHERY_CODEX_PROVIDER:-}" ]; then '
         "exec codex "
         "--config check_for_update_on_startup=false "
+        '--config "model_provider=\\"${HATCHERY_CODEX_PROVIDER}\\"" '
         '--config "model_providers.${HATCHERY_CODEX_PROVIDER}.base_url=\\"$OPENAI_BASE_URL\\"" '
         '--config "model_providers.${HATCHERY_CODEX_PROVIDER}.experimental_bearer_token=\\"$OPENAI_API_KEY\\"" '
         '--dangerously-bypass-approvals-and-sandbox "$@"; '
@@ -411,42 +425,52 @@ class CodexBackend(AgentBackend):
         return provider, base_url, bearer
 
     @staticmethod
-    def _custom_provider_section() -> dict | None:
-        """Return the full ``[model_providers.<active>]`` table from the
-        host config, or ``None`` if custom-provider detection fails.
+    def _render_container_config(proxy_token: str, workdir: str) -> str:
+        """Return the TOML body of the container-side ``~/.codex/config.toml``.
 
-        Used by ``on_before_container_start`` when synthesising the
-        sanitized in-container config — we need ``wire_api`` (and any
-        other passthrough fields) in addition to the three values that
-        ``_read_custom_provider`` returns.
+        The host config is the starting point, so the user's settings
+        carry into the sandbox; the edits below make it safe to run
+        there.  One path for every host setup — OpenAI API key, ChatGPT
+        OAuth, or a custom on-prem provider.
+
+        Comments and key order are not preserved (``tomllib`` in,
+        ``tomli_w`` out).  Only the semantics matter inside a sandbox.
         """
-        data = _host_config_data()
-        provider = data.get("model_provider")
-        if not isinstance(provider, str):
-            return None
+        # Deep-copy: ``_host_config_data`` is process-cached and shared with
+        # ``_read_custom_provider`` / ``container_env``.
+        data = copy.deepcopy(_host_config_data())
+
+        # Scrub credentials from every provider, not just the active one — the
+        # container reaches its upstream only through the hatchery proxy, and
+        # the TUI's model picker can switch providers mid-session.  The wrapper
+        # re-injects the real proxy URL/token for the active provider at exec.
         providers = data.get("model_providers")
-        if not isinstance(providers, dict):
-            return None
-        section = providers.get(provider)
-        if not isinstance(section, dict):
-            return None
-        return section
+        if isinstance(providers, dict):
+            for section in providers.values():
+                if not isinstance(section, dict):
+                    continue
+                if "base_url" in section:
+                    section["base_url"] = _PLACEHOLDER_BASE_URL
+                if "experimental_bearer_token" in section:
+                    section["experimental_bearer_token"] = proxy_token
+        if "openai_base_url" in data:
+            data["openai_base_url"] = _PLACEHOLDER_BASE_URL
 
-    @staticmethod
-    def _custom_provider_top_level() -> dict:
-        """Return the top-level keys we want to mirror into the sanitized
-        in-container config.toml (``model``, ``model_reasoning_effort``).
+        # Host path → container path, or drop it: a host path that doesn't
+        # exist in the container would only produce a load error.
+        if (Path.home() / ".codex" / "model-catalog.json").exists():
+            data["model_catalog_json"] = _CONTAINER_MODEL_CATALOG
+        else:
+            data.pop("model_catalog_json", None)
 
-        Returns an empty dict when the host config.toml is missing or
-        unparsable.
-        """
-        data = _host_config_data()
-        out: dict[str, str] = {}
-        for key in ("model", "model_reasoning_effort"):
-            v = data.get(key)
-            if isinstance(v, str):
-                out[key] = v
-        return out
+        # Trust the workdir so codex doesn't prompt on startup.  Host entries
+        # are replaced, not merged — those paths don't exist in the container.
+        if workdir:
+            data["projects"] = {workdir: {"trust_level": "trusted"}}
+        else:
+            data.pop("projects", None)
+
+        return tomli_w.dumps(data)
 
     @staticmethod
     def _read_codex_creds() -> tuple[str | None, Literal["API_KEY", "OAUTH"] | None]:
@@ -502,33 +526,39 @@ class CodexBackend(AgentBackend):
     def construct_mounts(session_dir: Path) -> list[Mount]:
         """Per-task volume for ~/.codex + bind mounts for cross-task state.
 
-        The volume starts almost empty — the seed only synthesises
-        ``auth.json`` so the in-container codex authenticates against the
-        hatchery proxy and never sees the host's real credentials.
-        Everything else codex creates as it runs lives in the volume:
-        sessions, history, sqlite state, caches, logs, etc. — all on the
-        runtime's native filesystem rather than virtio-fs, and per-task
-        so concurrent sandboxes don't fight over the same files.
+        The volume is seeded with ``auth.json`` and ``config.toml`` so the
+        in-container codex authenticates against the hatchery proxy and
+        never sees the host's real credentials.  Everything else codex
+        creates as it runs lives in the volume: sessions, history, sqlite
+        state, caches, logs, etc. — all on the runtime's native
+        filesystem rather than virtio-fs, and per-task so concurrent
+        sandboxes don't fight over the same files.
 
-        Bind mounts overlay specific paths inside ``~/.codex/`` so they
-        cross task boundaries (memories) or stay in sync with host edits
-        (config.toml, models_cache.json). Layered mounts on top of a
-        volume mount are handled by the kernel — writes at the bind
-        paths go to the host, everything else goes to the volume.
+        **``config.toml`` is deliberately not a mount.**  Codex saves it
+        atomically (write ``config.toml.tmp``, then ``rename()`` over the
+        target), and a single-file bind mount cannot receive a rename:
+        the target is a kernel mount point, so the syscall fails with
+        ``EBUSY`` — and the tmp file is on the volume while the target is
+        on virtio-fs, so it is a cross-device rename besides.  Either one
+        is enough to break codex's config persistence ("failed to persist
+        config at ~/.codex/config.toml").  Seeding the file into the
+        volume makes it an ordinary file on the volume's own filesystem,
+        which is what codex needs.  The same reasoning applies to
+        ``models_cache.json``, which codex also rewrites.
 
-        Custom-provider mode skips the host ``config.toml`` bind because
-        it contains the real bearer token; ``on_before_container_start``
-        writes a sanitized copy to ``session_dir`` that is bound RW so
-        codex can persist its own runtime state (project trust, model
-        choice, TUI preferences) without crashing on startup.  The
-        sanitized file is per-task, regenerated from the host config on
-        every launch, and only ever contains the proxy-token bearer —
-        so RW does not weaken the "real bearer never enters the
-        container" property.  Project trust for the working directory
-        is pre-populated in the file by ``on_before_container_start``
-        so codex doesn't prompt the user.  The host's
-        ``model-catalog.json`` is bound RO so the in-container model
-        picker shows the configured custom models.
+        The consequence is that host ``config.toml`` edits reach *new*
+        tasks only, and the sandbox never writes back to the host file.
+        Both are intended: a sandbox silently rewriting the user's real
+        codex config — per task, concurrently — would be a bug.
+
+        Bind mounts remain for state that should cross task boundaries.
+        ``memories`` and ``skills`` are *directories*: rename inside a
+        mounted directory is an ordinary operation, so they are immune to
+        the hazard above.  ``model-catalog.json`` is bound RO — codex
+        only ever reads it (it is the target of ``model_catalog_json``),
+        so no rename lands on it.  Layered mounts on top of a volume
+        mount are resolved by the kernel: writes at the bind paths go to
+        the host, everything else goes to the volume.
         """
         mounts: list[Mount] = [
             VolumeMount(
@@ -538,62 +568,47 @@ class CodexBackend(AgentBackend):
             ),
         ]
         host_codex = Path.home() / ".codex"
-        custom = CodexBackend._read_custom_provider() is not None
-        cross_task_names: tuple[str, ...]
-        if custom:
-            # Skip ``config.toml`` — would leak the real bearer token.
-            cross_task_names = ("memories", "skills", "models_cache.json")
-        else:
-            cross_task_names = ("memories", "skills", "config.toml", "models_cache.json")
-        for name in cross_task_names:
+        for name in ("memories", "skills"):
             p = host_codex / name
             if p.exists():
                 mounts.append(BindMount(src=p, dst=f"{CONTAINER_HOME}/.codex/{name}", mode="RW"))
 
-        if custom:
-            catalog = host_codex / "model-catalog.json"
-            if catalog.exists():
-                mounts.append(BindMount(src=catalog, dst=f"{CONTAINER_HOME}/.codex/model-catalog.json", mode="RO"))
-            # Sanitized config.toml written by ``on_before_container_start``;
-            # RW so codex can persist project trust / model selection /
-            # TUI prefs.  Per-task and rewritten each launch, so writes
-            # are effectively scratch.
-            mounts.append(
-                BindMount(
-                    src=session_dir / "codex_config.toml",
-                    dst=f"{CONTAINER_HOME}/.codex/config.toml",
-                    mode="RW",
-                )
-            )
+        catalog = host_codex / "model-catalog.json"
+        if catalog.exists():
+            mounts.append(BindMount(src=catalog, dst=_CONTAINER_MODEL_CATALOG, mode="RO"))
         return mounts
 
     @staticmethod
     def _seed_codex_dir(ctx: SeedContext) -> Mapping[str, bytes]:
         """Initial contents of the per-task ~/.codex volume.
 
-        Only ``auth.json`` is synthesised — codex populates everything
-        else (sessions, logs, sqlite state, caches) inside the volume
-        as it runs.
+        ``auth.json`` and ``config.toml`` are synthesised; codex populates
+        everything else (sessions, logs, sqlite state, caches) inside the
+        volume as it runs.  The seed runs once, when the volume is
+        created — on resume codex's own edits to ``config.toml`` (default
+        model, TUI preferences, migration prompts) are preserved.
 
-        Always uses ``auth_mode="apikey"`` regardless of the host's real
-        mode. In apikey mode codex respects ``OPENAI_BASE_URL`` (which
-        ``container_env`` sets to the proxy). For OAuth hosts,
-        ``container_env`` and ``proxy_kwargs`` together route codex's
-        apikey path through the OAuth backend; the container never sees
-        the host's OAuth tokens.
+        ``auth.json`` always uses ``auth_mode="apikey"`` regardless of the
+        host's real mode. In apikey mode codex respects
+        ``OPENAI_BASE_URL`` (which ``container_env`` sets to the proxy).
+        For OAuth hosts, ``container_env`` and ``proxy_kwargs`` together
+        route codex's apikey path through the OAuth backend; the
+        container never sees the host's OAuth tokens.
 
-        In custom-provider mode the active provider authenticates via its
-        own ``experimental_bearer_token`` (set in the sanitized
-        in-container ``config.toml``), so this ``auth.json`` is harmless
-        overlap — codex only falls back to it for the built-in ``openai``
-        provider.
+        With a custom provider the active provider authenticates via its
+        own ``experimental_bearer_token`` (set in ``config.toml``), so
+        this ``auth.json`` is harmless overlap — codex only falls back to
+        it for the built-in ``openai`` provider.
         """
         fake_auth = {
             "auth_mode": "apikey",
             "OPENAI_API_KEY": ctx.proxy_token,
             "tokens": None,
         }
-        return {"auth.json": json.dumps(fake_auth).encode()}
+        return {
+            "auth.json": json.dumps(fake_auth).encode(),
+            "config.toml": CodexBackend._render_container_config(ctx.proxy_token, ctx.container_workdir).encode(),
+        }
 
     @staticmethod
     def proxy_kwargs() -> dict:
@@ -733,82 +748,13 @@ class CodexBackend(AgentBackend):
         proxy_token: str,
         workdir: str,
     ) -> None:
-        """Synthesise a sanitized ``config.toml`` for custom-provider mode.
+        """No-op — the container-side ``~/.codex`` is built by the volume seed.
 
-        For OpenAI / OAuth hosts this is a no-op — the synthetic
-        ``auth.json`` is created by the VolumeMount seed.
-
-        For a host with a custom codex provider, the host's
-        ``config.toml`` contains the real bearer token and must not be
-        bind-mounted into the container.  Instead, write a fresh copy to
-        ``session_dir/codex_config.toml`` that:
-
-        - keeps the same ``model`` / ``model_provider`` /
-          ``model_reasoning_effort`` so the agent picks the same model
-        - rewrites ``model_catalog_json`` to the container-side path of
-          the RO-bound ``model-catalog.json`` (when the host file
-          exists)
-        - mirrors the provider's ``wire_api`` so request shaping matches
-        - replaces ``base_url`` with a placeholder
-          (``http://placeholder/`` — overridden at exec time by the
-          ``_DOCKER_WRAPPER`` using ``$OPENAI_BASE_URL``)
-        - replaces ``experimental_bearer_token`` with the per-task
-          proxy token (overridden at exec time using ``$OPENAI_API_KEY``)
-        - pre-populates ``[projects.<workdir>]`` with
-          ``trust_level = "trusted"`` so codex doesn't show the
-          first-run "Do you trust this directory?" prompt (which on
-          older codex builds also tries to persist the answer back to
-          ``config.toml`` and crashes the TUI when persistence fails).
-          Only the workdir is trusted — any other paths the host has
-          trusted don't exist inside the container, so copying them
-          would be inert.
+        ``_seed_codex_dir`` synthesises both ``auth.json`` and
+        ``config.toml`` from ``SeedContext``, which carries the same
+        *proxy_token* and *workdir* this hook receives.  Nothing needs to
+        be staged on the host beforehand.
         """
-        custom = CodexBackend._read_custom_provider()
-        if custom is None:
-            return
-        provider, _base_url, _bearer = custom
-        section = CodexBackend._custom_provider_section() or {}
-        top = CodexBackend._custom_provider_top_level()
-
-        wire_api = section.get("wire_api", "responses")
-        section_name = section.get("name", provider)
-
-        host_catalog = Path.home() / ".codex" / "model-catalog.json"
-        include_catalog = host_catalog.exists()
-
-        # json.dumps gives us a safely-escaped TOML basic string (TOML
-        # basic strings use JSON-style escapes).
-        lines: list[str] = []
-        if "model" in top:
-            lines.append(f"model = {json.dumps(top['model'])}")
-        lines.append(f"model_provider = {json.dumps(provider)}")
-        if "model_reasoning_effort" in top:
-            lines.append(f"model_reasoning_effort = {json.dumps(top['model_reasoning_effort'])}")
-        if include_catalog:
-            lines.append(f"model_catalog_json = {json.dumps(f'{CONTAINER_HOME}/.codex/model-catalog.json')}")
-        lines.append("")
-        lines.append(f"[model_providers.{provider}]")
-        lines.append(f"name = {json.dumps(section_name)}")
-        lines.append(f"wire_api = {json.dumps(wire_api)}")
-        # Placeholder values — the wrapper overrides both via --config at
-        # runtime once $OPENAI_BASE_URL (which encodes the ephemeral proxy
-        # port) and $OPENAI_API_KEY (the proxy token) are known.
-        lines.append('base_url = "http://placeholder/"')
-        lines.append(f"experimental_bearer_token = {json.dumps(proxy_token)}")
-
-        # Pre-populate project trust for the workdir so codex doesn't
-        # prompt — and so older codex builds don't try to persist the
-        # answer back to config.toml and crash the TUI when the write
-        # is refused.
-        if workdir:
-            lines.append("")
-            lines.append(f"[projects.{json.dumps(workdir)}]")
-            lines.append('trust_level = "trusted"')
-
-        session_dir.mkdir(parents=True, exist_ok=True)
-        out = session_dir / "codex_config.toml"
-        out.write_text("\n".join(lines) + "\n")
-        out.chmod(0o600)
 
     @staticmethod
     def background_threads(

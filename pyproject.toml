@@ -26,6 +26,7 @@ dependencies = [
     "pydantic>=2",
     "urllib3>=2.0",
     "truststore>=0.10.4",
+    "tomli-w>=1.0",
 ]
 
 [project.urls]
