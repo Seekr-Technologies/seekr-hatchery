@@ -2,6 +2,7 @@
 
 import subprocess
 import sys as _sys
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -10,6 +11,7 @@ import seekr_hatchery.agents as agent
 import seekr_hatchery.constants as constants
 import seekr_hatchery.docker as docker
 import seekr_hatchery.mount as mount
+import seekr_hatchery.mount_links as mount_links
 from seekr_hatchery.models import SessionMeta
 
 
@@ -1452,165 +1454,11 @@ class TestDockerConfigFollowSymlinks:
 
 
 # ---------------------------------------------------------------------------
-# _construct_symlink_mounts()
-# ---------------------------------------------------------------------------
-
-
-class TestConstructSymlinkMounts:
-    def _scan_root(self, tmp_path):
-        """Build an isolated worktree-like directory under tmp_path."""
-        root = tmp_path / "worktree"
-        root.mkdir()
-        return root
-
-    def test_external_file_symlink_emits_mount(self, tmp_path):
-        scan = self._scan_root(tmp_path)
-        external = tmp_path / "external" / "file.txt"
-        external.parent.mkdir()
-        external.write_text("hello")
-        (scan / "link").symlink_to(external)
-
-        mounts = docker._construct_symlink_mounts(scan, [])
-
-        target = external.resolve()
-        assert mounts == [mount.BindMount(src=str(target), dst=str(target), mode="RW")]
-
-    def test_external_dir_symlink_emits_mount(self, tmp_path):
-        scan = self._scan_root(tmp_path)
-        external = tmp_path / "external" / "dir"
-        external.mkdir(parents=True)
-        (external / "child").write_text("x")
-        (scan / "linkdir").symlink_to(external)
-
-        mounts = docker._construct_symlink_mounts(scan, [])
-
-        target = external.resolve()
-        assert mount.BindMount(src=str(target), dst=str(target), mode="RW") in mounts
-
-    def test_relative_internal_symlink_skipped(self, tmp_path):
-        """Relative links staying inside scan_root resolve correctly in the
-        container and need no extra mount."""
-        scan = self._scan_root(tmp_path)
-        (scan / "inner.txt").write_text("x")
-        (scan / "link").symlink_to("inner.txt")
-
-        mounts = docker._construct_symlink_mounts(scan, [])
-
-        assert mounts == []
-
-    def test_dedupes_same_target(self, tmp_path):
-        scan = self._scan_root(tmp_path)
-        external = tmp_path / "external" / "file.txt"
-        external.parent.mkdir()
-        external.write_text("hello")
-        (scan / "a").symlink_to(external)
-        (scan / "b").symlink_to(external)
-
-        mounts = docker._construct_symlink_mounts(scan, [])
-
-        assert len(mounts) == 1
-
-    def test_already_covered_by_existing_mount(self, tmp_path):
-        scan = self._scan_root(tmp_path)
-        external_root = tmp_path / "external"
-        external_root.mkdir()
-        external_file = external_root / "file.txt"
-        external_file.write_text("x")
-        (scan / "link").symlink_to(external_file)
-
-        # external_root is already a mount; its child should be skipped
-        existing = [mount.BindMount(src=str(external_root), dst="/mounted/external", mode="RO")]
-        mounts = docker._construct_symlink_mounts(scan, existing)
-
-        assert mounts == []
-
-    def test_broken_symlink_skipped(self, tmp_path):
-        scan = self._scan_root(tmp_path)
-        (scan / "broken").symlink_to(tmp_path / "does-not-exist")
-
-        mounts = docker._construct_symlink_mounts(scan, [])
-
-        assert mounts == []
-
-    def test_system_path_target_skipped(self, tmp_path):
-        scan = self._scan_root(tmp_path)
-        # Use /usr/bin/env which exists on all Linux/macOS test runners
-        (scan / "syslink").symlink_to("/usr/bin/env")
-
-        mounts = docker._construct_symlink_mounts(scan, [])
-
-        assert mounts == []
-
-    def test_heavyweight_dir_pruned(self, tmp_path):
-        scan = self._scan_root(tmp_path)
-        external = tmp_path / "external" / "file.txt"
-        external.parent.mkdir()
-        external.write_text("x")
-        node_modules = scan / "node_modules"
-        node_modules.mkdir()
-        (node_modules / "link").symlink_to(external)
-
-        mounts = docker._construct_symlink_mounts(scan, [])
-
-        # The symlink inside node_modules is never visited.
-        assert mounts == []
-
-    def test_nested_relative_internal_symlink_skipped(self, tmp_path):
-        """Relative links climbing within scan_root (but not escaping) are fine."""
-        scan = self._scan_root(tmp_path)
-        (scan / "a").mkdir()
-        (scan / "b").mkdir()
-        (scan / "b" / "file.txt").write_text("x")
-        (scan / "a" / "link").symlink_to("../b/file.txt")
-
-        mounts = docker._construct_symlink_mounts(scan, [])
-
-        assert mounts == []
-
-    def test_nested_external_target(self, tmp_path):
-        """Symlinks discovered in nested (non-skipped) subdirs still emit mounts."""
-        scan = self._scan_root(tmp_path)
-        nested = scan / "a" / "b"
-        nested.mkdir(parents=True)
-        external = tmp_path / "external" / "data"
-        external.mkdir(parents=True)
-        (nested / "link").symlink_to(external)
-
-        mounts = docker._construct_symlink_mounts(scan, [])
-
-        target = external.resolve()
-        assert mounts == [mount.BindMount(src=str(target), dst=str(target), mode="RW")]
-
-    def test_absolute_internal_link_skipped(self, tmp_path):
-        """Absolute link pointing inside scan_root needs no extra mount: under
-        host-path mirroring, the scan_root mount makes the absolute host path
-        resolve identically inside the container."""
-        scan = self._scan_root(tmp_path)
-        (scan / "inner.txt").write_text("x")
-        (scan / "link").symlink_to(scan / "inner.txt")  # absolute target
-
-        mounts = docker._construct_symlink_mounts(scan, [])
-
-        assert mounts == []
-
-    def test_relative_external_link_emits_mount(self, tmp_path):
-        """Relative link escaping scan_root needs its target mounted at the
-        host path — under host-path mirroring the relative climb lands at the
-        same absolute path on both sides, so a target:target bind-mount
-        suffices."""
-        scan = self._scan_root(tmp_path)
-        external = tmp_path / "external"
-        external.mkdir()
-        (scan / "link").symlink_to("../external")
-
-        mounts = docker._construct_symlink_mounts(scan, [])
-
-        target = external.resolve()
-        assert mounts == [mount.BindMount(src=str(target), dst=str(target), mode="RW")]
-
-
-# ---------------------------------------------------------------------------
-# docker_mounts_no_worktree honors follow_symlinks
+# follow_symlinks sets follow_links="DEEP" on the tree mount
+#
+# The scan itself lives in mount_links now; see tests/test_mount_links.py.
+# What's tested here is only the wiring: that the config field reaches the
+# right mount, and that the resulting mounts are what a launch needs.
 # ---------------------------------------------------------------------------
 
 
@@ -1648,6 +1496,207 @@ class TestNoWorktreeFollowSymlinks:
 
         target = external.resolve()
         assert mount.BindMount(src=str(target), dst=str(target), mode="RW") in mounts
+
+    def test_enabled_declares_the_flag_on_the_tree_mount(self, tmp_path, monkeypatch):
+        """The config field is per-mount state, not a separate scan pass —
+        which is what lets one expansion cover the worktree, the docker.yaml
+        mounts and the agent config dirs alike."""
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
+        monkeypatch.setattr(mount_links, "expand_link_mounts", lambda mounts: mounts)
+
+        cfg = docker.DockerConfig(follow_symlinks=True)
+        mounts = docker.build_mounts(_no_wt_meta(cwd), self._make_backend(), tmp_path, cfg)
+
+        assert [m.follow_links for m in mounts if isinstance(m, mount.BindMount) and m.dst == str(cwd)] == [True]
+
+    def test_enabled_tolerates_backend_volume_and_tmpfs_mounts(self, tmp_path, monkeypatch):
+        """Volume and tmpfs mounts have no host path at all — reading one
+        raised AttributeError and took down every launch that had
+        follow_symlinks on, since both backends contribute volumes."""
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        external = tmp_path / "external"
+        external.mkdir()
+        (cwd / "link").symlink_to(external)
+        monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
+
+        backend = MagicMock()
+        backend.construct_mounts = MagicMock(
+            return_value=[
+                mount.VolumeMount(name="claude-dir", dst="/home/hatchery/.claude"),
+                mount.TmpfsMount(dst="/tmp/scratch"),
+            ]
+        )
+        cfg = docker.DockerConfig(follow_symlinks=True)
+        mounts = docker.build_mounts(_no_wt_meta(cwd), backend, tmp_path, cfg)
+
+        target = external.resolve()
+        assert mount.BindMount(src=str(target), dst=str(target), mode="RW") in mounts
+
+
+# ---------------------------------------------------------------------------
+# _validate_mounts
+# ---------------------------------------------------------------------------
+
+
+class TestValidateMounts:
+    """The one place mount safety is decided, for every source of mounts.
+
+    A dangerous mount can be asked for directly (``docker.yaml mounts:``) or
+    arrive from a resolved symlink, so the check runs over the finished list
+    rather than inside each producer.
+    """
+
+    def test_ordinary_mounts_pass_through_unchanged(self, tmp_path):
+        mounts = [
+            mount.BindMount(src=tmp_path, dst="/home/hatchery/x", mode="RW"),
+            mount.VolumeMount(name="v", dst="/home/hatchery/v"),
+            mount.TmpfsMount(dst="/tmp/scratch"),
+        ]
+        assert docker._validate_mounts(mounts) == mounts
+
+    @pytest.mark.parametrize("dst", ["/usr", "/usr/lib/foo", "/etc/ssl", "/proc", "/dev/shm"])
+    def test_system_destinations_dropped(self, tmp_path, dst, capsys):
+        keep = mount.BindMount(src=tmp_path, dst="/home/hatchery/keep", mode="RW")
+        blocked = mount.BindMount(src=tmp_path, dst=dst, mode="RW")
+
+        assert docker._validate_mounts([keep, blocked]) == [keep]
+        # Dropped, but never silently.
+        out = capsys.readouterr().out
+        assert dst.split("/")[1] in out
+        assert str(tmp_path) in out
+
+    def test_subpaths_of_unblocked_roots_are_kept(self, tmp_path):
+        # /tmp, /var, /home and /opt are deliberately not blocked.
+        mounts = [mount.BindMount(src=tmp_path, dst=d, mode="RW") for d in ("/tmp/x", "/var/x", "/opt/x", "/home/x")]
+        assert docker._validate_mounts(mounts) == mounts
+
+    def test_non_bind_mounts_are_never_dropped(self):
+        # Volume/tmpfs mounts have no host source to judge; /dev/shm as a
+        # tmpfs destination is the container's business, not ours.
+        mounts = [mount.TmpfsMount(dst="/dev/shm"), mount.VolumeMount(name="v", dst="/usr/local")]
+        assert docker._validate_mounts(mounts) == mounts
+
+    def test_macos_unshared_source_warns_but_is_kept(self, tmp_path, monkeypatch, capsys):
+        """A podman machine shares only /Users and /private/tmp.
+
+        Anything else binds as an empty directory with no error at all, so the
+        warning is the only signal the user ever gets.
+        """
+        monkeypatch.setattr(docker.sys, "platform", "darwin")
+        m = mount.BindMount(src=tmp_path, dst="/home/hatchery/x", mode="RW")
+
+        assert docker._validate_mounts([m]) == [m]
+        assert "may appear empty" in capsys.readouterr().out
+
+    def test_macos_warns_for_a_single_file_bind(self, tmp_path, monkeypatch, capsys):
+        """The gap this closes: a symlinked config *file*.
+
+        It needs no follow_links — `-v` resolves the source — but it can still
+        resolve somewhere the VM cannot see, and nothing used to say so.
+        """
+        target = tmp_path / "dotfiles" / "AGENTS.md"
+        target.parent.mkdir()
+        target.write_text("# global\n")
+        link = tmp_path / "home" / ".codex" / "AGENTS.md"
+        link.parent.mkdir(parents=True)
+        link.symlink_to(target)
+        monkeypatch.setattr(docker.sys, "platform", "darwin")
+
+        m = mount.BindMount(src=link, dst="/home/hatchery/.codex/AGENTS.md", mode="RW")
+        assert docker._validate_mounts([m]) == [m]
+        out = capsys.readouterr().out
+        assert str(target) in out  # names the resolved target, not just the link
+
+    def test_macos_shared_source_is_silent(self, monkeypatch, capsys):
+        monkeypatch.setattr(docker.sys, "platform", "darwin")
+        m = mount.BindMount(src=Path("/Users/someone/x"), dst="/home/hatchery/x", mode="RW")
+
+        assert docker._validate_mounts([m]) == [m]
+        assert capsys.readouterr().out == ""
+
+    def test_non_darwin_does_not_warn(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(docker.sys, "platform", "linux")
+        m = mount.BindMount(src=tmp_path, dst="/home/hatchery/x", mode="RW")
+
+        assert docker._validate_mounts([m]) == [m]
+        assert capsys.readouterr().out == ""
+
+
+class TestBuildMountsDropsExpandedSystemMounts:
+    def test_symlink_into_a_system_path_never_reaches_the_runtime(self, tmp_path, monkeypatch, capsys):
+        """The seam, end to end.
+
+        Expansion emits a mount at /usr/share because that is where the link
+        points; validation then drops it. Asserted through build_mounts so the
+        two halves stay pinned together.
+
+        An absolute link deliberately, not the relative-offset case: that one
+        only lands on a system path when the container directory is shallower
+        than the host one, which under a pytest tmp_path means the *host*
+        target has to sit outside tmp_path. Not worth writing outside the
+        fixture for — ``test_mount_links.py`` covers that arithmetic at the
+        unit level, where the target stays inside the pytest root.
+        """
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
+
+        skills = tmp_path / "host-claude" / "skills"
+        skills.mkdir(parents=True)
+        dst = "/home/hatchery/.claude/skills"
+        (skills / "sys").symlink_to("/usr/share", target_is_directory=True)
+
+        backend = MagicMock()
+        backend.construct_mounts = MagicMock(
+            return_value=[mount.BindMount(src=skills, dst=dst, mode="RW", follow_links=True)]
+        )
+        mounts = docker.build_mounts(_no_wt_meta(cwd), backend, tmp_path, docker.DockerConfig())
+
+        assert "/usr/share" not in [m.dst for m in mounts]
+        assert "shadow the sandbox" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# follow_links expansion
+# ---------------------------------------------------------------------------
+
+
+class TestBuildMountsFollowLinks:
+    def test_symlinked_skill_target_is_mounted_at_its_own_path(self, tmp_path, monkeypatch):
+        """End-to-end: a backend declaring follow_links on a directory that
+        mixes a real skill with an absolute-symlinked one keeps the directory
+        bound whole and gains one mount making the link's target exist."""
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
+
+        skills = tmp_path / "host-claude" / "skills"
+        real = skills / "agent-comm"
+        real.mkdir(parents=True)
+        (real / "SKILL.md").write_text("# real\n")
+        linked = tmp_path / "dotfiles" / "panel-review"
+        linked.mkdir(parents=True)
+        (linked / "SKILL.md").write_text("# linked\n")
+        (skills / "panel-review").symlink_to(linked)
+
+        dst = "/home/hatchery/.claude/skills"
+        backend = MagicMock()
+        backend.construct_mounts = MagicMock(
+            return_value=[mount.BindMount(src=skills, dst=dst, mode="RW", follow_links=True)]
+        )
+        mounts = docker.build_mounts(_no_wt_meta(cwd), backend, tmp_path, docker.DockerConfig())
+
+        binds = {m.dst: m.src for m in mounts if isinstance(m, mount.BindMount)}
+        # The directory is still one mount; the real skill needs nothing.
+        assert binds[dst] == skills
+        assert f"{dst}/agent-comm" not in binds
+        assert f"{dst}/panel-review" not in binds
+        # ...and the link's stored host path now exists in the container.
+        assert binds[str(linked)] == linked
+        assert not any(getattr(m, "follow_links", False) for m in mounts)
 
 
 # ---------------------------------------------------------------------------

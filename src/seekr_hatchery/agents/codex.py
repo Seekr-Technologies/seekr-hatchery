@@ -552,13 +552,32 @@ class CodexBackend(AgentBackend):
         codex config — per task, concurrently — would be a bug.
 
         Bind mounts remain for state that should cross task boundaries.
-        ``memories`` and ``skills`` are *directories*: rename inside a
-        mounted directory is an ordinary operation, so they are immune to
-        the hazard above.  ``model-catalog.json`` is bound RO — codex
-        only ever reads it (it is the target of ``model_catalog_json``),
-        so no rename lands on it.  Layered mounts on top of a volume
-        mount are resolved by the kernel: writes at the bind paths go to
-        the host, everything else goes to the volume.
+        ``memories``, ``skills`` and ``prompts`` are *directories*: rename
+        inside a mounted directory is an ordinary operation, so they are
+        immune to the hazard above.  ``AGENTS.md`` is a single-file bind and
+        so is not, but codex only reads it — nothing renames over it.
+        ``model-catalog.json`` is bound RO —
+        codex only ever reads it (it is the target of
+        ``model_catalog_json``), so no rename lands on it.  Layered mounts
+        on top of a volume mount are resolved by the kernel: writes at the
+        bind paths go to the host, everything else goes to the volume.
+
+        The user-authored paths all set ``follow_links``: they are the ones
+        people keep in a dotfiles repo and symlink into place, and container
+        ``$HOME`` does not mirror host ``$HOME``, so a symlinked entry inside
+        one would otherwise dangle in the sandbox even with its parent
+        mounted.  See :mod:`seekr_hatchery.mount_links`.  The flag only adds
+        mounts; these ones are unchanged, so the directories are still bound
+        whole and codex can create new entries in ``memories`` as before.
+
+        A mount whose own source is a symlink needs nothing from the flag —
+        ``-v`` resolves the source path, so the container gets the target's
+        inode and no link survives to dangle.  That covers ``AGENTS.md`` as a
+        symlinked file, and would equally cover a symlinked ``skills``
+        directory.  The flag is declared on it anyway, where it is inert:
+        the intent ("resolve links in the user's own config") is worth
+        stating once for the whole group rather than splitting the loop over
+        an implementation detail of the mechanism.
         """
         mounts: list[Mount] = [
             VolumeMount(
@@ -568,10 +587,17 @@ class CodexBackend(AgentBackend):
             ),
         ]
         host_codex = Path.home() / ".codex"
-        for name in ("memories", "skills"):
+        for name in ("AGENTS.md", "memories", "skills", "prompts"):
             p = host_codex / name
             if p.exists():
-                mounts.append(BindMount(src=p, dst=f"{CONTAINER_HOME}/.codex/{name}", mode="RW"))
+                mounts.append(
+                    BindMount(
+                        src=p,
+                        dst=f"{CONTAINER_HOME}/.codex/{name}",
+                        mode="RW",
+                        follow_links=True,
+                    )
+                )
 
         catalog = host_codex / "model-catalog.json"
         if catalog.exists():

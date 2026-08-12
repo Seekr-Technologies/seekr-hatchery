@@ -1,7 +1,6 @@
 """Docker sandbox helpers."""
 
 import logging
-import os
 import re
 import shutil
 import subprocess
@@ -25,6 +24,7 @@ import seekr_hatchery.agents as agent
 import seekr_hatchery.clipboard_image as clipboard_image
 import seekr_hatchery.constants as constants
 import seekr_hatchery.kubectl_proxy as _kubectl_proxy
+import seekr_hatchery.mount_links as mount_links
 import seekr_hatchery.proxy as proxy
 import seekr_hatchery.pty_proxy as pty_proxy
 import seekr_hatchery.ui as ui
@@ -35,7 +35,13 @@ from seekr_hatchery.constants import (
 from seekr_hatchery.includes import IncludeEntry, IncludeItem
 from seekr_hatchery.kubectl_proxy import KubectlConfig
 from seekr_hatchery.models import SessionMeta
-from seekr_hatchery.mount import BindMount, Mount, VolumeMount, mount_to_docker_args, wrap_cmd_for_file_mounts
+from seekr_hatchery.mount import (
+    BindMount,
+    Mount,
+    VolumeMount,
+    mount_to_docker_args,
+    wrap_cmd_for_file_mounts,
+)
 from seekr_hatchery.seeded_volumes import prepare_volume_mounts
 from seekr_hatchery.utils import open_for_editing, run
 
@@ -764,17 +770,27 @@ def _construct_docker_mounts(config: DockerConfig) -> list[Mount]:
     Expands ~ in host paths and silently skips entries whose host path does
     not exist on this machine (allows a shared config to list paths that are
     only present on some developers' machines).
+
+    ``follow_symlinks`` applies to these the same as it does to the worktree:
+    they are all directories the user asked for, so a symlink inside one
+    should resolve in the sandbox for the same reason.
     """
     result: list[Mount] = []
     for entry in config.mounts:
         parts = entry.split(":", 2)
         host = Path(parts[0]).expanduser()
-        container = parts[1]
         mode = parts[2] if len(parts) == 3 else "ro"
         if not host.exists():
             logger.debug("Custom mount host path does not exist, skipping: %s", host)
             continue
-        result.append(BindMount(src=str(host), dst=container, mode=mode.upper()))
+        result.append(
+            BindMount(
+                src=str(host),
+                dst=parts[1],
+                mode=mode.upper(),
+                follow_links=config.follow_symlinks,
+            )
+        )
     return result
 
 
@@ -799,11 +815,11 @@ def _construct_volume_mounts(config: DockerConfig) -> list[Mount]:
     ]
 
 
-# Host directories whose contents are provided by the container image or kernel.
-# Mounting host equivalents over them would shadow critical binaries/libraries
-# or replace special filesystems (/proc, /sys, /dev). /tmp, /var, /home, /opt
-# are intentionally NOT blocked — users legitimately keep data there.
-_SYMLINK_SYSTEM_BLOCKLIST: tuple[Path, ...] = (
+# Container directories whose contents are provided by the image or the kernel.
+# Mounting over them would shadow critical binaries/libraries or replace special
+# filesystems (/proc, /sys, /dev). /tmp, /var, /home, /opt are intentionally NOT
+# blocked — users legitimately keep data there.
+SYSTEM_MOUNT_BLOCKLIST: tuple[Path, ...] = (
     Path("/usr"),
     Path("/bin"),
     Path("/sbin"),
@@ -816,6 +832,10 @@ _SYMLINK_SYSTEM_BLOCKLIST: tuple[Path, ...] = (
     Path("/run"),
 )
 
+# Paths a podman machine shares with the host on macOS. A bind whose source
+# lies outside these is invisible to the VM and comes up as an empty directory.
+_MACOS_SHARED_ROOTS: tuple[Path, ...] = (Path("/Users"), Path("/private/tmp"))
+
 
 def _check_host_path_safe_for_mount(repo: Path) -> None:
     """Reject host repo paths that would shadow load-bearing container paths.
@@ -826,11 +846,14 @@ def _check_host_path_safe_for_mount(repo: Path) -> None:
     a directory the container image depends on — e.g., /usr, /etc, or the
     container's home dir itself.
 
-    The blocklist mirrors _SYMLINK_SYSTEM_BLOCKLIST plus the container HOME.
+    A hard error rather than :func:`_validate_mounts`'s drop-and-warn: there is
+    no sensible sandbox to launch if the repo itself cannot be mounted, whereas
+    dropping one stray mount still leaves a working one.
+
     Subpaths under these (e.g. /home/hatchery/myrepo) are fine — they just add
     a subdir to the container's home.
     """
-    blocklist: tuple[Path, ...] = _SYMLINK_SYSTEM_BLOCKLIST + (
+    blocklist: tuple[Path, ...] = SYSTEM_MOUNT_BLOCKLIST + (
         Path("/"),
         Path(agent.CONTAINER_HOME),
     )
@@ -843,85 +866,56 @@ def _check_host_path_safe_for_mount(repo: Path) -> None:
         sys.exit(1)
 
 
-# Directories we don't bother descending into — large, and unlikely to host
-# meaningful user-authored symlinks.
-_SYMLINK_SKIP_DIRS: frozenset[str] = frozenset(
-    {
-        ".git",
-        ".hatchery",
-        "node_modules",
-        ".venv",
-        "venv",
-        "__pycache__",
-        ".tox",
-        ".mypy_cache",
-        ".pytest_cache",
-    }
-)
+def _validate_mounts(mounts: list[Mount]) -> list[Mount]:
+    """Drop mounts that must not be performed; warn about ones that may not work.
 
+    The single place mount safety is decided, for every mount regardless of
+    where it came from. A dangerous mount can be asked for directly
+    (``docker.yaml mounts:``) or arrive from a resolved symlink
+    (:func:`seekr_hatchery.mount_links.expand_link_mounts`) — same hazard, so
+    one check, run over the finished list rather than at each source.
 
-def _construct_symlink_mounts(scan_root: Path, existing_mounts: list[Mount]) -> list[Mount]:
-    """Walk *scan_root* for symlinks; return Mounts for external targets.
+    Two rules:
 
-    For each symlink whose fully-resolved target lives outside the already-mounted
-    area (and outside the system blocklist), emit a single ``target:target:rw``
-    bind-mount so the symlink's stored host path resolves identically inside the
-    container. Deduplicates by unique resolved target. Symlinks whose target is
-    inside *scan_root* are skipped — the scan_root mount already covers them
-    (under host-path mirroring, both absolute and relative internal links
-    resolve correctly without any extra wiring).
+    - A destination inside :data:`SYSTEM_MOUNT_BLOCKLIST` is dropped. It would
+      shadow the image's own binaries or a special filesystem.
+    - On macOS, a source outside the paths a podman machine shares is kept but
+      warned about: the mount succeeds and presents as an empty directory, with
+      no error anywhere, which is otherwise near-impossible to diagnose.
 
-    Limitation: chains that traverse multiple external symlink files only have
-    their final target mounted, not intermediate hops — those chains may still
-    dangle inside the container.
+    Dropping rather than failing the launch is deliberate. Most offenders come
+    from a symlink the user never thought about, and killing the sandbox over a
+    stray dotfile link would be hostile — but it is warned about loudly, never
+    silent.
     """
-    scan_root_resolved = scan_root.resolve()
-
-    existing: set[Path] = set()
-    for m in existing_mounts:
-        if m.src is None:
-            continue
-        host = Path(str(m.src)).expanduser()
-        try:
-            existing.add(host.resolve())
-        except OSError:
+    result: list[Mount] = []
+    for m in mounts:
+        if not isinstance(m, BindMount):
+            result.append(m)
             continue
 
-    def _on_err(exc: OSError) -> None:
-        logger.debug("follow_symlinks: walk error: %s", exc)
+        dst = Path(m.dst)
+        blocked = next((sp for sp in SYSTEM_MOUNT_BLOCKLIST if dst == sp or sp in dst.parents), None)
+        if blocked is not None:
+            ui.warn(
+                f"Skipping mount of {m.src} at {m.dst}: {blocked} is provided by the container "
+                f"image, and mounting over it would shadow the sandbox's own files."
+            )
+            continue
 
-    seen: set[Path] = set()
-    mounts: list[Mount] = []
+        if sys.platform == "darwin":
+            src = m.src.expanduser()
+            resolved = src.resolve()
+            if not any(resolved == r or r in resolved.parents for r in _MACOS_SHARED_ROOTS):
+                shared = ", ".join(str(r) for r in _MACOS_SHARED_ROOTS)
+                ui.warn(
+                    f"Mounting {src} at {m.dst}, but it resolves to {resolved}, outside the paths "
+                    f"a podman machine shares with the host ({shared}) — it may appear empty "
+                    f"inside the sandbox."
+                )
 
-    for dirpath, dirnames, filenames in os.walk(scan_root, followlinks=False, onerror=_on_err):
-        dirnames[:] = [d for d in dirnames if d not in _SYMLINK_SKIP_DIRS]
-        for entry in list(dirnames) + filenames:
-            p = Path(dirpath) / entry
-            if not p.is_symlink():
-                continue
-            try:
-                target = p.resolve(strict=True)
-            except (OSError, RuntimeError):
-                logger.debug("follow_symlinks: skipping unresolvable %s", p)
-                continue
-            target_in_scan = target == scan_root_resolved or scan_root_resolved in target.parents
-            if target_in_scan:
-                # Internal target — covered by the scan_root mount.
-                continue
-            if target in seen:
-                continue
-            if any(target == hp or hp in target.parents for hp in existing):
-                continue
-            if any(target == sp or sp in target.parents for sp in _SYMLINK_SYSTEM_BLOCKLIST):
-                logger.debug("follow_symlinks: skipping system-path target %s", target)
-                continue
-            if any(target in hp.parents for hp in existing):
-                logger.debug("follow_symlinks: skipping parent-of-existing target %s", target)
-                continue
-            seen.add(target)
-            mounts.append(BindMount(src=str(target), dst=str(target), mode="RW"))
-
-    return mounts
+        result.append(m)
+    return result
 
 
 def _git_worktree_mounts(repo: Path, name: str, container_root: str) -> list[Mount]:
@@ -993,18 +987,27 @@ def build_mounts(
         can corrupt git history. Fixing requires staging+copy-back, which
         kills real-time host visibility of commits.
     """
+    # follow_symlinks is a per-mount property, declared on the trees it applies
+    # to — the worktree here, and the docker.yaml mounts in
+    # _construct_docker_mounts. expand_link_mounts acts on it below.
+    tree_links: bool = config.follow_symlinks
+
     mounts: list[Mount]
     if meta.no_worktree:
-        cwd = meta.worktree_path
-        mounts = [BindMount(src=str(meta.worktree), dst=str(meta.worktree_path), mode="RW")]
+        mounts = [
+            BindMount(
+                src=str(meta.worktree),
+                dst=str(meta.worktree_path),
+                mode="RW",
+                follow_links=tree_links,
+            )
+        ]
         mounts.extend(_default_home_mounts())
         mounts.extend(backend.construct_mounts(session_dir))
         mounts.extend(_construct_docker_mounts(config))
         mounts.extend(_construct_volume_mounts(config))
         if config.clipboard_images:
             mounts.append(_clipboard_image_mount(session_dir))
-        if config.follow_symlinks:
-            mounts.extend(_construct_symlink_mounts(cwd, mounts))
     else:
         container_root = str(meta.repo_path)
         container_worktree = str(meta.worktree_path)
@@ -1016,15 +1019,13 @@ def build_mounts(
         for host_file, git_filename in git_sentinel_files or []:
             mounts.append(BindMount(src=str(host_file), dst=f"{container_root}/.git/{git_filename}", mode="RW"))
 
-        mounts.append(BindMount(src=str(meta.worktree), dst=container_worktree, mode="RW"))
+        mounts.append(BindMount(src=str(meta.worktree), dst=container_worktree, mode="RW", follow_links=tree_links))
         mounts.extend(_default_home_mounts())
         mounts.extend(backend.construct_mounts(session_dir))
         mounts.extend(_construct_docker_mounts(config))
         mounts.extend(_construct_volume_mounts(config))
         if config.clipboard_images:
             mounts.append(_clipboard_image_mount(session_dir))
-        if config.follow_symlinks:
-            mounts.extend(_construct_symlink_mounts(meta.worktree_path, mounts))
 
     # In no-commit mode, layer two mounts: the whole store read-only (sibling
     # task records + Dockerfile/docker.yaml are readable but immutable) and the
@@ -1049,7 +1050,13 @@ def build_mounts(
 
     if include_entries:
         mounts.extend(_docker_mounts_includes(include_entries, meta.name, session_dir, no_worktree=meta.no_worktree))
-    return mounts
+
+    # Expand then validate, last and only here: every branch above and every
+    # mount source (worktree, backend, docker.yaml, includes) is covered by the
+    # one pair of calls. Both need the complete list — expansion to tell which
+    # container paths another mount already provides, validation because a
+    # dangerous mount is dangerous whichever source produced it.
+    return _validate_mounts(mount_links.expand_link_mounts(mounts))
 
 
 def _docker_mounts_includes(
@@ -1547,6 +1554,7 @@ def launch_sandbox_shell(
     mounts.extend(_default_home_mounts())
     mounts.extend(_construct_docker_mounts(config))
     mounts.extend(_construct_volume_mounts(config))
+    mounts = _validate_mounts(mount_links.expand_link_mounts(mounts))
 
     # Use a short-lived session dir under ~/.hatchery/ for the kubeconfig mount.
     # tempfile.TemporaryDirectory() is not reliable on macOS because Python

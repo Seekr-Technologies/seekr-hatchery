@@ -138,6 +138,20 @@ Mount format: `"host_path:container_path[:mode]"` — identical to Docker's own 
 
 The file is tracked in git so every developer on the project gets the same mount configuration. Changes take effect on the next `new` or `resume`.
 
+### Symlinked directories
+
+A symlink stores a *path*, and that path only means the same thing inside the container when the mount's destination equals its source. Hatchery mirrors repo paths host→container precisely so that holds for your worktree. It does not hold under `$HOME`: the container's is `/home/hatchery`. So if you keep your agent config in a dotfiles repo — `~/.codex/skills/my-skill` symlinked to `~/.dotfiles/codex/skills/my-skill` — the link dangles in the sandbox and the skill is invisible to the agent, even though `skills/` itself is mounted.
+
+The fix is one rule: **mount the link's target at whatever path the link resolves to as seen from inside the container.** The directory stays bound whole and nothing is mounted at the link's own path, so the link stays a link. Both relative and absolute links work, which matters because tools like GNU stow create relative links by default.
+
+Agent config directories (`~/.codex/skills`, `memories`, `prompts`) do this always. For the worktree and your own `mounts:` entries it is opt-in, since it costs a walk of the tree per launch: set `follow_symlinks: true` in `.hatchery/docker.yaml`.
+
+Three things worth knowing:
+
+- **A mount whose own source is a symlink needs none of this.** `-v` resolves the source path, so a symlinked `~/.codex/AGENTS.md` — or a symlinked `skills/` directory — already lands on the target's inode. Only links *inside* a mounted directory survive to dangle.
+- Your dotfiles paths become visible inside the sandbox at their real host paths, since that is where an absolute link expects them.
+- Links are followed at any depth (pruning `.git`, `node_modules` and similar), so a real skill directory containing a symlinked `references/` works too.
+
 ### Persistent cache volumes (`docker.yaml`)
 
 For package-manager caches (uv, pip, npm, …) a host bind-mount routes every cache read/write through virtiofs on macOS, which is slow for many-small-files patterns. Use a named docker/podman volume instead — it lives inside the container engine's storage, persists across `--rm` containers, and is shared by every sandbox that mounts it:
@@ -191,9 +205,11 @@ rename onto a single-file bind mount fails with `EBUSY` because the
 target is a kernel mount point. That is what produced `failed to persist
 config at ~/.codex/config.toml`.
 
-`memories/` and `skills/` *are* bind-mounted RW, so those cross task
-boundaries and stay in sync with the host; `model-catalog.json` is
-mounted read-only.
+`AGENTS.md`, `memories/`, `skills/` and `prompts/` *are* bind-mounted RW,
+so those cross task boundaries and stay in sync with the host;
+`model-catalog.json` is mounted read-only. The three directories resolve
+symlinked entries — see [Symlinked
+directories](#symlinked-directories).
 
 ### Custom Codex providers
 

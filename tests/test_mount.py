@@ -30,6 +30,15 @@ class TestBindMount:
         m = BindMount(src=Path("/h"), dst="/c", mode="RO")
         assert m.mode == "RO"
 
+    def test_follow_links_defaults_off(self):
+        assert BindMount(src=Path("/h"), dst="/c").follow_links is False
+
+    def test_follow_links_does_not_change_docker_args(self):
+        """The flag is consumed by mount_links.expand_link_mounts, not by
+        serialisation: an unexpanded mount still emits a valid bind flag."""
+        m = BindMount(src=Path("/h"), dst="/c", follow_links=True)
+        assert mount_to_docker_args(m) == ["-v", "/h:/c:rw"]
+
     def test_dst_required(self):
         with pytest.raises(ValidationError):
             BindMount(src=Path("/h"))  # type: ignore[call-arg]

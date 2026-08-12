@@ -7,6 +7,7 @@ schema_version: "1"
 #   ~ is expanded to your home directory.
 #   mode is optional and defaults to "ro" (read-only).
 #   Invalid entries are a hard error. Paths that do not exist are silently skipped.
+#   follow_symlinks (below) applies to these as well as to the worktree.
 mounts:
   # Uncomment for k8s access (oci required)
   # - "~/.kube:/home/hatchery/.kube:ro"
@@ -57,20 +58,27 @@ dind: false
 # captures and forwards clipboard images pasted from the terminal (Ctrl+V / Cmd+V).
 # clipboard_images: true
 
-# When true, hatchery scans the worktree (or cwd in --no-worktree mode) on
-# launch, finds symlinks whose targets sit outside the mounted area, and
-# bind-mounts each target at the same absolute host path (read-write) so the
-# symlink resolves inside the container. Targets already covered by an
-# existing mount or living under system paths (/usr, /bin, /lib, /etc, ...)
-# are skipped. Walks skip .git, node_modules, .venv, and similar heavyweight
-# directories to keep startup fast on large repos.
+# When true, symlinks inside the directories you mount are made to resolve
+# inside the container: the worktree (or cwd in --no-worktree mode) and every
+# entry in `mounts:` above. Each link's target is bind-mounted (read-write) at
+# whatever path the link resolves to as seen from inside the container.
 #
-# Each symlink must be one of:
-#   - relative,  target inside  the mounted directory  (works as-is)
-#   - absolute,  target outside the mounted directory  (target gets bind-mounted)
-# The other two shapes (absolute-internal, relative-external) don't survive
-# the host→container path remap and will cause launch to fail with an error
-# naming the offending link.
+# Links are found at any depth, skipping .git, node_modules, .venv and similar
+# to keep startup fast on large repos. Links needing nothing are skipped:
+# those pointing inside the mounted tree itself, or into any other mounted
+# area. Targets landing on system paths (/usr, /bin, /lib, /etc, ...) are
+# dropped with a warning, since mounting there would shadow the image.
+#
+# A mount whose own source is a symlink needs nothing from this flag — `-v`
+# resolves it — so this is only about links found *inside* a mounted tree.
+#
+# Both relative and absolute links work. For a repo they happen to work out
+# identically, because the tree is mounted at its own host path. Agent config
+# directories are the interesting case: the container's home is /home/hatchery,
+# so a relative link there resolves somewhere quite different than on the host.
+# Those (~/.codex/skills, ~/.codex/prompts, ...) always resolve their links and
+# do not depend on this flag. Same mechanism for all of them; see
+# seekr_hatchery/mount_links.py.
 follow_symlinks: false
 
 # cap_add: extra Linux capabilities to grant inside the DinD container.

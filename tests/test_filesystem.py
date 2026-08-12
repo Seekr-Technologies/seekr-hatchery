@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 import seekr_hatchery.agents as agent
 import seekr_hatchery.constants as constants
@@ -435,6 +436,34 @@ class TestConstructDockerMounts:
         config = docker.DockerConfig(mounts=[f"{host_dir}:/container:rw"])
         result = docker._construct_docker_mounts(config)
         assert result == [mount.BindMount(src=str(host_dir), dst="/container", mode="RW")]
+
+    def test_follow_symlinks_off_declares_no_follow_links(self, tmp_path):
+        host_dir = tmp_path / "mydir"
+        host_dir.mkdir()
+        config = docker.DockerConfig(mounts=[f"{host_dir}:/container"])
+        assert docker._construct_docker_mounts(config)[0].follow_links is False
+
+    def test_follow_symlinks_applies_to_user_mounts(self, tmp_path):
+        """The global flag covers extra mounts, not just the worktree.
+
+        They are all directories the user asked for, so a symlink inside one
+        should resolve for the same reason it does inside the worktree.
+        """
+        host_dir = tmp_path / "mydir"
+        host_dir.mkdir()
+        config = docker.DockerConfig(mounts=[f"{host_dir}:/container:rw"], follow_symlinks=True)
+        assert docker._construct_docker_mounts(config) == [
+            mount.BindMount(src=str(host_dir), dst="/container", mode="RW", follow_links=True),
+        ]
+
+    def test_dict_form_rejected(self, tmp_path):
+        # Only the string form exists; follow_links comes from the global flag.
+        with pytest.raises(ValidationError):
+            docker.DockerConfig(mounts=[{"host": str(tmp_path), "container": "/c"}])
+
+    def test_non_string_entry_rejected(self):
+        with pytest.raises(ValidationError):
+            docker.DockerConfig(mounts=[42])
 
 
 # ---------------------------------------------------------------------------
