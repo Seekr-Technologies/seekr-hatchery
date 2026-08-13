@@ -50,11 +50,14 @@ import threading
 from typing import Any
 from urllib.parse import parse_qs
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
 
 _CHUNK_SIZE = 8192
+
+# Container-side context name used when the host context is not pinned by name.
+DEFAULT_CONTEXT_NAME = "hatchery-proxy"
 
 # Hop-by-hop headers that must not be forwarded between proxy hops.
 _HOP_BY_HOP: frozenset[str] = frozenset(
@@ -130,16 +133,70 @@ class KubectlRBACRule(BaseModel):
         return verbs
 
 
+class KubectlContext(BaseModel):
+    """One cluster the agent can reach, with the rules that apply to it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    context: str | None = None
+    """Host kubeconfig context to proxy.  ``None`` uses the host's active context."""
+
+    rules: list[KubectlRBACRule] = []
+    """Allowlist rules for this context.  Empty list means deny everything."""
+
+    @property
+    def display_name(self) -> str:
+        """Container-side context name.
+
+        Host context names are reused verbatim so the agent can switch clusters
+        with the ordinary ``kubectl --context <name>``.  An unpinned context has
+        no name to reuse, so it falls back to the historical ``hatchery-proxy``.
+        """
+        return self.context or DEFAULT_CONTEXT_NAME
+
+
 class KubectlConfig(BaseModel):
     """Top-level kubectl proxy configuration loaded from docker.yaml."""
 
+    model_config = ConfigDict(extra="forbid")
+
+    contexts: list[KubectlContext] = []
+    """Clusters the agent can reach, each with its own rules.  The first entry
+    becomes the container's ``current-context``.  Mutually exclusive with the
+    single-context ``context`` / ``rules`` shorthand below."""
+
     context: str | None = None
-    """Kubeconfig context to use.  Defaults to the host's active context.
-    Set this when you have multiple contexts and want to pin which cluster
-    the agent can reach (e.g. ``context: my-dev-cluster``)."""
+    """Single-context shorthand: kubeconfig context to use.  Defaults to the
+    host's active context.  Set this when you have multiple contexts and want to
+    pin which cluster the agent can reach (e.g. ``context: my-dev-cluster``)."""
 
     rules: list[KubectlRBACRule] = []
-    """Allowlist rules.  Empty list means deny everything (fail-closed)."""
+    """Single-context shorthand: allowlist rules.  Empty list means deny
+    everything (fail-closed)."""
+
+    @model_validator(mode="after")
+    def _check_exclusive_forms(self) -> KubectlConfig:
+        if self.contexts and (self.context is not None or self.rules):
+            raise ValueError(
+                "kubernetes: 'contexts' cannot be combined with the single-context "
+                "'context'/'rules' shorthand — move those under a 'contexts' entry"
+            )
+        names = [c.display_name for c in self.contexts]
+        duplicates = sorted({n for n in names if names.count(n) > 1})
+        if duplicates:
+            raise ValueError(f"kubernetes: duplicate context name(s) {duplicates} in 'contexts'")
+        return self
+
+    def resolved_contexts(self) -> list[KubectlContext]:
+        """Return the configured contexts, normalizing the shorthand form.
+
+        Always returns at least one entry: with neither ``contexts`` nor the
+        shorthand set, that entry is the host's active context with no rules
+        (i.e. deny everything, matching the fail-closed default).
+        """
+        if self.contexts:
+            return list(self.contexts)
+        return [KubectlContext(context=self.context, rules=self.rules)]
 
 
 # ── URL parsing ───────────────────────────────────────────────────────────────
