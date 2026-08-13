@@ -10,16 +10,21 @@ import tempfile
 import threading
 
 import pytest
+import yaml
+from pydantic import ValidationError
 
 from seekr_hatchery.kubectl_proxy import (
     KubectlConfig,
+    KubectlContext,
     KubectlRBACRule,
     _generate_self_signed_cert,
     check_rbac,
     http_method_to_k8s_verbs,
     make_kubeconfig,
     parse_k8s_url,
+    start_context_proxies,
     start_rbac_proxy,
+    stop_context_proxies,
     stop_rbac_proxy,
 )
 
@@ -293,6 +298,64 @@ class TestKubectlConfig:
             KubectlRBACRule(verbs=["get", "list", "watch", "create", "update", "patch", "delete"], resources=["pods"])
         assert not any("unrecognized" in r.message for r in caplog.records)
 
+    def test_unknown_key_rejected(self) -> None:
+        """A typo like 'contexts' → 'context s' must not be silently ignored."""
+        with pytest.raises(ValidationError, match="rulez"):
+            KubectlConfig.model_validate({"rulez": []})
+
+
+# ── Multi-context configuration ───────────────────────────────────────────────
+
+
+class TestResolvedContexts:
+    def test_shorthand_becomes_single_context(self) -> None:
+        cfg = KubectlConfig(
+            context="my-dev-cluster",
+            rules=[KubectlRBACRule(verbs=["get"], resources=["pods"])],
+        )
+        contexts = cfg.resolved_contexts()
+        assert len(contexts) == 1
+        assert contexts[0].context == "my-dev-cluster"
+        assert contexts[0].display_name == "my-dev-cluster"
+        assert contexts[0].rules[0].verbs == ["get"]
+
+    def test_empty_config_yields_one_unpinned_context(self) -> None:
+        contexts = KubectlConfig().resolved_contexts()
+        assert len(contexts) == 1
+        assert contexts[0].context is None
+        assert contexts[0].display_name == "hatchery-proxy"
+        assert contexts[0].rules == []  # fail-closed
+
+    def test_list_form_preserves_order_and_per_context_rules(self) -> None:
+        cfg = KubectlConfig.model_validate(
+            {
+                "contexts": [
+                    {"context": "dev", "rules": [{"verbs": ["get", "delete"], "resources": ["pods"]}]},
+                    {"context": "prd", "rules": [{"verbs": ["get"], "resources": ["pods"]}]},
+                ]
+            }
+        )
+        contexts = cfg.resolved_contexts()
+        assert [c.display_name for c in contexts] == ["dev", "prd"]
+        assert contexts[0].rules[0].verbs == ["get", "delete"]
+        assert contexts[1].rules[0].verbs == ["get"]
+
+    @pytest.mark.parametrize(
+        "extra",
+        [{"context": "other"}, {"rules": [{"verbs": ["get"], "resources": ["pods"]}]}],
+    )
+    def test_contexts_cannot_be_mixed_with_shorthand(self, extra: dict) -> None:
+        with pytest.raises(ValidationError, match="cannot be combined"):
+            KubectlConfig.model_validate({"contexts": [{"context": "dev"}], **extra})
+
+    def test_duplicate_context_names_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="duplicate context name"):
+            KubectlConfig.model_validate({"contexts": [{"context": "dev"}, {"context": "dev"}]})
+
+    def test_unknown_key_in_context_entry_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="rulez"):
+            KubectlConfig.model_validate({"contexts": [{"context": "dev", "rulez": []}]})
+
 
 # ── make_kubeconfig ───────────────────────────────────────────────────────────
 
@@ -302,30 +365,64 @@ _DUMMY_CERT = b"-----BEGIN CERTIFICATE-----\nZmFrZWNlcnQ=\n-----END CERTIFICATE-
 
 class TestMakeKubeconfig:
     def test_contains_rbac_port(self) -> None:
-        kc = make_kubeconfig(12345, "my-token", _DUMMY_CERT)
+        kc = make_kubeconfig([("hatchery-proxy", 12345)], "my-token", _DUMMY_CERT)
         assert "12345" in kc
 
     def test_contains_token(self) -> None:
-        kc = make_kubeconfig(12345, "my-secret-token", _DUMMY_CERT)
+        kc = make_kubeconfig([("hatchery-proxy", 12345)], "my-secret-token", _DUMMY_CERT)
         assert "my-secret-token" in kc
 
     def test_valid_yaml(self) -> None:
-        import yaml
-
-        kc = make_kubeconfig(8080, "tok", _DUMMY_CERT)
+        kc = make_kubeconfig([("hatchery-proxy", 8080)], "tok", _DUMMY_CERT)
         parsed = yaml.safe_load(kc)
         assert parsed["kind"] == "Config"
         assert parsed["current-context"] == "hatchery-proxy"
 
     def test_uses_https(self) -> None:
-        kc = make_kubeconfig(8080, "tok", _DUMMY_CERT)
+        kc = make_kubeconfig([("hatchery-proxy", 8080)], "tok", _DUMMY_CERT)
         assert "https://" in kc
 
     def test_embeds_ca_cert(self) -> None:
         import base64
 
-        kc = make_kubeconfig(8080, "tok", _DUMMY_CERT)
+        kc = make_kubeconfig([("hatchery-proxy", 8080)], "tok", _DUMMY_CERT)
         assert base64.b64encode(_DUMMY_CERT).decode() in kc
+
+    def test_requires_at_least_one_context(self) -> None:
+        with pytest.raises(ValueError, match="at least one context"):
+            make_kubeconfig([], "tok", _DUMMY_CERT)
+
+    def test_single_named_context_keeps_hatchery_proxy_alias(self) -> None:
+        """Anything relying on the historical fixed context name keeps working."""
+        parsed = yaml.safe_load(make_kubeconfig([("dev", 8080)], "tok", _DUMMY_CERT))
+        by_name = {c["name"]: c for c in parsed["contexts"]}
+        assert set(by_name) == {"dev", "hatchery-proxy"}
+        assert by_name["hatchery-proxy"]["context"]["cluster"] == "dev"
+        assert parsed["current-context"] == "dev"
+        assert len(parsed["clusters"]) == 1
+
+    def test_multiple_contexts(self) -> None:
+        parsed = yaml.safe_load(make_kubeconfig([("dev", 1111), ("prd", 2222)], "tok", _DUMMY_CERT))
+
+        # First entry is the default; no alias once the agent has a real choice.
+        assert parsed["current-context"] == "dev"
+        assert [c["name"] for c in parsed["contexts"]] == ["dev", "prd"]
+
+        clusters = {c["name"]: c["cluster"] for c in parsed["clusters"]}
+        assert clusters["dev"]["server"] == "https://host.docker.internal:1111"
+        assert clusters["prd"]["server"] == "https://host.docker.internal:2222"
+
+        # One shared CA and one shared user across contexts.
+        assert clusters["dev"]["certificate-authority-data"] == clusters["prd"]["certificate-authority-data"]
+        assert len(parsed["users"]) == 1
+        assert {c["context"]["user"] for c in parsed["contexts"]} == {parsed["users"][0]["name"]}
+
+    def test_context_name_needing_yaml_quoting(self) -> None:
+        """Real EKS context names contain ':' and '/' — they must survive a round trip."""
+        eks = "arn:aws:eks:us-west-2:123456789012:cluster/prd"
+        parsed = yaml.safe_load(make_kubeconfig([(eks, 1111)], "tok", _DUMMY_CERT))
+        assert parsed["current-context"] == eks
+        assert parsed["clusters"][0]["name"] == eks
 
 
 # ── Integration: RBAC proxy server ───────────────────────────────────────────
@@ -633,3 +730,145 @@ class TestCertGeneration:
         cert = x509.load_pem_x509_certificate(cert_pem)
         delta = cert.not_valid_after_utc - cert.not_valid_before_utc
         assert delta >= datetime.timedelta(days=365)
+
+
+# ── Multi-context orchestration ───────────────────────────────────────────────
+
+
+class _FakeProc:
+    """Stand-in for the ``kubectl proxy`` Popen object."""
+
+    def __init__(self, context: str | None) -> None:
+        self.context = context
+        self.terminated = False
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def wait(self, timeout: float | None = None) -> int:
+        return 0
+
+
+@pytest.fixture()
+def fake_kubectl_proxies(
+    monkeypatch: pytest.MonkeyPatch,
+    mock_kubectl_proxy: tuple[http.server.HTTPServer, int],
+) -> list[_FakeProc]:
+    """Patch out the real ``kubectl proxy`` subprocess.
+
+    Every context resolves to the shared mock kubectl proxy, except contexts
+    named ``broken-*``, which raise as an unreachable cluster would.  Returns the
+    list of fake procs that were handed out.
+    """
+    _, kube_port = mock_kubectl_proxy
+    procs: list[_FakeProc] = []
+
+    def fake_start(context: str | None = None, timeout: float = 10.0) -> tuple[_FakeProc, int]:
+        if context and context.startswith("broken"):
+            raise RuntimeError(
+                f"kubectl proxy exited unexpectedly.  stderr: no context exists with the name: {context}"
+            )
+        proc = _FakeProc(context)
+        procs.append(proc)
+        return proc, kube_port
+
+    monkeypatch.setattr("seekr_hatchery.kubectl_proxy._require_kubectl", lambda: None)
+    monkeypatch.setattr("seekr_hatchery.kubectl_proxy.start_kubectl_proxy_proc", fake_start)
+    return procs
+
+
+class TestStartContextProxies:
+    def test_starts_one_proxy_per_context_in_order(self, fake_kubectl_proxies: list[_FakeProc]) -> None:
+        contexts = [KubectlContext(context="dev"), KubectlContext(context="prd")]
+        started, failures, ca_cert_pem = start_context_proxies(contexts, "tok")
+        try:
+            assert failures == []
+            assert [p.name for p in started] == ["dev", "prd"]
+            assert [p.kubectl_proc.context for p in started] == ["dev", "prd"]  # type: ignore[attr-defined]
+            # Distinct listeners, but one cert so the kubeconfig needs one CA.
+            assert len({p.rbac_port for p in started}) == 2
+            assert ca_cert_pem.startswith(b"-----BEGIN CERTIFICATE-----")
+        finally:
+            stop_context_proxies(started)
+
+    def test_failed_context_is_reported_not_raised(self, fake_kubectl_proxies: list[_FakeProc]) -> None:
+        contexts = [
+            KubectlContext(context="dev"),
+            KubectlContext(context="broken-prd"),
+            KubectlContext(context="stg"),
+        ]
+        started, failures, _ = start_context_proxies(contexts, "tok")
+        try:
+            assert [p.name for p in started] == ["dev", "stg"]
+            assert len(failures) == 1
+            name, err = failures[0]
+            assert name == "broken-prd"
+            assert "no context exists" in err
+        finally:
+            stop_context_proxies(started)
+
+    def test_all_contexts_failing_yields_empty_started(self, fake_kubectl_proxies: list[_FakeProc]) -> None:
+        started, failures, _ = start_context_proxies([KubectlContext(context="broken-dev")], "tok")
+        assert started == []
+        assert len(failures) == 1
+
+    def test_missing_kubectl_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("shutil.which", lambda _: None)
+        with pytest.raises(RuntimeError, match="kubectl not found"):
+            start_context_proxies([KubectlContext(context="dev")], "tok")
+
+    def test_stop_terminates_every_proxy(self, fake_kubectl_proxies: list[_FakeProc]) -> None:
+        started, _, _ = start_context_proxies([KubectlContext(context="dev"), KubectlContext(context="prd")], "tok")
+        stop_context_proxies(started)
+        assert all(p.kubectl_proc.terminated for p in started)  # type: ignore[attr-defined]
+        # Sockets are closed, so nothing is listening on those ports any more.
+        for p in started:
+            with pytest.raises(OSError):
+                _request(p.rbac_port, "/api/v1/namespaces/default/pods", token="tok")
+
+    def test_each_context_enforces_its_own_rules(self, fake_kubectl_proxies: list[_FakeProc]) -> None:
+        """The point of per-context rules: read-write dev, read-only prd."""
+        contexts = [
+            KubectlContext(
+                context="dev",
+                rules=[KubectlRBACRule(verbs=["get", "delete"], resources=["pods"], namespaces=["*"])],
+            ),
+            KubectlContext(
+                context="prd",
+                rules=[KubectlRBACRule(verbs=["get"], resources=["pods"], namespaces=["*"])],
+            ),
+        ]
+        started, failures, ca_cert_pem = start_context_proxies(contexts, "tok")
+        try:
+            assert failures == []
+            dev, prd = started
+            path = "/api/v1/namespaces/default/pods/my-pod"
+
+            # Both may read.
+            for p in (dev, prd):
+                status, _ = _request(p.rbac_port, path, token="tok", cert_pem=ca_cert_pem)
+                assert status == 200
+
+            # Only dev may delete.
+            status, _ = _request(dev.rbac_port, path, method="DELETE", token="tok", cert_pem=ca_cert_pem)
+            assert status == 200
+            status, _ = _request(prd.rbac_port, path, method="DELETE", token="tok", cert_pem=ca_cert_pem)
+            assert status == 403
+        finally:
+            stop_context_proxies(started)
+
+    def test_shared_cert_is_trusted_by_every_context(self, fake_kubectl_proxies: list[_FakeProc]) -> None:
+        contexts = [
+            KubectlContext(context=name, rules=[KubectlRBACRule(verbs=["get"], resources=["pods"])])
+            for name in ("dev", "prd")
+        ]
+        started, _, ca_cert_pem = start_context_proxies(contexts, "tok")
+        try:
+            for p in started:
+                # Verification is on (cert_pem given) — a per-proxy cert would fail here.
+                status, _ = _request(
+                    p.rbac_port, "/api/v1/namespaces/default/pods/x", token="tok", cert_pem=ca_cert_pem
+                )
+                assert status == 200
+        finally:
+            stop_context_proxies(started)

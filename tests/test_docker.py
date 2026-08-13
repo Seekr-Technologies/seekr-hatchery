@@ -5,11 +5,14 @@ import sys as _sys
 from unittest.mock import MagicMock
 
 import pytest
+import yaml
 
 import seekr_hatchery.agents as agent
 import seekr_hatchery.constants as constants
 import seekr_hatchery.docker as docker
+import seekr_hatchery.kubectl_proxy as kubectl_proxy
 import seekr_hatchery.mount as mount
+from seekr_hatchery.kubectl_proxy import KubectlConfig, KubectlContext
 from seekr_hatchery.models import SessionMeta
 
 
@@ -1754,3 +1757,66 @@ class TestMaybeApiServerErrorPath:
         captured = capsys.readouterr()
         # ui.error writes to stderr by default.
         assert "clean message for the user" in (captured.err + captured.out)
+
+
+class TestDockerFeaturesKubectl:
+    """The startup banner must name the clusters once the agent can choose."""
+
+    def test_single_context_is_unadorned(self):
+        cfg = docker.DockerConfig(kubernetes=KubectlConfig(context="dev"))
+        assert docker.docker_features(cfg) == ["kubectl"]
+
+    def test_multiple_contexts_are_listed(self):
+        cfg = docker.DockerConfig(
+            kubernetes=KubectlConfig(contexts=[KubectlContext(context="dev"), KubectlContext(context="prd")])
+        )
+        assert docker.docker_features(cfg) == ["kubectl (dev, prd)"]
+
+    def test_no_kubernetes_section(self):
+        assert docker.docker_features(docker.DockerConfig()) == []
+
+
+class TestKubectlContextStartupFailures:
+    """A context that can't start is warned about and dropped; the session
+    continues on whatever came up, and only an all-fail is fatal.
+    """
+
+    @staticmethod
+    def _fake_start(started_names, failures):
+        def _start(contexts, token):
+            proxies = [
+                kubectl_proxy.ContextProxy(name=n, kubectl_proc=MagicMock(), rbac_server=MagicMock(), rbac_port=i + 1)
+                for i, n in enumerate(started_names)
+            ]
+            return proxies, failures, b"CERT"
+
+        return _start
+
+    def test_partial_failure_warns_and_continues(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.setattr(
+            kubectl_proxy, "start_context_proxies", self._fake_start(["dev"], [("prd", "expired creds")])
+        )
+        monkeypatch.setattr(kubectl_proxy, "stop_context_proxies", lambda proxies: None)
+        cfg = docker.DockerConfig(
+            kubernetes=KubectlConfig(contexts=[KubectlContext(context="dev"), KubectlContext(context="prd")])
+        )
+
+        with docker._kubectl_context(cfg, tmp_path, "tok") as mounts:
+            assert len(mounts) == 1
+            kubeconfig = yaml.safe_load((tmp_path / "kubeconfig").read_text())
+
+        assert [c["name"] for c in kubeconfig["clusters"]] == ["dev"]
+        out = capsys.readouterr()
+        assert "prd" in (out.err + out.out)
+        assert "expired creds" in (out.err + out.out)
+
+    def test_all_contexts_failing_exits_cleanly(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.setattr(kubectl_proxy, "start_context_proxies", self._fake_start([], [("dev", "unreachable")]))
+        cfg = docker.DockerConfig(kubernetes=KubectlConfig(contexts=[KubectlContext(context="dev")]))
+
+        with pytest.raises(SystemExit) as excinfo:
+            with docker._kubectl_context(cfg, tmp_path, "tok"):
+                pass
+        assert excinfo.value.code == 1
+        out = capsys.readouterr()
+        assert "no configured context could be started" in (out.err + out.out)
