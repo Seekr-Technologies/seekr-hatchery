@@ -543,8 +543,13 @@ def _kubectl_context(
     """Context manager that starts the kubectl proxy chain and yields extra mounts.
 
     Yields an empty list when ``config.kubernetes`` is ``None``.  On exit
-    (normal or exceptional) the RBAC proxy and kubectl proxy subprocess are
+    (normal or exceptional) every RBAC proxy and kubectl proxy subprocess is
     stopped.
+
+    One proxy pair is started per configured context.  A context that fails to
+    come up is warned about and dropped, so a stale credential for one cluster
+    does not block a session that has other usable clusters; if none come up the
+    kubectl feature cannot work at all and we exit.
 
     Caller is responsible for resolving *kubectl_proxy_token* — it's a
     stable per-session secret that sessions persists under session_dir.
@@ -553,24 +558,28 @@ def _kubectl_context(
         yield []
         return
 
-    # Start kubectl proxy subprocess (uses host kubeconfig).
-    kubectl_proc, kube_port = _kubectl_proxy.start_kubectl_proxy_proc(context=config.kubernetes.context)
-
-    # Start RBAC filtering proxy in front of it (TLS; returns cert_pem for kubeconfig).
-    rbac_server, rbac_port, ca_cert_pem = _kubectl_proxy.start_rbac_proxy(
-        config.kubernetes.rules, kubectl_proxy_token, kube_port
+    # Start a kubectl proxy + RBAC filtering proxy pair per context (TLS; one
+    # shared cert_pem for the kubeconfig).
+    proxies, failures, ca_cert_pem = _kubectl_proxy.start_context_proxies(
+        config.kubernetes.resolved_contexts(), kubectl_proxy_token
     )
+    for name, err in failures:
+        ui.warn(f"kubectl context {name!r} failed to start: {err} — continuing without it")
+    if not proxies:
+        ui.error("kubectl: no configured context could be started")
+        sys.exit(1)
 
-    # Write a kubeconfig pointing to the RBAC proxy (HTTPS with pinned cert).
+    # Write a kubeconfig pointing to the RBAC proxies (HTTPS with pinned cert).
     kubeconfig_path = session_dir / "kubeconfig"
-    kubeconfig_path.write_text(_kubectl_proxy.make_kubeconfig(rbac_port, kubectl_proxy_token, ca_cert_pem))
+    kubeconfig_path.write_text(
+        _kubectl_proxy.make_kubeconfig([(p.name, p.rbac_port) for p in proxies], kubectl_proxy_token, ca_cert_pem)
+    )
     kubeconfig_path.chmod(0o600)
 
     try:
         yield [BindMount(src=str(kubeconfig_path), dst=f"{agent.CONTAINER_HOME}/.kube/config", mode="RO")]
     finally:
-        _kubectl_proxy.stop_rbac_proxy(rbac_server)
-        _kubectl_proxy.stop_kubectl_proxy_proc(kubectl_proc)
+        _kubectl_proxy.stop_context_proxies(proxies)
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
@@ -704,7 +713,13 @@ def docker_features(config: DockerConfig) -> list[str]:
     if config.dind:
         features.append("DinD")
     if config.kubernetes is not None:
-        features.append("kubectl")
+        contexts = config.kubernetes.resolved_contexts()
+        # Name the clusters once there's more than one — which cluster the agent
+        # is pointed at stops being obvious as soon as it can pick.
+        if len(contexts) > 1:
+            features.append(f"kubectl ({', '.join(c.display_name for c in contexts)})")
+        else:
+            features.append("kubectl")
     return features
 
 

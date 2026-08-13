@@ -12,9 +12,9 @@ Architecture:
    applies the configured RBAC allowlist, and forwards permitted requests to the
    kubectl proxy.  Denied requests receive 403.
 
-3. ``make_kubeconfig(rbac_port, proxy_token)`` produces a kubeconfig YAML that
-   points at the RBAC proxy and embeds the bearer token.  This file is mounted
-   into the container at ``~/.kube/config``.
+3. ``make_kubeconfig(contexts, proxy_token, ca_cert_pem)`` produces a kubeconfig
+   YAML that points at the RBAC proxies and embeds the bearer token.  This file
+   is mounted into the container at ``~/.kube/config``.
 
 The real kubeconfig / credentials never leave the host process.  The container
 talks HTTP to ``host.docker.internal:{rbac_port}`` and the RBAC proxy forwards
@@ -23,14 +23,17 @@ only permitted requests to ``127.0.0.1:{kubectl_proxy_port}``.
 Subresources exec / attach / portforward / proxy are always blocked regardless
 of rules.
 
-Public interface::
+Several contexts can be exposed at once (e.g. dev and prd), each with its own
+rules.  Every context gets its own pair of the two stages above, on its own
+ephemeral port, and appears in the container kubeconfig under the host context
+name — so the agent switches clusters with ``kubectl --context prd get pods``.
+``start_context_proxies`` / ``stop_context_proxies`` wrap that whole fan-out and
+are what callers normally use::
 
-    proc, kube_port = start_kubectl_proxy_proc()
-    server, rbac_port = start_rbac_proxy(rules, proxy_token, kube_port)
-    kubeconfig_yaml = make_kubeconfig(rbac_port, proxy_token)
+    proxies, failures, ca_cert = start_context_proxies(config.resolved_contexts(), token)
+    kubeconfig_yaml = make_kubeconfig([(p.name, p.rbac_port) for p in proxies], token, ca_cert)
     # ... run container ...
-    stop_rbac_proxy(server)
-    stop_kubectl_proxy_proc(proc)
+    stop_context_proxies(proxies)
 """
 
 from __future__ import annotations
@@ -45,16 +48,20 @@ import socketserver
 import ssl
 import subprocess
 import tempfile
-import textwrap
 import threading
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qs
 
-from pydantic import BaseModel, field_validator
+import yaml
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
 
 _CHUNK_SIZE = 8192
+
+# Container-side context name used when the host context is not pinned by name.
+DEFAULT_CONTEXT_NAME = "hatchery-proxy"
 
 # Hop-by-hop headers that must not be forwarded between proxy hops.
 _HOP_BY_HOP: frozenset[str] = frozenset(
@@ -130,16 +137,70 @@ class KubectlRBACRule(BaseModel):
         return verbs
 
 
+class KubectlContext(BaseModel):
+    """One cluster the agent can reach, with the rules that apply to it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    context: str | None = None
+    """Host kubeconfig context to proxy.  ``None`` uses the host's active context."""
+
+    rules: list[KubectlRBACRule] = []
+    """Allowlist rules for this context.  Empty list means deny everything."""
+
+    @property
+    def display_name(self) -> str:
+        """Container-side context name.
+
+        Host context names are reused verbatim so the agent can switch clusters
+        with the ordinary ``kubectl --context <name>``.  An unpinned context has
+        no name to reuse, so it falls back to the historical ``hatchery-proxy``.
+        """
+        return self.context or DEFAULT_CONTEXT_NAME
+
+
 class KubectlConfig(BaseModel):
     """Top-level kubectl proxy configuration loaded from docker.yaml."""
 
+    model_config = ConfigDict(extra="forbid")
+
+    contexts: list[KubectlContext] = []
+    """Clusters the agent can reach, each with its own rules.  The first entry
+    becomes the container's ``current-context``.  Mutually exclusive with the
+    single-context ``context`` / ``rules`` shorthand below."""
+
     context: str | None = None
-    """Kubeconfig context to use.  Defaults to the host's active context.
-    Set this when you have multiple contexts and want to pin which cluster
-    the agent can reach (e.g. ``context: my-dev-cluster``)."""
+    """Single-context shorthand: kubeconfig context to use.  Defaults to the
+    host's active context.  Set this when you have multiple contexts and want to
+    pin which cluster the agent can reach (e.g. ``context: my-dev-cluster``)."""
 
     rules: list[KubectlRBACRule] = []
-    """Allowlist rules.  Empty list means deny everything (fail-closed)."""
+    """Single-context shorthand: allowlist rules.  Empty list means deny
+    everything (fail-closed)."""
+
+    @model_validator(mode="after")
+    def _check_exclusive_forms(self) -> KubectlConfig:
+        if self.contexts and (self.context is not None or self.rules):
+            raise ValueError(
+                "kubernetes: 'contexts' cannot be combined with the single-context "
+                "'context'/'rules' shorthand — move those under a 'contexts' entry"
+            )
+        names = [c.display_name for c in self.contexts]
+        duplicates = sorted({n for n in names if names.count(n) > 1})
+        if duplicates:
+            raise ValueError(f"kubernetes: duplicate context name(s) {duplicates} in 'contexts'")
+        return self
+
+    def resolved_contexts(self) -> list[KubectlContext]:
+        """Return the configured contexts, normalizing the shorthand form.
+
+        Always returns at least one entry: with neither ``contexts`` nor the
+        shorthand set, that entry is the host's active context with no rules
+        (i.e. deny everything, matching the fail-closed default).
+        """
+        if self.contexts:
+            return list(self.contexts)
+        return [KubectlContext(context=self.context, rules=self.rules)]
 
 
 # ── URL parsing ───────────────────────────────────────────────────────────────
@@ -533,6 +594,7 @@ def start_rbac_proxy(
     rules: list[KubectlRBACRule],
     proxy_token: str,
     kubectl_proxy_port: int,
+    cert: tuple[bytes, bytes] | None = None,
 ) -> tuple[http.server.HTTPServer, int, bytes]:
     """Start the TLS RBAC filtering proxy and return ``(server, port, cert_pem)``.
 
@@ -549,6 +611,10 @@ def start_rbac_proxy(
         rules: Allowlist rules from :class:`KubectlConfig`.
         proxy_token: Bearer token the container must send.
         kubectl_proxy_port: Local port where ``kubectl proxy`` is listening.
+        cert: Optional ``(cert_pem, key_pem)`` pair to serve instead of a
+            freshly generated one.  Multiple proxies in the same session share
+            one cert so the kubeconfig needs only a single CA entry — the cert's
+            only SAN is ``host.docker.internal``, which is correct for any port.
     """
 
     class _BoundHandler(_RBACProxyHandler):
@@ -558,7 +624,7 @@ def start_rbac_proxy(
     _BoundHandler.kubectl_proxy_port = kubectl_proxy_port
     _BoundHandler.rules = rules
 
-    cert_pem, key_pem = _generate_self_signed_cert()
+    cert_pem, key_pem = cert if cert is not None else _generate_self_signed_cert()
 
     server = _ThreadingHTTPServer(("0.0.0.0", 0), _BoundHandler)
     port = server.server_address[1]
@@ -598,6 +664,14 @@ def stop_rbac_proxy(server: http.server.HTTPServer) -> None:
     logger.debug("kubectl RBAC proxy stopped")
 
 
+def _require_kubectl() -> None:
+    """Raise :class:`RuntimeError` unless ``kubectl`` is on the host's PATH."""
+    import shutil
+
+    if not shutil.which("kubectl"):
+        raise RuntimeError("kubectl not found on PATH — install kubectl on the host to use the kubectl feature")
+
+
 def start_kubectl_proxy_proc(
     context: str | None = None,
     timeout: float = 10.0,
@@ -613,11 +687,9 @@ def start_kubectl_proxy_proc(
     is seen, then returns.  Raises :class:`RuntimeError` if kubectl is not found,
     the process exits early, or the port cannot be determined within *timeout* seconds.
     """
-    import shutil
     import time
 
-    if not shutil.which("kubectl"):
-        raise RuntimeError("kubectl not found on PATH — install kubectl on the host to use the kubectl feature")
+    _require_kubectl()
 
     cmd = ["kubectl", "proxy", "--port=0", "--address=127.0.0.1"]
     if context:
@@ -660,36 +732,117 @@ def stop_kubectl_proxy_proc(proc: subprocess.Popen[str]) -> None:
     logger.debug("kubectl proxy stopped")
 
 
-def make_kubeconfig(rbac_port: int, proxy_token: str, ca_cert_pem: bytes) -> str:
-    """Return a kubeconfig YAML that routes kubectl through the RBAC proxy over TLS.
+@dataclass
+class ContextProxy:
+    """A running kubectl-proxy + RBAC-proxy pair for one context."""
+
+    name: str
+    """Container-side context name (see :attr:`KubectlContext.display_name`)."""
+
+    kubectl_proc: subprocess.Popen[str]
+    rbac_server: http.server.HTTPServer
+    rbac_port: int
+
+
+def start_context_proxies(
+    contexts: list[KubectlContext],
+    proxy_token: str,
+) -> tuple[list[ContextProxy], list[tuple[str, str]], bytes]:
+    """Start one kubectl-proxy + RBAC-proxy pair per context.
+
+    Returns ``(started, failures, ca_cert_pem)``.  *failures* is a list of
+    ``(context_name, error_message)`` for contexts whose ``kubectl proxy`` did
+    not come up (unreachable cluster, expired credentials, unknown context
+    name).  Those are reported rather than raised so one stale credential does
+    not block a session that has other usable clusters — the caller decides how
+    to surface them, and gets an empty *started* list if none came up.
+
+    All proxies share a single TLS cert, returned as *ca_cert_pem* for the
+    kubeconfig's ``certificate-authority-data``.
+
+    *started* follows the order of *contexts*, so element 0 is the entry that
+    should become ``current-context``.
+
+    Raises:
+        RuntimeError: if ``kubectl`` is missing from the host PATH, which dooms
+            every context.
+    """
+    _require_kubectl()
+    cert = _generate_self_signed_cert()
+
+    started: list[ContextProxy] = []
+    failures: list[tuple[str, str]] = []
+    for ctx in contexts:
+        try:
+            proc, kube_port = start_kubectl_proxy_proc(context=ctx.context)
+        except RuntimeError as exc:
+            logger.warning("kubectl proxy for context %r failed to start: %s", ctx.display_name, exc)
+            failures.append((ctx.display_name, str(exc)))
+            continue
+        server, rbac_port, _ = start_rbac_proxy(ctx.rules, proxy_token, kube_port, cert=cert)
+        started.append(ContextProxy(name=ctx.display_name, kubectl_proc=proc, rbac_server=server, rbac_port=rbac_port))
+
+    return started, failures, cert[0]
+
+
+def stop_context_proxies(proxies: list[ContextProxy]) -> None:
+    """Stop every proxy pair, continuing past individual failures."""
+    for p in proxies:
+        for stop, arg in ((stop_rbac_proxy, p.rbac_server), (stop_kubectl_proxy_proc, p.kubectl_proc)):
+            try:
+                stop(arg)  # type: ignore[arg-type]
+            except Exception as exc:  # pragma: no cover — best-effort teardown
+                logger.warning("kubectl: failed to stop proxy for context %r: %s", p.name, exc)
+
+
+def make_kubeconfig(contexts: list[tuple[str, int]], proxy_token: str, ca_cert_pem: bytes) -> str:
+    """Return a kubeconfig YAML that routes kubectl through the RBAC proxies over TLS.
 
     kubectl refuses to send ``Authorization: Bearer`` headers over plain HTTP
     to non-localhost hosts.  This kubeconfig uses ``https://`` and pins the
     self-signed certificate via ``certificate-authority-data``, which is the
     same pattern used by kind / k3d / minikube for local cluster endpoints.
 
+    Each context gets its own cluster entry pointing at that context's RBAC
+    proxy port; all share one user (the bearer token authenticates the
+    container, and per-context isolation comes from the rules each proxy
+    enforces).  The first entry becomes ``current-context``.
+
     Args:
-        rbac_port: Port where the RBAC proxy is listening (on the host).
+        contexts: ``(context_name, rbac_port)`` pairs, in priority order.
         proxy_token: Bearer token embedded for the container to authenticate.
-        ca_cert_pem: PEM-encoded self-signed cert returned by :func:`start_rbac_proxy`.
+        ca_cert_pem: PEM-encoded self-signed cert shared by the RBAC proxies.
+
+    Raises:
+        ValueError: if *contexts* is empty.
     """
+    if not contexts:
+        raise ValueError("make_kubeconfig requires at least one context")
+
     ca_b64 = base64.b64encode(ca_cert_pem).decode()
-    return textwrap.dedent(f"""\
-        apiVersion: v1
-        kind: Config
-        clusters:
-          - name: hatchery-proxy
-            cluster:
-              server: https://host.docker.internal:{rbac_port}
-              certificate-authority-data: {ca_b64}
-        current-context: hatchery-proxy
-        contexts:
-          - name: hatchery-proxy
-            context:
-              cluster: hatchery-proxy
-              user: hatchery-agent
-        users:
-          - name: hatchery-agent
-            user:
-              token: {proxy_token}
-    """)
+    user = "hatchery-agent"
+    config: dict[str, Any] = {
+        "apiVersion": "v1",
+        "kind": "Config",
+        "clusters": [
+            {
+                "name": name,
+                "cluster": {
+                    "server": f"https://host.docker.internal:{port}",
+                    "certificate-authority-data": ca_b64,
+                },
+            }
+            for name, port in contexts
+        ],
+        "contexts": [{"name": name, "context": {"cluster": name, "user": user}} for name, _ in contexts],
+        "current-context": contexts[0][0],
+        "users": [{"name": user, "user": {"token": proxy_token}}],
+    }
+
+    # Keep the historical fixed name working for a lone unnamed/pinned context.
+    if len(contexts) == 1 and contexts[0][0] != DEFAULT_CONTEXT_NAME:
+        config["contexts"].append({"name": DEFAULT_CONTEXT_NAME, "context": {"cluster": contexts[0][0], "user": user}})
+
+    # Names come from user config (EKS contexts contain ':', '/'), so dump via
+    # yaml rather than interpolating into a template.
+    return yaml.safe_dump(config, sort_keys=False, default_flow_style=False)
