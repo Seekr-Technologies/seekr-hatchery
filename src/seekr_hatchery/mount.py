@@ -47,7 +47,46 @@ class SeedContext:
 
 
 class BindMount(BaseModel):
-    """Bind a host path into the container at ``dst``."""
+    """Bind a host path into the container at ``dst``.
+
+    ``follow_links`` asks the launch path to make symlinks *inside* ``src``
+    resolve once mounted. A symlink stores a path, and that path only means
+    the same thing on both sides of the mount when ``dst`` mirrors ``src``.
+    Repo paths are mirrored deliberately; ``$HOME`` is not, since the
+    container's is ``/home/hatchery``. So set this on any directory whose
+    contents a user might manage with a dotfiles repo — agent config
+    directories (``~/.claude/skills``, ``~/.codex/prompts``, ...) and, via
+    ``docker.yaml``'s ``follow_symlinks``, the worktree and any extra
+    mounts.
+
+    Note what needs *no* flag, because ``-v`` resolves a mount's own source
+    path: a bind whose ``src`` is itself a symlink — file or directory —
+    already lands on the target's inode, so nothing dangles. The flag is
+    only about links found *inside* the mounted tree, which survive
+    verbatim.
+
+    Setting it on a non-directory source is therefore harmless and inert —
+    the walk finds nothing to do — so callers may declare it uniformly across
+    a group of config paths without checking which of them are files.
+
+    Links are looked for at any depth, pruning ``.git``, ``node_modules``
+    and similar (see :data:`seekr_hatchery.mount_links.SKIP_DIRS`), so a
+    link nested inside a real subdirectory resolves too. That costs a walk
+    of the tree per launch, which is why it is opt-in rather than always on.
+
+    The mount itself is unaffected: the directory is still bound whole and
+    nothing is mounted at a link's own path, so the link stays a link. The
+    flag only asks for *additional* mounts that make the links'
+    destinations exist. It is purely declarative — the mechanism lives in
+    :func:`seekr_hatchery.mount_links.expand_link_mounts`, which every
+    mount-building path calls, so this module stays free of filesystem
+    knowledge and any mount source (agent backends, ``docker.yaml``
+    entries, ``--include``) can opt in with one field.
+
+    ``mount_to_docker_args`` ignores the flag, so an unexpanded mount still
+    serialises as an ordinary bind: the failure mode of forgetting to
+    expand is "symlinks dangle as before", never a malformed flag.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -55,6 +94,7 @@ class BindMount(BaseModel):
     src: Path
     dst: str
     mode: MountMode = "RW"
+    follow_links: bool = False
 
 
 class VolumeMount(BaseModel):

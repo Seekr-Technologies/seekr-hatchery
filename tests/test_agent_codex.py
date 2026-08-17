@@ -330,18 +330,27 @@ class TestConstructMounts:
         mounts = agent.CODEX.construct_mounts(tmp_path)
         assert all(isinstance(m, mount.VolumeMount) for m in mounts)
 
-    def test_memories_and_skills_bind_rw_when_present(self, home, tmp_path):
-        """memories/ and skills/ are user-owned state that persists
-        across tasks — RW so in-container edits propagate to the host."""
-        (home / ".codex" / "memories").mkdir(parents=True)
-        (home / ".codex" / "skills").mkdir(parents=True)
+    def test_user_config_paths_bind_rw_when_present(self, home, tmp_path):
+        """AGENTS.md, memories/, skills/ and prompts/ are user-owned state
+        that persists across tasks — RW so in-container edits propagate to
+        the host. All four declare follow_links, uniformly: they are the paths
+        people keep in a dotfiles repo. On AGENTS.md it is inert, since it is
+        a file whose source `-v` resolves already, and that inertness is a
+        guaranteed property of the flag rather than an accident — see
+        test_mount_links.py::TestPassThrough::test_flag_on_a_file_src_is_inert.
+        """
+        (home / ".codex").mkdir(parents=True)
+        (home / ".codex" / "AGENTS.md").write_text("# global\n")
+        for name in ("memories", "skills", "prompts"):
+            (home / ".codex" / name).mkdir()
         mounts = agent.CODEX.construct_mounts(tmp_path)
         by_dst = _kinds_by_dst(mounts)
-        for name in ("memories", "skills"):
+        for name in ("AGENTS.md", "memories", "skills", "prompts"):
             m = by_dst[f"{agent.CONTAINER_HOME}/.codex/{name}"]
             assert isinstance(m, mount.BindMount)
             assert m.mode == "RW"
             assert m.src == home / ".codex" / name
+            assert m.follow_links is True
 
     def test_config_and_cache_are_never_mounted(self, home, tmp_path):
         """config.toml and models_cache.json must stay ordinary files
