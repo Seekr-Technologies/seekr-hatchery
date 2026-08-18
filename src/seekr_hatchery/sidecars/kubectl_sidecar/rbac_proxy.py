@@ -1,23 +1,13 @@
-"""Host-side kubectl RBAC proxy for hatchery sandboxes.
+"""TLS RBAC-filtering proxy in front of a local ``kubectl proxy``.
 
-Architecture:
-
-1. ``start_kubectl_proxy_proc()`` launches ``kubectl proxy --port=0 --address=127.0.0.1``
-   on the host, bound to loopback only, using the host's active kubeconfig for
-   credentials.  The port it binds to is parsed from its startup output.
-
-2. ``start_rbac_proxy(rules, proxy_token, kubectl_proxy_port)`` starts a second
-   HTTP server on an ephemeral 0.0.0.0 port.  Requests from the container must
-   carry the per-task bearer token.  The proxy parses the Kubernetes API URL,
-   applies the configured RBAC allowlist, and forwards permitted requests to the
-   kubectl proxy.  Denied requests receive 403.
-
-3. ``make_kubeconfig(rbac_port, proxy_token)`` produces a kubeconfig YAML that
-   points at the RBAC proxy and embeds the bearer token.  This file is mounted
-   into the container at ``~/.kube/config``.
+``start_rbac_proxy(rules, proxy_token, kubectl_proxy_port)`` starts an HTTP
+server on an ephemeral ``0.0.0.0`` port.  Requests from the container must
+carry the per-task bearer token.  The proxy parses the Kubernetes API URL,
+applies the configured RBAC allowlist, and forwards permitted requests to the
+kubectl proxy.  Denied requests receive 403.
 
 The real kubeconfig / credentials never leave the host process.  The container
-talks HTTP to ``host.docker.internal:{rbac_port}`` and the RBAC proxy forwards
+talks HTTPS to ``host.docker.internal:{rbac_port}`` and this proxy forwards
 only permitted requests to ``127.0.0.1:{kubectl_proxy_port}``.
 
 Subresources exec / attach / portforward / proxy are always blocked regardless
@@ -25,32 +15,26 @@ of rules.
 
 Public interface::
 
-    proc, kube_port = start_kubectl_proxy_proc()
-    server, rbac_port = start_rbac_proxy(rules, proxy_token, kube_port)
-    kubeconfig_yaml = make_kubeconfig(rbac_port, proxy_token)
+    server, rbac_port, ca_cert_pem = start_rbac_proxy(rules, proxy_token, kube_port)
     # ... run container ...
     stop_rbac_proxy(server)
-    stop_kubectl_proxy_proc(proc)
 """
 
 from __future__ import annotations
 
-import base64
 import http.client
 import http.server
 import logging
 import os
 import re
-import socketserver
 import ssl
-import subprocess
 import tempfile
-import textwrap
 import threading
 from typing import Any
 from urllib.parse import parse_qs
 
-from pydantic import BaseModel, field_validator
+from seekr_hatchery.models import KubectlRBACRule
+from seekr_hatchery.sidecars.http_server import ThreadingHTTPServer
 
 logger = logging.getLogger(__name__)
 
@@ -77,69 +61,6 @@ _BLOCKED_SUBRESOURCES: frozenset[str] = frozenset({"exec", "attach", "portforwar
 
 # RFC 7230 header field-name token — rejects anything that could enable header injection.
 _HEADER_NAME_RE: re.Pattern[str] = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
-
-# ── Models ────────────────────────────────────────────────────────────────────
-
-
-_KNOWN_VERBS: frozenset[str] = frozenset(
-    {"get", "list", "watch", "create", "update", "patch", "delete", "deletecollection", "*"}
-)
-
-
-class KubectlRBACRule(BaseModel):
-    """Single allowlist rule for the kubectl RBAC proxy.
-
-    A request is allowed if it matches all three fields of at least one rule.
-    ``"*"`` acts as a wildcard for that field.
-
-    ``namespaces`` uses ``""`` (empty string) to match cluster-scoped requests
-    (those without a ``/namespaces/{name}/`` segment in the URL, e.g.
-    ``kubectl get pods -A`` or ``kubectl get nodes``).
-    """
-
-    verbs: list[str]
-    """k8s verbs: get, list, watch, create, update, patch, delete, or ``*``.
-
-    Client-side kubectl commands like ``describe``, ``logs``, ``exec`` are NOT
-    valid RBAC verbs — they resolve to HTTP methods (``describe`` → ``GET``,
-    ``exec`` → blocked subresource).  Unknown verbs are warned at load time and
-    will never match any request.
-    """
-
-    resources: list[str]
-    """Resource kinds: pods, services, deployments, etc., or ``*``."""
-
-    namespaces: list[str] = ["*"]
-    """Namespace names.  ``*`` matches everything.  ``""`` matches cluster-scoped
-    (all-namespace / non-namespaced) requests."""
-
-    @field_validator("verbs")
-    @classmethod
-    def _warn_unknown_verbs(cls, verbs: list[str]) -> list[str]:
-        unknown = [v for v in verbs if v not in _KNOWN_VERBS]
-        if unknown:
-            logger.warning(
-                "kubectl RBAC rules contain unrecognized verb(s) %s — "
-                "these will never match any request. "
-                "Valid verbs: %s. "
-                "Note: 'describe' is a kubectl client command, not a k8s verb "
-                "(it issues GET requests, which 'get' already covers).",
-                unknown,
-                sorted(_KNOWN_VERBS - {"*"}),
-            )
-        return verbs
-
-
-class KubectlConfig(BaseModel):
-    """Top-level kubectl proxy configuration loaded from docker.yaml."""
-
-    context: str | None = None
-    """Kubeconfig context to use.  Defaults to the host's active context.
-    Set this when you have multiple contexts and want to pin which cluster
-    the agent can reach (e.g. ``context: my-dev-cluster``)."""
-
-    rules: list[KubectlRBACRule] = []
-    """Allowlist rules.  Empty list means deny everything (fail-closed)."""
 
 
 # ── URL parsing ───────────────────────────────────────────────────────────────
@@ -465,10 +386,6 @@ class _RBACProxyHandler(http.server.BaseHTTPRequestHandler):
         self._handle_request()
 
 
-class _ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
-    daemon_threads = True
-
-
 # ── TLS cert generation ───────────────────────────────────────────────────────
 
 
@@ -546,7 +463,7 @@ def start_rbac_proxy(
     pattern used by kind / k3d / minikube for local cluster endpoints.
 
     Args:
-        rules: Allowlist rules from :class:`KubectlConfig`.
+        rules: Allowlist rules from :class:`seekr_hatchery.models.KubectlConfig`.
         proxy_token: Bearer token the container must send.
         kubectl_proxy_port: Local port where ``kubectl proxy`` is listening.
     """
@@ -560,7 +477,7 @@ def start_rbac_proxy(
 
     cert_pem, key_pem = _generate_self_signed_cert()
 
-    server = _ThreadingHTTPServer(("0.0.0.0", 0), _BoundHandler)
+    server = ThreadingHTTPServer(("0.0.0.0", 0), _BoundHandler)
     port = server.server_address[1]
 
     # ssl.SSLContext.load_cert_chain() requires file paths; write to temp files
@@ -596,100 +513,3 @@ def stop_rbac_proxy(server: http.server.HTTPServer) -> None:
     server.shutdown()
     server.server_close()
     logger.debug("kubectl RBAC proxy stopped")
-
-
-def start_kubectl_proxy_proc(
-    context: str | None = None,
-    timeout: float = 10.0,
-) -> tuple[subprocess.Popen[str], int]:
-    """Launch ``kubectl proxy --port=0 --address=127.0.0.1`` and return ``(proc, port)``.
-
-    Args:
-        context: Kubeconfig context to pass via ``--context``.  ``None`` uses
-            the host's currently active context.
-        timeout: Seconds to wait for the startup banner before giving up.
-
-    Reads stdout until the startup banner ``"Starting to serve on 127.0.0.1:{port}"``
-    is seen, then returns.  Raises :class:`RuntimeError` if kubectl is not found,
-    the process exits early, or the port cannot be determined within *timeout* seconds.
-    """
-    import shutil
-    import time
-
-    if not shutil.which("kubectl"):
-        raise RuntimeError("kubectl not found on PATH — install kubectl on the host to use the kubectl feature")
-
-    cmd = ["kubectl", "proxy", "--port=0", "--address=127.0.0.1"]
-    if context:
-        cmd += ["--context", context]
-
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-
-    deadline = time.monotonic() + timeout
-    port_re = re.compile(r"Starting to serve on 127\.0\.0\.1:(\d+)")
-
-    assert proc.stdout is not None  # guaranteed by PIPE
-    while time.monotonic() < deadline:
-        line = proc.stdout.readline()
-        if not line:
-            # Process exited unexpectedly.
-            stderr_out = proc.stderr.read() if proc.stderr else ""
-            raise RuntimeError(f"kubectl proxy exited unexpectedly.  stderr: {stderr_out.strip()}")
-        m = port_re.search(line)
-        if m:
-            port = int(m.group(1))
-            logger.debug("kubectl proxy started on port %d", port)
-            return proc, port
-
-    proc.terminate()
-    raise RuntimeError(f"kubectl proxy did not report its port within {timeout}s")
-
-
-def stop_kubectl_proxy_proc(proc: subprocess.Popen[str]) -> None:
-    """Terminate the kubectl proxy subprocess."""
-    proc.terminate()
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-    logger.debug("kubectl proxy stopped")
-
-
-def make_kubeconfig(rbac_port: int, proxy_token: str, ca_cert_pem: bytes) -> str:
-    """Return a kubeconfig YAML that routes kubectl through the RBAC proxy over TLS.
-
-    kubectl refuses to send ``Authorization: Bearer`` headers over plain HTTP
-    to non-localhost hosts.  This kubeconfig uses ``https://`` and pins the
-    self-signed certificate via ``certificate-authority-data``, which is the
-    same pattern used by kind / k3d / minikube for local cluster endpoints.
-
-    Args:
-        rbac_port: Port where the RBAC proxy is listening (on the host).
-        proxy_token: Bearer token embedded for the container to authenticate.
-        ca_cert_pem: PEM-encoded self-signed cert returned by :func:`start_rbac_proxy`.
-    """
-    ca_b64 = base64.b64encode(ca_cert_pem).decode()
-    return textwrap.dedent(f"""\
-        apiVersion: v1
-        kind: Config
-        clusters:
-          - name: hatchery-proxy
-            cluster:
-              server: https://host.docker.internal:{rbac_port}
-              certificate-authority-data: {ca_b64}
-        current-context: hatchery-proxy
-        contexts:
-          - name: hatchery-proxy
-            context:
-              cluster: hatchery-proxy
-              user: hatchery-agent
-        users:
-          - name: hatchery-agent
-            user:
-              token: {proxy_token}
-    """)

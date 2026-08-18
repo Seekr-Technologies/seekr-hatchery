@@ -9,8 +9,6 @@ import tempfile
 import uuid
 from abc import ABC, abstractmethod
 from collections import deque
-from collections.abc import Callable, Generator
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -22,10 +20,9 @@ from pydantic import ValidationError as _PydanticValidationError
 
 import seekr_hatchery.agents as agent
 import seekr_hatchery.constants as constants
-import seekr_hatchery.kubectl_proxy as _kubectl_proxy
 import seekr_hatchery.mount_links as mount_links
-import seekr_hatchery.proxy as proxy
 import seekr_hatchery.pty_proxy as pty_proxy
+import seekr_hatchery.sidecars as sidecars
 import seekr_hatchery.stream_interceptor.interceptors.clipboard_image as clipboard_image
 import seekr_hatchery.ui as ui
 from seekr_hatchery.constants import (
@@ -33,8 +30,7 @@ from seekr_hatchery.constants import (
     WORKTREES_SUBDIR,
 )
 from seekr_hatchery.includes import IncludeEntry, IncludeItem
-from seekr_hatchery.kubectl_proxy import KubectlConfig
-from seekr_hatchery.models import SessionMeta
+from seekr_hatchery.models import KubectlConfig, SessionMeta
 from seekr_hatchery.mount import (
     BindMount,
     Mount,
@@ -506,78 +502,6 @@ def parse_docker_include_entry(entry: str | IncludeItem) -> tuple[str, str]:
     if isinstance(entry, str):
         return entry, "worktree"
     return entry.path, entry.mode
-
-
-# ── kubectl helpers ───────────────────────────────────────────────────────────
-
-
-@contextmanager
-def _maybe_api_server(
-    mutator: Callable[[dict[str, str]], dict[str, str]] | None,
-    proxy_token: str | None,
-    backend: agent.AgentBackend,
-) -> Generator[proxy.APIServer | None, None, None]:
-    """Conditionally start the API proxy and yield the server handle (or ``None``).
-
-    *mutator* is the gate: a non-``None`` mutator means the caller has a real
-    API key to inject, so a proxy is needed.  When ``None`` (e.g. sandbox shell
-    sessions which don't run an agent), no proxy is started and ``None`` is
-    yielded so call sites can use this unconditionally with a uniform pattern::
-
-        with _maybe_api_server(mutator, token, backend) as api_proxy, \\
-             _kubectl_context(config, session_dir) as kubectl_mounts:
-            spec = build_spec(..., proxy_port=api_proxy.port if api_proxy else None)
-            runtime.run(spec)
-    """
-    if mutator is None:
-        yield None
-        return
-    try:
-        kwargs = backend.proxy_kwargs()
-    except RuntimeError as exc:
-        ui.error(str(exc))
-        sys.exit(1)
-    with proxy.api_server(mutator, proxy_token or "", **kwargs) as server:
-        yield server
-
-
-@contextmanager
-def _kubectl_context(
-    config: DockerConfig,
-    session_dir: Path,
-    kubectl_proxy_token: str,
-) -> Generator[list[Mount], None, None]:
-    """Context manager that starts the kubectl proxy chain and yields extra mounts.
-
-    Yields an empty list when ``config.kubernetes`` is ``None``.  On exit
-    (normal or exceptional) the RBAC proxy and kubectl proxy subprocess are
-    stopped.
-
-    Caller is responsible for resolving *kubectl_proxy_token* — it's a
-    stable per-session secret that sessions persists under session_dir.
-    """
-    if config.kubernetes is None:
-        yield []
-        return
-
-    # Start kubectl proxy subprocess (uses host kubeconfig).
-    kubectl_proc, kube_port = _kubectl_proxy.start_kubectl_proxy_proc(context=config.kubernetes.context)
-
-    # Start RBAC filtering proxy in front of it (TLS; returns cert_pem for kubeconfig).
-    rbac_server, rbac_port, ca_cert_pem = _kubectl_proxy.start_rbac_proxy(
-        config.kubernetes.rules, kubectl_proxy_token, kube_port
-    )
-
-    # Write a kubeconfig pointing to the RBAC proxy (HTTPS with pinned cert).
-    kubeconfig_path = session_dir / "kubeconfig"
-    kubeconfig_path.write_text(_kubectl_proxy.make_kubeconfig(rbac_port, kubectl_proxy_token, ca_cert_pem))
-    kubeconfig_path.chmod(0o600)
-
-    try:
-        yield [BindMount(src=str(kubeconfig_path), dst=f"{agent.CONTAINER_HOME}/.kube/config", mode="RO")]
-    finally:
-        _kubectl_proxy.stop_rbac_proxy(rbac_server)
-        _kubectl_proxy.stop_kubectl_proxy_proc(kubectl_proc)
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
@@ -1294,14 +1218,11 @@ def build_spec(
     name: str,
     hatchery_repo: str,
     container_name: str | None,
-    mutator: Callable[[dict[str, str]], dict[str, str]] | None,
-    proxy_token: str | None,
-    proxy_port: int | None,
     agent_cmd: list[str],
-    backend: agent.AgentBackend = agent.CODEX,
+    extra_env: dict[str, str] | None = None,
+    needs_host_gateway: bool = False,
     dind: bool = False,
     cap_add: list[str] | None = None,
-    add_host_gateway: bool = False,
     command_override: list[str] | None = None,
     interactive: bool = False,
 ) -> ContainerSpec:
@@ -1312,13 +1233,11 @@ def build_spec(
     Engine-specific flags (userns, label=disable) are
     *not* here — those live on ``ContainerRuntime.render_run_argv``.
 
-    *mutator* / *proxy_token* / *proxy_port*: when *mutator* is set and
-    *proxy_port* is not ``None``, the backend's container env vars are
-    injected into ``spec.env``.  When *mutator* is ``None`` (sandbox shell
-    with no agent), no agent env vars are added.
+    *extra_env* is merged into the base env after the mandatory ``HATCHERY_*``
+    vars.
 
-    *add_host_gateway* forces ``--add-host=host.docker.internal:host-gateway``
-    on Linux even when the API proxy is not active (e.g. kubectl RBAC proxy).
+    *needs_host_gateway* emits ``--add-host=host.docker.internal:host-gateway``
+    on Linux; the platform gate is applied here as a spec concern.
 
     *command_override* + *interactive*: when set, the spec runs a raw
     command (e.g. ``/bin/bash``) instead of the agent command.
@@ -1328,13 +1247,11 @@ def build_spec(
         "HATCHERY_TASK": name,
         "HATCHERY_REPO": hatchery_repo,
     }
-
-    if mutator is not None and proxy_port is not None:
-        for key, val in backend.container_env(proxy_token or "", proxy_port).items():
-            env[key] = val
+    if extra_env:
+        env.update(extra_env)
 
     add_hosts: list[str] = []
-    if (proxy_port is not None or add_host_gateway) and sys.platform == "linux":
+    if needs_host_gateway and sys.platform == "linux":
         add_hosts.append("host.docker.internal:host-gateway")
 
     spec_caps_add: list[str] = []
@@ -1498,11 +1415,12 @@ def run_session(
 
     mode_label = "no-worktree mode" if meta.no_worktree else "worktree mode"
     logger.debug(f"Launching {runtime.binary} container for session '{meta.name}' ({mode_label})")
-    with (
-        _maybe_api_server(mutator, proxy_token, backend) as api_proxy,
-        _kubectl_context(config, session_dir, kubectl_proxy_token or "") as kubectl_mounts,
-    ):
-        mounts.extend(kubectl_mounts)
+    active_sidecars = [
+        sidecars.ApiProxySidecar(mutator, proxy_token, backend),
+        sidecars.KubectlSidecar(config.kubernetes, session_dir, kubectl_proxy_token or ""),
+    ]
+    with sidecars.run_sidecars(active_sidecars) as contrib:
+        mounts.extend(contrib.mounts)
         spec = build_spec(
             image=meta.image_name,
             mounts=mounts,
@@ -1510,14 +1428,11 @@ def run_session(
             name=meta.name,
             hatchery_repo=container_repo,
             container_name=meta.container_name,
-            mutator=mutator,
-            proxy_token=proxy_token,
-            proxy_port=api_proxy.port if api_proxy else None,
             agent_cmd=agent_cmd,
-            backend=backend,
+            extra_env=contrib.env,
+            needs_host_gateway=contrib.needs_host_gateway,
             dind=config.dind,
             cap_add=config.cap_add,
-            add_host_gateway=bool(kubectl_mounts),
         )
         runtime.run(spec, paste_interceptor=_make_paste_interceptor(backend, session_dir, config))
 
@@ -1563,12 +1478,13 @@ def launch_sandbox_shell(
     # virtio-fs share roots (only /Users/ and /private/tmp are shared).
     sandbox_session_dir = constants.HATCHERY_DIR / "sandbox-sessions" / str(uuid.uuid4())
     sandbox_session_dir.mkdir(parents=True, exist_ok=True)
+    active_sidecars = [
+        sidecars.ApiProxySidecar(None, None, backend),
+        sidecars.KubectlSidecar(config.kubernetes, sandbox_session_dir, kubectl_proxy_token),
+    ]
     try:
-        with (
-            _maybe_api_server(None, None, backend) as api_proxy,
-            _kubectl_context(config, sandbox_session_dir, kubectl_proxy_token) as kubectl_mounts,
-        ):
-            mounts = list(mounts) + kubectl_mounts
+        with sidecars.run_sidecars(active_sidecars) as contrib:
+            mounts = list(mounts) + contrib.mounts
             spec = build_spec(
                 image=image_name,
                 mounts=mounts,
@@ -1576,11 +1492,9 @@ def launch_sandbox_shell(
                 name="sandbox",
                 hatchery_repo=str(repo),
                 container_name=None,
-                mutator=None,
-                proxy_token=None,
-                proxy_port=api_proxy.port if api_proxy else None,
                 agent_cmd=[],
-                add_host_gateway=bool(kubectl_mounts),
+                extra_env=contrib.env,
+                needs_host_gateway=contrib.needs_host_gateway,
                 command_override=[shell],
                 interactive=True,
             )
