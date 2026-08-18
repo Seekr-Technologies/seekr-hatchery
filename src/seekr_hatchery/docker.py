@@ -21,12 +21,12 @@ from pydantic import BaseModel, ConfigDict, field_validator
 from pydantic import ValidationError as _PydanticValidationError
 
 import seekr_hatchery.agents as agent
-import seekr_hatchery.clipboard_image as clipboard_image
 import seekr_hatchery.constants as constants
 import seekr_hatchery.kubectl_proxy as _kubectl_proxy
 import seekr_hatchery.mount_links as mount_links
 import seekr_hatchery.proxy as proxy
 import seekr_hatchery.pty_proxy as pty_proxy
+import seekr_hatchery.stream_interceptor.interceptors.clipboard_image as clipboard_image
 import seekr_hatchery.ui as ui
 from seekr_hatchery.constants import (
     DOCKER_CONFIG,
@@ -43,6 +43,7 @@ from seekr_hatchery.mount import (
     wrap_cmd_for_file_mounts,
 )
 from seekr_hatchery.seeded_volumes import prepare_volume_mounts
+from seekr_hatchery.stream_interceptor import InterceptorChain
 from seekr_hatchery.utils import open_for_editing, run
 
 logger = logging.getLogger(__name__)
@@ -1377,7 +1378,7 @@ def _exec_agent(cmd: list[str], paste_interceptor: clipboard_image.PasteIntercep
     plain ``subprocess.run`` path so output behaviour stays unchanged.
     """
     if paste_interceptor is not None and sys.stdin.isatty():
-        return pty_proxy.run_with_pty(cmd, paste_interceptor)
+        return pty_proxy.run_with_pty(cmd, InterceptorChain([paste_interceptor]))
     return subprocess.run(cmd).returncode
 
 

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-import seekr_hatchery.clipboard_image as ci
+import seekr_hatchery.stream_interceptor.interceptors.clipboard_image as ci
 
 # ---------------------------------------------------------------------------
 # sniff_extension
@@ -209,38 +209,38 @@ class TestPasteInterceptor:
             lambda: called.append(1) or None,
         )
         pi = ci.PasteInterceptor(tmp_path, _fmt)
-        result = pi.feed_stdin(b"hello world\n")
-        assert result.to_agent == b"hello world\n"
+        result = pi.on_stdin(b"hello world\n")
+        assert result == b"hello world\n"
         assert called == []
 
     def test_ctrl_v_with_clipboard_image_injects_reference(self, monkeypatch, tmp_path):
         monkeypatch.setattr(ci, "_read_host_clipboard_image", lambda: _PNG)
         pi = ci.PasteInterceptor(tmp_path, _fmt)
-        result = pi.feed_stdin(b"\x16")
+        result = pi.on_stdin(b"\x16")
         # The 0x16 is swallowed and replaced with the saved-file reference.
-        assert b"\x16" not in result.to_agent
+        assert b"\x16" not in result
         files = list(tmp_path.glob("paste-*.png"))
         assert len(files) == 1
-        assert str(files[0]).encode() in result.to_agent
-        assert result.to_agent.endswith(b" ")
+        assert str(files[0]).encode() in result
+        assert result.endswith(b" ")
 
     def test_ctrl_v_with_empty_clipboard_passes_through(self, monkeypatch, tmp_path):
         monkeypatch.setattr(ci, "_read_host_clipboard_image", lambda: None)
         pi = ci.PasteInterceptor(tmp_path, _fmt)
-        result = pi.feed_stdin(b"\x16")
+        result = pi.on_stdin(b"\x16")
         # No image to inject — preserve the original keystroke so it keeps
         # its normal meaning (vim visual-block, bash literal-insert, etc.).
-        assert result.to_agent == b"\x16"
+        assert result == b"\x16"
 
     def test_ctrl_v_in_middle_of_chunk_inserts_at_position(self, monkeypatch, tmp_path):
         monkeypatch.setattr(ci, "_read_host_clipboard_image", lambda: _PNG)
         pi = ci.PasteInterceptor(tmp_path, _fmt)
-        result = pi.feed_stdin(b"hi\x16there")
+        result = pi.on_stdin(b"hi\x16there")
         # Replacement happens at the position of the 0x16 byte.
         files = list(tmp_path.glob("paste-*.png"))
         assert len(files) == 1
         ref = str(files[0]).encode()
-        assert result.to_agent == b"hi" + ref + b" " + b"there"
+        assert result == b"hi" + ref + b" " + b"there"
 
     def test_multiple_ctrl_v_each_probe_clipboard(self, monkeypatch, tmp_path):
         # Each 0x16 in the chunk gets its own clipboard probe.  Useful if
@@ -255,7 +255,7 @@ class TestPasteInterceptor:
 
         monkeypatch.setattr(ci, "_read_host_clipboard_image", _probe)
         pi = ci.PasteInterceptor(tmp_path, _fmt)
-        pi.feed_stdin(b"\x16\x16")
+        pi.on_stdin(b"\x16\x16")
         assert len(probes) == 2
         files = sorted(tmp_path.glob("paste-*.png"))
         assert len(files) == 2
@@ -266,29 +266,29 @@ class TestPasteInterceptor:
         # trigger the same interception.
         monkeypatch.setattr(ci, "_read_host_clipboard_image", lambda: _PNG)
         pi = ci.PasteInterceptor(tmp_path, _fmt)
-        result = pi.feed_stdin(b"\x1b[118;5u")
-        assert b"\x1b[118;5u" not in result.to_agent
+        result = pi.on_stdin(b"\x1b[118;5u")
+        assert b"\x1b[118;5u" not in result
         files = list(tmp_path.glob("paste-*.png"))
         assert len(files) == 1
-        assert str(files[0]).encode() in result.to_agent
-        assert result.to_agent.endswith(b" ")
+        assert str(files[0]).encode() in result
+        assert result.endswith(b" ")
 
     def test_kitty_ctrl_v_with_empty_clipboard_passes_through(self, monkeypatch, tmp_path):
         monkeypatch.setattr(ci, "_read_host_clipboard_image", lambda: None)
         pi = ci.PasteInterceptor(tmp_path, _fmt)
-        result = pi.feed_stdin(b"\x1b[118;5u")
+        result = pi.on_stdin(b"\x1b[118;5u")
         # No image — preserve the whole sequence so it keeps whatever
         # meaning the agent assigns to it.
-        assert result.to_agent == b"\x1b[118;5u"
+        assert result == b"\x1b[118;5u"
 
     def test_kitty_ctrl_v_in_middle_of_chunk(self, monkeypatch, tmp_path):
         monkeypatch.setattr(ci, "_read_host_clipboard_image", lambda: _PNG)
         pi = ci.PasteInterceptor(tmp_path, _fmt)
-        result = pi.feed_stdin(b"hi\x1b[118;5uthere")
+        result = pi.on_stdin(b"hi\x1b[118;5uthere")
         files = list(tmp_path.glob("paste-*.png"))
         assert len(files) == 1
         ref = str(files[0]).encode()
-        assert result.to_agent == b"hi" + ref + b" " + b"there"
+        assert result == b"hi" + ref + b" " + b"there"
 
     def test_kitty_release_sequence_passes_through(self, monkeypatch, tmp_path):
         # The release event for V (ESC[118;1:3u — no Ctrl modifier) is a
@@ -300,6 +300,6 @@ class TestPasteInterceptor:
             lambda: called.append(1) or _PNG,
         )
         pi = ci.PasteInterceptor(tmp_path, _fmt)
-        result = pi.feed_stdin(b"\x1b[118;1:3u")
-        assert result.to_agent == b"\x1b[118;1:3u"
+        result = pi.on_stdin(b"\x1b[118;1:3u")
+        assert result == b"\x1b[118;1:3u"
         assert called == []

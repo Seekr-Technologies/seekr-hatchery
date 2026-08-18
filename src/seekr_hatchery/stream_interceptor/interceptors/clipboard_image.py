@@ -25,7 +25,6 @@ import logging
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -169,13 +168,6 @@ def save_image(data: bytes, target_dir: Path) -> Path:
 # ── Paste interceptor ─────────────────────────────────────────────────────────
 
 
-@dataclass
-class PasteInputResult:
-    """Bytes the PTY proxy should forward to the agent."""
-
-    to_agent: bytes = b""
-
-
 # Paste-keystroke triggers — sequences we treat as "user wants to paste an
 # image."  When one of these appears in stdin and the host clipboard holds
 # an image, we replace it with the agent's reference; otherwise it passes
@@ -196,8 +188,13 @@ _PASTE_TRIGGERS: tuple[bytes, ...] = (
 class PasteInterceptor:
     """Stateless Ctrl-V interceptor for clipboard image paste.
 
+    A ``stream_interceptor.StreamInterceptor``: it transforms the stdin
+    stream (:meth:`on_stdin`) and leaves stdout untouched (identity
+    :meth:`on_stdout`).  Satisfies the protocol structurally rather than
+    by subclassing, keeping this module independent of the PTY plumbing.
+
     One instance per interactive session.  No state machine, no
-    capture mode, no timeouts — every call to :meth:`feed_stdin` is
+    capture mode, no timeouts — every call to :meth:`on_stdin` is
     independent.  The interceptor scans the chunk for any of the
     paste-keystroke triggers (see ``_PASTE_TRIGGERS``) and replaces
     each occurrence with the agent's formatted file reference when
@@ -213,16 +210,20 @@ class PasteInterceptor:
         self._target_dir = target_dir
         self._format_image_reference = format_image_reference
 
-    def feed_stdin(self, chunk: bytes) -> PasteInputResult:
-        """Process *chunk* from the user's stdin.
+    def on_stdin(self, chunk: bytes) -> bytes:
+        """Transform a stdin *chunk* on its way to the agent.
 
         Hot path is the no-trigger branch: plain typing passes through
         without spawning any subprocess, so the per-keystroke overhead
         is at most one cheap membership test per trigger pattern.
         """
         if not any(trigger in chunk for trigger in _PASTE_TRIGGERS):
-            return PasteInputResult(to_agent=chunk)
-        return PasteInputResult(to_agent=self._intercept_paste_keystroke(chunk))
+            return chunk
+        return self._intercept_paste_keystroke(chunk)
+
+    def on_stdout(self, chunk: bytes) -> bytes:
+        """Pass agent output straight through — this plugin is stdin-only."""
+        return chunk
 
     # ── Internals ─────────────────────────────────────────────────────────────
 
