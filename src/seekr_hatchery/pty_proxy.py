@@ -13,7 +13,10 @@ plumbing:
    stdout ◀──────────────────── master_fd ◀── child
 
 Anything that wants to interpose itself on the stream implements the
-:class:`PasteInputSink` protocol; this module reads, dispatches, writes.
+:class:`~seekr_hatchery.stream_interceptor.StreamInterceptor` protocol;
+``run_with_pty`` takes one and this module reads, dispatches, writes.  To
+compose several behaviors, pass a ``stream_interceptor.InterceptorChain``
+(itself a single ``StreamInterceptor``).
 
 Stdlib only.  No threads — a single ``select`` loop drives both fds.
 """
@@ -31,7 +34,9 @@ import sys
 import termios
 import time
 import tty
-from typing import Callable, Protocol, runtime_checkable
+from typing import Callable
+
+from seekr_hatchery.stream_interceptor import StreamInterceptor
 
 logger = logging.getLogger(__name__)
 
@@ -39,25 +44,6 @@ logger = logging.getLogger(__name__)
 # (≤4096 bytes pre-base64) usually arrive whole, small enough that the
 # pump stays responsive on slow terminals.
 _READ_CHUNK: int = 65536
-
-
-# ── Protocol ──────────────────────────────────────────────────────────────────
-
-
-@runtime_checkable
-class PasteInputSink(Protocol):
-    """The slice of ``PasteInterceptor`` that ``_pump`` cares about.
-
-    Defined as a Protocol so tests can hand in a fake without inheriting
-    from the real class.  See ``clipboard_image.PasteInterceptor``.
-    """
-
-    def feed_stdin(self, chunk: bytes) -> object:
-        """Process *chunk* from the user's stdin and return a result object.
-
-        The returned object must expose a ``to_agent: bytes`` attribute
-        holding the bytes the pump should forward to the agent.
-        """
 
 
 # ── PTY pump (testable in isolation) ──────────────────────────────────────────
@@ -83,17 +69,17 @@ def _pump(
     master_fd: int,
     stdout_fd: int,
     is_running: Callable[[], bool],
-    interceptor: PasteInputSink,
+    interceptor: StreamInterceptor,
 ) -> None:
     """Run the byte pump until *is_running()* returns False or master closes.
 
     Reads from ``stdin_fd`` and ``master_fd``; writes user-facing output
     to ``stdout_fd`` and agent-bound bytes to ``master_fd``.
 
-    *interceptor* sees every stdin chunk and returns the bytes the pump
-    should forward to the agent.  Plain typing passes through unchanged;
-    the interceptor only modifies bytes when it has work to do (e.g.
-    swapping a Ctrl-V keystroke for a clipboard image reference).
+    Every stdin chunk passes through ``interceptor.on_stdin`` before reaching
+    the agent and every stdout chunk through ``interceptor.on_stdout`` before
+    reaching the terminal.  To compose several behaviors, pass an
+    ``InterceptorChain`` — the fold lives there, not here.
     """
     master_open = True
     while is_running() and master_open:
@@ -117,10 +103,9 @@ def _pump(
             if not chunk:
                 # User's stdin closed (e.g. EOF from a piped session).
                 return
-            result = interceptor.feed_stdin(chunk)
-            to_agent: bytes = getattr(result, "to_agent", b"")
-            if to_agent:
-                _write_all(master_fd, to_agent)
+            data = interceptor.on_stdin(chunk)
+            if data:
+                _write_all(master_fd, data)
 
         if master_fd in rlist:
             try:
@@ -134,7 +119,7 @@ def _pump(
             if not chunk:
                 master_open = False
                 continue
-            _write_all(stdout_fd, chunk)
+            _write_all(stdout_fd, interceptor.on_stdout(chunk))
 
 
 # ── Top-level entrypoint ──────────────────────────────────────────────────────
@@ -171,7 +156,7 @@ def _attach_ctty() -> None:
     fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
 
-def run_with_pty(cmd: list[str], interceptor: PasteInputSink) -> int:
+def run_with_pty(cmd: list[str], interceptor: StreamInterceptor) -> int:
     """Run *cmd* under a fresh PTY with stdin/stdout interposed.
 
     Returns the child's exit code.  Caller must already have confirmed

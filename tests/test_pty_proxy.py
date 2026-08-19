@@ -19,6 +19,7 @@ import textwrap
 import threading
 import time
 from dataclasses import dataclass, field
+from typing import Callable
 
 import seekr_hatchery.pty_proxy as pty_proxy
 
@@ -28,22 +29,25 @@ import seekr_hatchery.pty_proxy as pty_proxy
 
 
 @dataclass
-class _FakeResult:
-    to_agent: bytes = b""
-
-
-@dataclass
 class _FakeInterceptor:
-    """Minimal PasteInputSink stand-in."""
+    """Configurable ``StreamInterceptor`` stand-in.
 
-    feeds: list[bytes] = field(default_factory=list)
-    next_results: list[_FakeResult] = field(default_factory=list)
+    Records every chunk it sees per direction and applies an optional
+    transform; identity in both directions by default.
+    """
 
-    def feed_stdin(self, chunk: bytes) -> _FakeResult:
-        self.feeds.append(chunk)
-        if self.next_results:
-            return self.next_results.pop(0)
-        return _FakeResult(to_agent=chunk)
+    stdin_seen: list[bytes] = field(default_factory=list)
+    stdout_seen: list[bytes] = field(default_factory=list)
+    stdin_fn: Callable[[bytes], bytes] | None = None
+    stdout_fn: Callable[[bytes], bytes] | None = None
+
+    def on_stdin(self, chunk: bytes) -> bytes:
+        self.stdin_seen.append(chunk)
+        return self.stdin_fn(chunk) if self.stdin_fn else chunk
+
+    def on_stdout(self, chunk: bytes) -> bytes:
+        self.stdout_seen.append(chunk)
+        return self.stdout_fn(chunk) if self.stdout_fn else chunk
 
 
 def _pump_in_thread(pump_kwargs: dict) -> threading.Thread:
@@ -111,7 +115,7 @@ class TestPumpForwarding:
             except OSError:
                 pass
 
-        assert interceptor.feeds == [b"hello"]
+        assert interceptor.stdin_seen == [b"hello"]
 
     def test_master_output_forwarded_to_stdout(self):
         stdin_r, stdin_w = os.pipe()
