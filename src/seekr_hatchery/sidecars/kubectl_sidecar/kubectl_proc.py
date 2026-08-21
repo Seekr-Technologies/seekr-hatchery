@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import subprocess
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +32,6 @@ def start_kubectl_proxy_proc(
     is seen, then returns.  Raises :class:`RuntimeError` if kubectl is not found,
     the process exits early, or the port cannot be determined within *timeout* seconds.
     """
-    import shutil
-    import time
-
     if not shutil.which("kubectl"):
         raise RuntimeError("kubectl not found on PATH — install kubectl on the host to use the kubectl feature")
 
