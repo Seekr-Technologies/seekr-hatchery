@@ -257,8 +257,6 @@ class TestRenderRunArgv:
     ) -> list[str]:
         if runtime is None:
             runtime = docker.DockerRuntime()
-        if mutator is None:
-            mutator = _make_mutator()
         spec = docker.build_spec(
             image="test-image",
             mounts=[],
@@ -266,11 +264,9 @@ class TestRenderRunArgv:
             name="test-task",
             hatchery_repo="/repo",
             container_name=None,
-            mutator=mutator,
-            proxy_token=proxy_token,
-            proxy_port=proxy_port,
             agent_cmd=["codex"],
-            backend=agent.CODEX,
+            extra_env=agent.CODEX.container_env(proxy_token, proxy_port),
+            needs_host_gateway=True,
             **spec_kwargs,
         )
         return runtime.render_run_argv(spec)
@@ -381,11 +377,7 @@ class TestRenderRunArgv:
             name="test-task",
             hatchery_repo="/repo",
             container_name=None,
-            mutator=None,
-            proxy_token=None,
-            proxy_port=None,
             agent_cmd=["codex"],
-            backend=agent.CODEX,
         )
         cmd = docker.DockerRuntime().render_run_argv(spec)
         cmd_str = " ".join(cmd)
@@ -419,9 +411,6 @@ class TestRunInteractive:
             name="test-task",
             hatchery_repo="/repo",
             container_name=None,
-            mutator=None,
-            proxy_token=None,
-            proxy_port=None,
             agent_cmd=[],
             command_override=["/bin/bash"],
             interactive=True,
@@ -449,9 +438,6 @@ class TestRunInteractive:
             name="test-task",
             hatchery_repo="/repo",
             container_name=None,
-            mutator=None,
-            proxy_token=None,
-            proxy_port=None,
             agent_cmd=[],
             command_override=["/bin/bash"],
             interactive=True,
@@ -471,9 +457,6 @@ class TestRunInteractive:
             name="test-task",
             hatchery_repo="/repo",
             container_name=None,
-            mutator=None,
-            proxy_token=None,
-            proxy_port=None,
             agent_cmd=[],
             command_override=["/bin/bash"],
             interactive=True,
@@ -498,9 +481,6 @@ class TestRunInteractive:
             name="test-task",
             hatchery_repo="/repo",
             container_name=None,
-            mutator=None,
-            proxy_token=None,
-            proxy_port=None,
             agent_cmd=[],
             command_override=["echo", "hello"],
         )
@@ -525,9 +505,6 @@ class TestRunInteractive:
             name="test-task",
             hatchery_repo="/repo",
             container_name=None,
-            mutator=None,
-            proxy_token=None,
-            proxy_port=None,
             agent_cmd=[],
             command_override=["echo", "hello"],
         )
@@ -538,19 +515,6 @@ class TestRunInteractive:
 # ---------------------------------------------------------------------------
 # Golden argv / ContainerSpec assertions (full-output)
 # ---------------------------------------------------------------------------
-
-
-class _FixedEnvBackend:
-    """Minimal backend stub with deterministic container_env for golden tests."""
-
-    kind = "TEST"
-
-    @staticmethod
-    def container_env(proxy_token: str, proxy_port: int) -> dict[str, str]:
-        return {
-            "OPENAI_API_KEY": proxy_token,
-            "OPENAI_BASE_URL": f"http://host.docker.internal:{proxy_port}",
-        }
 
 
 class TestGoldenSpecAndArgv:
@@ -570,11 +534,12 @@ class TestGoldenSpecAndArgv:
             name="test-task",
             hatchery_repo="/repo",
             container_name="hatchery-ctr",
-            mutator=lambda h: h,
-            proxy_token="proxy-uuid-token",
-            proxy_port=9999,
             agent_cmd=["codex"],
-            backend=_FixedEnvBackend(),
+            extra_env={
+                "OPENAI_API_KEY": "proxy-uuid-token",
+                "OPENAI_BASE_URL": "http://host.docker.internal:9999",
+            },
+            needs_host_gateway=True,
         )
         assert spec == docker.ContainerSpec(
             image="test-image",
@@ -610,11 +575,7 @@ class TestGoldenSpecAndArgv:
             name="test-task",
             hatchery_repo="/repo",
             container_name=None,
-            mutator=None,
-            proxy_token=None,
-            proxy_port=None,
             agent_cmd=["codex"],
-            backend=_FixedEnvBackend(),
             dind=True,
             cap_add=["NET_BIND_SERVICE"],
         )
@@ -635,11 +596,12 @@ class TestGoldenSpecAndArgv:
             name="test-task",
             hatchery_repo="/repo",
             container_name="hatchery-ctr",
-            mutator=lambda h: h,
-            proxy_token="proxy-uuid-token",
-            proxy_port=9999,
             agent_cmd=["codex"],
-            backend=_FixedEnvBackend(),
+            extra_env={
+                "OPENAI_API_KEY": "proxy-uuid-token",
+                "OPENAI_BASE_URL": "http://host.docker.internal:9999",
+            },
+            needs_host_gateway=True,
         )
         assert docker.DockerRuntime().render_run_argv(spec) == [
             "docker",
@@ -673,11 +635,12 @@ class TestGoldenSpecAndArgv:
             name="test-task",
             hatchery_repo="/repo",
             container_name="hatchery-ctr",
-            mutator=lambda h: h,
-            proxy_token="proxy-uuid-token",
-            proxy_port=9999,
             agent_cmd=["codex"],
-            backend=_FixedEnvBackend(),
+            extra_env={
+                "OPENAI_API_KEY": "proxy-uuid-token",
+                "OPENAI_BASE_URL": "http://host.docker.internal:9999",
+            },
+            needs_host_gateway=True,
         )
         assert docker.PodmanRuntime().render_run_argv(spec) == [
             "podman",
@@ -713,11 +676,7 @@ class TestGoldenSpecAndArgv:
             name="test-task",
             hatchery_repo="/repo",
             container_name=None,
-            mutator=None,
-            proxy_token=None,
-            proxy_port=None,
             agent_cmd=["codex"],
-            backend=_FixedEnvBackend(),
             dind=True,
             cap_add=["NET_BIND_SERVICE"],
         )
@@ -1782,24 +1741,3 @@ class TestRemoveClipboardDir:
         # No clipboard subdir was ever created.
         docker.remove_clipboard_dir(tmp_path)  # must not raise
         assert not docker.clipboard_image_dir(tmp_path).exists()
-
-
-class TestMaybeApiServerErrorPath:
-    """``_maybe_api_server`` must surface ``backend.proxy_kwargs()`` errors
-    as ``ui.error`` + ``sys.exit(1)`` so users see a clean message rather
-    than a stack trace.  Mirrors the existing handling for
-    ``make_header_mutator``.
-    """
-
-    def test_runtime_error_from_proxy_kwargs_exits_cleanly(self, monkeypatch, capsys):
-        class BadBackend:
-            def proxy_kwargs(self):
-                raise RuntimeError("clean message for the user")
-
-        with pytest.raises(SystemExit) as excinfo:
-            with docker._maybe_api_server(lambda h: h, "tok", BadBackend()):
-                pass
-        assert excinfo.value.code == 1
-        captured = capsys.readouterr()
-        # ui.error writes to stderr by default.
-        assert "clean message for the user" in (captured.err + captured.out)

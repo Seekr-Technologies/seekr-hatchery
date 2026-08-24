@@ -649,7 +649,7 @@ class CodexBackend(AgentBackend):
         # container sees ``…/v1``).
         #
         # TLS verification uses the OS trust store via
-        # ``truststore.SSLContext`` in ``proxy.api_server``, so any
+        # ``truststore.SSLContext`` in ``sidecars.api_sidecar.proxy.api_server``, so any
         # non-public CA the user has installed system-wide is trusted
         # automatically — no hatchery-specific CA config needed.
         custom = CodexBackend._read_custom_provider()

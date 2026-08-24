@@ -25,7 +25,6 @@ Public interface::
 import http.client
 import http.server
 import logging
-import socketserver
 import ssl
 import threading
 from collections.abc import Callable, Generator
@@ -34,6 +33,8 @@ from typing import Any
 
 import truststore
 import urllib3
+
+from seekr_hatchery.sidecars.http_server import ThreadingHTTPServer
 
 _UPSTREAM_TIMEOUT = urllib3.Timeout(connect=10, read=60)
 
@@ -319,16 +320,10 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
         self._handle_request()
 
 
-class _ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
-    """Internal threading server — one thread per request."""
-
-    daemon_threads = True
-
-
 class APIServer:
     """Public handle for a running API proxy server.
 
-    Intentionally a thin wrapper around :class:`_ThreadingHTTPServer` rather
+    Intentionally a thin wrapper around :class:`ThreadingHTTPServer` rather
     than a subclass.  Subclassing would expose the full ``HTTPServer`` /
     ``socketserver`` API (``shutdown()``, ``server_close()``, ``socket``, …)
     on a type that callers receive from :func:`api_server`.  Those methods are
@@ -339,7 +334,7 @@ class APIServer:
     future, add explicit properties here rather than inheriting everything.
     """
 
-    def __init__(self, server: _ThreadingHTTPServer) -> None:
+    def __init__(self, server: ThreadingHTTPServer) -> None:
         self._server = server
 
     @property
@@ -402,7 +397,7 @@ def api_server(
         ssl_context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         _BoundHandler.pool = urllib3.PoolManager(maxsize=16, ssl_context=ssl_context)
 
-    server = _ThreadingHTTPServer(("0.0.0.0", 0), _BoundHandler)
+    server = ThreadingHTTPServer(("0.0.0.0", 0), _BoundHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     logger.debug(

@@ -13,18 +13,6 @@ import seekr_hatchery.sessions as sessions
 import seekr_hatchery.utils as utils
 from seekr_hatchery.models import SessionMeta
 
-
-def _make_mutator(key: str = "test-key"):
-    """Return a simple header mutator for tests."""
-
-    def _mutate(headers):
-        out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")}
-        out["Authorization"] = f"Bearer {key}"
-        return out
-
-    return _mutate
-
-
 # ---------------------------------------------------------------------------
 # find_task_file
 # ---------------------------------------------------------------------------
@@ -695,15 +683,12 @@ class TestDindCapMerge:
         workdir="/repo/.hatchery/worktrees/task",
         hatchery_repo="/repo",
         name="task",
-        mutator=_make_mutator("test-key"),
-        proxy_token="test-proxy-token",
         agent_cmd=["codex"],
-        backend=agent.CODEX,
     )
 
     def _run(self, **kwargs) -> list[str]:
         args = {**self._COMMON, **kwargs}
-        spec = docker.build_spec(**args, container_name=None, proxy_port=9999)
+        spec = docker.build_spec(**args, container_name=None)
         return docker.DockerRuntime().render_run_argv(spec)
 
     def test_user_caps_merged(self):
@@ -769,16 +754,13 @@ class TestRunContainerDindFlags:
         workdir="/repo/.hatchery/worktrees/task",
         hatchery_repo="/repo",
         name="task",
-        mutator=_make_mutator("test-key"),
-        proxy_token="test-proxy-token",
         agent_cmd=["codex"],
-        backend=agent.CODEX,
     )
 
     def _run(self, **kwargs) -> list[str]:
         """Build spec and render argv (no subprocess call needed)."""
         args = {**self._COMMON, **kwargs}
-        spec = docker.build_spec(**args, container_name=None, proxy_port=9999)
+        spec = docker.build_spec(**args, container_name=None)
         return docker.DockerRuntime().render_run_argv(spec)
 
     def test_dind_false_no_extra_flags(self):
@@ -855,16 +837,13 @@ class TestRunContainerName:
         workdir="/repo/.hatchery/worktrees/task",
         hatchery_repo="/repo",
         name="my-task",
-        mutator=None,
-        proxy_token=None,
         agent_cmd=["codex"],
-        backend=agent.CODEX,
     )
 
     def _run(self, **kwargs) -> list[str]:
         args = {**self._COMMON, **kwargs}
         container_name = args.pop("container_name", None)
-        spec = docker.build_spec(**args, container_name=container_name, proxy_port=None)
+        spec = docker.build_spec(**args, container_name=container_name)
         return docker.DockerRuntime().render_run_argv(spec)
 
     def test_name_injected_when_provided(self):

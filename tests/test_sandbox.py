@@ -15,8 +15,9 @@ import pytest
 
 import seekr_hatchery.agents as agent
 import seekr_hatchery.docker as docker
-import seekr_hatchery.proxy as proxy_mod
 import seekr_hatchery.sessions as sessions
+import seekr_hatchery.sidecars as sidecars
+import seekr_hatchery.sidecars.api_sidecar.proxy as proxy_mod
 from seekr_hatchery.models import SessionMeta
 from seekr_hatchery.mount import Mount, VolumeMount
 from seekr_hatchery.seeded_volumes import prepare_volume_mounts
@@ -131,17 +132,17 @@ def no_wt_run(
         mutator: Callable[[dict], dict] | None = None,
         proxy_token: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        with docker._maybe_api_server(mutator, proxy_token, agent.CODEX) as api_proxy:
+        sidecar = sidecars.ApiProxySidecar(mutator, proxy_token, agent.CODEX)
+        with sidecars.run_sidecars([sidecar]) as contrib:
             spec = docker.build_spec(
                 image=no_wt_image,
-                mounts=mounts,
+                mounts=[*mounts, *contrib.mounts],
                 workdir=container_cwd,
                 name="test-no-wt",
                 hatchery_repo=container_cwd,
                 container_name=None,
-                mutator=mutator,
-                proxy_token=proxy_token,
-                proxy_port=api_proxy.port if api_proxy else None,
+                extra_env=contrib.env,
+                needs_host_gateway=contrib.needs_host_gateway,
                 agent_cmd=[],
                 command_override=command,
             )
@@ -264,9 +265,6 @@ def wt_run(
             name=task_name,
             hatchery_repo=container_repo,
             container_name=None,
-            mutator=None,
-            proxy_token=None,
-            proxy_port=None,
             agent_cmd=[],
             command_override=command,
         )
@@ -365,9 +363,6 @@ class TestSandboxShell:
             name="test-sandbox",
             hatchery_repo="/",
             container_name=None,
-            mutator=None,
-            proxy_token=None,
-            proxy_port=None,
             agent_cmd=[],
             command_override=["echo", "sandbox-ok"],
             interactive=True,
@@ -636,9 +631,6 @@ class TestDinD:
             name="test-dind",
             hatchery_repo="/",
             container_name=None,
-            mutator=None,
-            proxy_token=None,
-            proxy_port=None,
             agent_cmd=[],
             dind=True,
             command_override=command,
@@ -714,9 +706,6 @@ class TestDinD:
             name="test-cap",
             hatchery_repo="/",
             container_name=None,
-            mutator=None,
-            proxy_token=None,
-            proxy_port=None,
             agent_cmd=[],
             dind=True,
             command_override=["grep", "CapEff", "/proc/self/status"],
@@ -797,9 +786,6 @@ class TestFileMountSymlink:
             name="test-file-mount",
             hatchery_repo="/",
             container_name=None,
-            mutator=None,
-            proxy_token=None,
-            proxy_port=None,
             agent_cmd=[],
             command_override=["cat", "/home/hatchery/test.json"],
         )
@@ -831,9 +817,6 @@ class TestFileMountSymlink:
             name="test-file-mount-write",
             hatchery_repo="/",
             container_name=None,
-            mutator=None,
-            proxy_token=None,
-            proxy_port=None,
             agent_cmd=[],
             command_override=["sh", "-c", "echo 'updated' > /home/hatchery/test.json"],
         )
@@ -849,9 +832,6 @@ class TestFileMountSymlink:
             name="test-file-mount-read",
             hatchery_repo="/",
             container_name=None,
-            mutator=None,
-            proxy_token=None,
-            proxy_port=None,
             agent_cmd=[],
             command_override=["cat", "/home/hatchery/test.json"],
         )
@@ -915,9 +895,6 @@ class TestCodexConfigPersistence:
                 name="test-codex-config",
                 hatchery_repo="/",
                 container_name=None,
-                mutator=None,
-                proxy_token=None,
-                proxy_port=None,
                 agent_cmd=[],
                 command_override=[
                     "sh",

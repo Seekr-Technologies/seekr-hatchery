@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 
 import pytest
 
-import seekr_hatchery.proxy as proxy
+import seekr_hatchery.sidecars.api_sidecar.proxy as proxy
 
 # ---------------------------------------------------------------------------
 # Helpers

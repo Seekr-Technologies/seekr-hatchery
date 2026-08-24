@@ -8,12 +8,15 @@ into ``sessions``, where ``sessions.launch`` will call ``docker.run_session``
 and the cycle would otherwise close.
 """
 
+import logging
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from seekr_hatchery.includes import IncludeEntry, load_include_entries
+
+logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 
@@ -142,3 +145,67 @@ class SessionMeta(BaseModel):
         from seekr_hatchery.sessions import find_task_file
 
         return find_task_file(self.task_dir, self.name)
+
+
+# ── kubectl sidecar config ───────────────────────────────────────────────────
+
+
+_KNOWN_VERBS: frozenset[str] = frozenset(
+    {"get", "list", "watch", "create", "update", "patch", "delete", "deletecollection", "*"}
+)
+
+
+class KubectlRBACRule(BaseModel):
+    """Single allowlist rule for the kubectl RBAC proxy.
+
+    A request is allowed if it matches all three fields of at least one rule.
+    ``"*"`` acts as a wildcard for that field.
+
+    ``namespaces`` uses ``""`` (empty string) to match cluster-scoped requests
+    (those without a ``/namespaces/{name}/`` segment in the URL, e.g.
+    ``kubectl get pods -A`` or ``kubectl get nodes``).
+    """
+
+    verbs: list[str]
+    """k8s verbs: get, list, watch, create, update, patch, delete, or ``*``.
+
+    Client-side kubectl commands like ``describe``, ``logs``, ``exec`` are NOT
+    valid RBAC verbs — they resolve to HTTP methods (``describe`` → ``GET``,
+    ``exec`` → blocked subresource).  Unknown verbs are warned at load time and
+    will never match any request.
+    """
+
+    resources: list[str]
+    """Resource kinds: pods, services, deployments, etc., or ``*``."""
+
+    namespaces: list[str] = ["*"]
+    """Namespace names.  ``*`` matches everything.  ``""`` matches cluster-scoped
+    (all-namespace / non-namespaced) requests."""
+
+    @field_validator("verbs")
+    @classmethod
+    def _warn_unknown_verbs(cls, verbs: list[str]) -> list[str]:
+        unknown = [v for v in verbs if v not in _KNOWN_VERBS]
+        if unknown:
+            logger.warning(
+                "kubectl RBAC rules contain unrecognized verb(s) %s — "
+                "these will never match any request. "
+                "Valid verbs: %s. "
+                "Note: 'describe' is a kubectl client command, not a k8s verb "
+                "(it issues GET requests, which 'get' already covers).",
+                unknown,
+                sorted(_KNOWN_VERBS - {"*"}),
+            )
+        return verbs
+
+
+class KubectlConfig(BaseModel):
+    """Top-level kubectl proxy configuration loaded from docker.yaml."""
+
+    context: str | None = None
+    """Kubeconfig context to use.  Defaults to the host's active context.
+    Set this when you have multiple contexts and want to pin which cluster
+    the agent can reach (e.g. ``context: my-dev-cluster``)."""
+
+    rules: list[KubectlRBACRule] = []
+    """Allowlist rules.  Empty list means deny everything (fail-closed)."""
