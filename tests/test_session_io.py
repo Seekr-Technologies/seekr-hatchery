@@ -316,6 +316,32 @@ class TestMigrateDb:
         assert ".hatchery/" in exclude
         assert json.loads(meta_path.read_text())["schema_version"] == sessions._DB_SCHEMA_VERSION
 
+    def test_v1_collision_backs_up_store_copy_instead_of_dropping_it(
+        self, fake_hatchery_dir: Path, tmp_path: Path
+    ) -> None:
+        """A store file colliding with an existing <repo>/.hatchery/ entry is preserved, not lost."""
+        meta_path = fake_hatchery_dir / "meta.json"
+        meta_path.write_text(json.dumps({"schema_version": 1}))
+
+        repo = tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+        (repo / ".hatchery").mkdir(parents=True)
+        (repo / ".hatchery" / "Dockerfile.codex").write_text("FROM existing\n")
+
+        store = fake_hatchery_dir / "repos" / "myrepo-abcd1234"
+        store.mkdir(parents=True)
+        (store / "Dockerfile.codex").write_text("FROM store\n")
+        (store / "repo.json").write_text(json.dumps({"path": str(repo), "name": "repo"}))
+
+        sessions.migrate_db()
+
+        # The pre-existing file at the destination is untouched.
+        assert (repo / ".hatchery" / "Dockerfile.codex").read_text() == "FROM existing\n"
+        # The store's colliding copy is preserved alongside it, not deleted.
+        assert (repo / ".hatchery" / "Dockerfile.codex.migrated-backup").read_text() == "FROM store\n"
+        # The store itself is still fully cleaned up.
+        assert not store.exists()
+
     def test_v1_leaves_store_when_repo_path_gone(self, fake_hatchery_dir: Path, tmp_path: Path) -> None:
         """A store whose recorded repo path no longer exists is left in place."""
         meta_path = fake_hatchery_dir / "meta.json"
@@ -797,6 +823,14 @@ class TestSessionCreateChat:
         assert not (git_repo / ".hatchery" / "worktrees" / "chat-1").exists()
         assert sessions.find_task_file(git_repo / ".hatchery" / "tasks", "chat-1") is None
         assert _git(git_repo, "rev-parse", "--verify", "hatchery/chat-1", check=False).returncode != 0
+
+    def test_chat_no_commit_in_repo_excludes_hatchery_dir(self, git_repo, fake_tasks_db, no_input):
+        """no-commit chat sessions still hide .hatchery/ via .git/info/exclude."""
+        sessions.create(
+            name="chat-1", repo=git_repo, type="chat", backend=agent.CODEX, no_commit=True, in_repo=True
+        )
+        exclude = (git_repo / ".git" / "info" / "exclude").read_text()
+        assert ".hatchery/" in exclude
 
 
 class TestPrepareSandbox:

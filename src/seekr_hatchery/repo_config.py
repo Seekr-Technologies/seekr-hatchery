@@ -15,7 +15,9 @@ import yaml
 from pydantic import BaseModel
 
 import seekr_hatchery.constants as constants
+import seekr_hatchery.schema_migration as schema_migration
 import seekr_hatchery.ui as ui
+import seekr_hatchery.user_config as user_config
 
 
 class RepoConfigModel(BaseModel):
@@ -25,14 +27,7 @@ class RepoConfigModel(BaseModel):
 
 def _migrate(data: dict) -> dict:
     """Bring a raw config dict up to the current schema version in place."""
-    v = str(data.get("schema_version", "0"))
-
-    # "0" → "1": initial versioned schema (just stamp the version)
-    if v == "0":
-        v = "1"
-
-    data["schema_version"] = v
-    return data
+    return schema_migration.stamp_v1(data)
 
 
 def load_repo_config(repo: Path) -> RepoConfigModel:
@@ -51,3 +46,10 @@ def load_repo_config(repo: Path) -> RepoConfigModel:
     except Exception as exc:
         ui.error(f"invalid {constants.REPO_CONFIG}: {exc}")
         sys.exit(1)
+
+
+def resolve_no_commit(repo: Path, cfg: "user_config.UserConfig", commit: bool | None) -> bool:
+    """Resolve the effective no_commit value: flag > repo config > global config."""
+    repo_cfg = load_repo_config(repo)
+    effective_auto_commit = repo_cfg.auto_commit if repo_cfg.auto_commit is not None else cfg.auto_commit
+    return (not commit) if commit is not None else (not effective_auto_commit)

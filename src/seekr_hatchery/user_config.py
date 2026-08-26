@@ -22,6 +22,7 @@ import yaml
 from pydantic import BaseModel, ValidationError
 
 import seekr_hatchery.agents as agent
+import seekr_hatchery.schema_migration as schema_migration
 import seekr_hatchery.ui as ui
 
 logger = logging.getLogger(__name__)
@@ -46,14 +47,7 @@ class UserConfigModel(BaseModel):
 
 def _migrate(data: dict) -> dict:
     """Bring a raw config dict up to the current schema version in place."""
-    v = str(data.get("schema_version", "0"))
-
-    # "0" → "1": initial versioned schema (just stamp the version)
-    if v == "0":
-        v = "1"
-
-    data["schema_version"] = v
-    return data
+    return schema_migration.stamp_v1(data)
 
 
 # ---------------------------------------------------------------------------

@@ -446,9 +446,19 @@ def migrate_db() -> None:
                         continue
                     target = dest / item.name
                     if target.exists():
-                        if item.is_dir():
-                            shutil.copytree(item, target, dirs_exist_ok=True)
-                            shutil.rmtree(item)
+                        # Never drop data on a name collision — move the store's
+                        # copy aside instead of merging or overwriting, and let
+                        # the user reconcile the two by hand.
+                        backup = dest / f"{item.name}.migrated-backup"
+                        if backup.exists():
+                            shutil.rmtree(backup) if backup.is_dir() else backup.unlink()
+                        shutil.move(str(item), str(backup))
+                        logger.warning(
+                            "DB migrate v1→v2: %s already exists at %s — store's copy saved to %s",
+                            item.name,
+                            dest,
+                            backup,
+                        )
                         continue
                     shutil.move(str(item), str(target))
                 ensure_git_exclude(repo_path, ".hatchery/")

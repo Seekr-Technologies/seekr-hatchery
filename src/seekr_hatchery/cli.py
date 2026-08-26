@@ -558,9 +558,7 @@ def cmd_new(
     cfg = user_config.UserConfig.load()
     backend = cfg.resolve_backend(agent_name)
     use_editor = editor if editor is not None else cfg.open_editor
-    repo_cfg = repo_config.load_repo_config(repo)
-    effective_auto_commit = repo_cfg.auto_commit if repo_cfg.auto_commit is not None else cfg.auto_commit
-    no_commit = (not commit) if commit is not None else (not effective_auto_commit)
+    no_commit = repo_config.resolve_no_commit(repo, cfg, commit)
 
     # Resolve --include paths: convert CLI tuples → entries, then sessions
     # merges them with docker.yaml's 'include:' list.
@@ -649,9 +647,7 @@ def cmd_chat(name: str | None, agent_name: str, commit: bool | None) -> None:
 
     cfg = user_config.UserConfig.load()
     backend = cfg.resolve_backend(agent_name)
-    repo_cfg = repo_config.load_repo_config(repo)
-    effective_auto_commit = repo_cfg.auto_commit if repo_cfg.auto_commit is not None else cfg.auto_commit
-    no_commit = (not commit) if commit is not None else (not effective_auto_commit)
+    no_commit = repo_config.resolve_no_commit(repo, cfg, commit)
 
     name = sessions.next_chat_name(repo) if name is None else utils.to_name(name)
 
@@ -833,9 +829,7 @@ def cmd_sandbox(shell: str, rebuild_sandbox: bool, commit: bool | None) -> None:
     repo, in_repo = git.git_root_or_cwd()
     cfg = user_config.UserConfig.load()
     backend = cfg.resolve_backend(None)
-    repo_cfg = repo_config.load_repo_config(repo)
-    effective_auto_commit = repo_cfg.auto_commit if repo_cfg.auto_commit is not None else cfg.auto_commit
-    no_commit = (not commit) if commit is not None else (not effective_auto_commit)
+    no_commit = repo_config.resolve_no_commit(repo, cfg, commit)
 
     hdir = sessions.prepare_sandbox(repo, in_repo=in_repo, backend=backend, no_commit=no_commit)
 
