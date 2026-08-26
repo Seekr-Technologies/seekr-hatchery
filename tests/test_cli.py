@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import yaml
 from click.testing import CliRunner
 
 import seekr_hatchery.docker as docker
@@ -325,11 +326,11 @@ class TestCliNew:
 
 class TestCmdConfigEdit:
     def test_happy_path(self, home):
-        """Editor writes valid JSON → exit 0, 'Config updated' in output."""
+        """Editor writes valid YAML → exit 0, 'Config updated' in output."""
         runner = CliRunner()
 
         def fake_editor(path):
-            path.write_text('{"schema_version": "1", "default_agent": "CODEX", "open_editor": true}')
+            path.write_text("schema_version: '1'\ndefault_agent: CODEX\nopen_editor: true\n")
 
         with patch("seekr_hatchery.cli.open_for_editing", side_effect=fake_editor):
             result = runner.invoke(cli, ["config", "edit"])
@@ -340,14 +341,14 @@ class TestCmdConfigEdit:
     def test_invalid_then_decline_restores_original(self, home):
         """Editor corrupts file, user declines → exit 1, original file restored."""
         runner = CliRunner()
-        config_path = home / ".hatchery" / "config.json"
+        config_path = home / ".hatchery" / "config.yaml"
         # Write a v0 config (missing schema_version and open_editor)
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        original = '{"default_agent": "CODEX"}'
+        original = "default_agent: CODEX\n"
         config_path.write_text(original)
 
         def fake_editor(path):
-            path.write_text("not valid json {{")
+            path.write_text("not valid yaml: [{{")
 
         with patch("seekr_hatchery.cli.open_for_editing", side_effect=fake_editor):
             result = runner.invoke(cli, ["config", "edit"], input="n\n")
@@ -357,16 +358,16 @@ class TestCmdConfigEdit:
         assert "Restored" in result.output
         # Should restore the *original* file, not the migrated version
         assert config_path.read_text() == original
-        assert not config_path.with_suffix(".json.bak").exists()
+        assert not config_path.with_suffix(".yaml.bak").exists()
 
     def test_invalid_then_decline_no_prior_file(self, home):
         """No config existed before → decline removes the file entirely."""
         runner = CliRunner()
-        config_path = home / ".hatchery" / "config.json"
+        config_path = home / ".hatchery" / "config.yaml"
         assert not config_path.exists()
 
         def fake_editor(path):
-            path.write_text("not valid json {{")
+            path.write_text("not valid yaml: [{{")
 
         with patch("seekr_hatchery.cli.open_for_editing", side_effect=fake_editor):
             result = runner.invoke(cli, ["config", "edit"], input="n\n")
@@ -375,7 +376,7 @@ class TestCmdConfigEdit:
         assert not config_path.exists()
 
     def test_invalid_then_fix_succeeds(self, home):
-        """Editor writes bad JSON, user retries and fixes it → exit 0."""
+        """Editor writes bad YAML, user retries and fixes it → exit 0."""
         runner = CliRunner()
         call_count = 0
 
@@ -383,9 +384,9 @@ class TestCmdConfigEdit:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                path.write_text("not valid json {{")
+                path.write_text("not valid yaml: [{{")
             else:
-                path.write_text('{"schema_version": "1", "open_editor": true}')
+                path.write_text("schema_version: '1'\nopen_editor: true\n")
 
         with patch("seekr_hatchery.cli.open_for_editing", side_effect=fake_editor):
             result = runner.invoke(cli, ["config", "edit"], input="\n")  # default=Y
@@ -398,7 +399,7 @@ class TestCmdConfigEdit:
     def test_missing_config_creates_defaults(self, home):
         """No existing file → defaults created, editor opens."""
         runner = CliRunner()
-        config_path = home / ".hatchery" / "config.json"
+        config_path = home / ".hatchery" / "config.yaml"
         assert not config_path.exists()
 
         def fake_editor(path):
@@ -413,7 +414,7 @@ class TestCmdConfigEdit:
     def test_backup_cleaned_up_on_success(self, home):
         """On success, the .bak file should be removed."""
         runner = CliRunner()
-        config_path = home / ".hatchery" / "config.json"
+        config_path = home / ".hatchery" / "config.yaml"
 
         def fake_editor(path):
             pass  # leave valid defaults
@@ -422,7 +423,7 @@ class TestCmdConfigEdit:
             result = runner.invoke(cli, ["config", "edit"])
 
         assert result.exit_code == 0
-        assert not config_path.with_suffix(".json.bak").exists()
+        assert not config_path.with_suffix(".yaml.bak").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -710,6 +711,19 @@ class TestSandbox:
         runner = CliRunner()
         with p_root, p_prep as mock_prep, p_rt, p_cfg, p_feat, patch("seekr_hatchery.cli.docker.launch_sandbox_shell"):
             result = runner.invoke(cli, ["sandbox", "--no-commit"])
+
+        assert result.exit_code == 0, result.output
+        assert mock_prep.call_args[1]["no_commit"] is True
+
+    def test_sandbox_repo_config_sets_no_commit_without_flag(self, tmp_path):
+        """repo .hatchery.yaml auto_commit=false + no flag → no_commit=True."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / ".hatchery.yaml").write_text("auto_commit: false\n")
+        p_root, p_prep, p_rt, p_cfg, p_feat = self._patches(repo, tmp_path / "hdir")
+        runner = CliRunner()
+        with p_root, p_prep as mock_prep, p_rt, p_cfg, p_feat, patch("seekr_hatchery.cli.docker.launch_sandbox_shell"):
+            result = runner.invoke(cli, ["sandbox"])
 
         assert result.exit_code == 0, result.output
         assert mock_prep.call_args[1]["no_commit"] is True
@@ -1734,6 +1748,31 @@ class TestCmdChatDispatch:
         # cli._launch receives a SessionMeta; chat sessions have meta.is_chat=True.
         meta_arg = mock_launch.call_args[0][0]
         assert meta_arg.is_chat is True
+
+    def test_chat_repo_config_sets_no_commit_without_flag(self, fake_tasks_db, home):
+        """repo .hatchery.yaml auto_commit=false + no flag → no_commit=True."""
+        repo = home / "repo"
+        repo.mkdir(parents=True, exist_ok=True)
+        (repo / ".hatchery.yaml").write_text("auto_commit: false\n")
+        runner = CliRunner()
+        saved_meta = {}
+
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
+            patch("seekr_hatchery.sessions.next_chat_name", return_value="chat-1"),
+            patch("seekr_hatchery.cli.docker.ensure_dockerfile", return_value=False),
+            patch("seekr_hatchery.cli.docker.ensure_docker_config", return_value=False),
+            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
+            patch("seekr_hatchery.cli.sessions.save_task", side_effect=lambda m: saved_meta.update(m)),
+            patch("seekr_hatchery.cli._launch"),
+            patch("seekr_hatchery.cli.sessions.task_db_path") as mock_db_path,
+        ):
+            mock_db_path.return_value = MagicMock(exists=lambda: False)
+            result = runner.invoke(cli, ["chat"])
+
+        assert result.exit_code == 0, result.output
+        assert saved_meta.get("no_commit") is True
 
 
 class TestCmdStatusShowsType:
@@ -3048,9 +3087,9 @@ class TestAutoCommitResolution:
 
     @staticmethod
     def _write_config(home, auto_commit):
-        path = home / ".hatchery" / "config.json"
+        path = home / ".hatchery" / "config.yaml"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"schema_version": "1", "auto_commit": auto_commit}))
+        path.write_text(yaml.dump({"schema_version": "1", "auto_commit": auto_commit}))
 
     def test_no_flag_auto_commit_true(self, home):
         """No flag + auto_commit=True → no_commit=False."""
@@ -3081,5 +3120,57 @@ class TestAutoCommitResolution:
         self._write_config(home, True)
         with _new_env(real_config=True) as ns:
             result = CliRunner().invoke(cli, ["new", "my-task", "--no-commit"])
+        assert result.exit_code == 0, result.output
+        assert ns.create.call_args[1]["no_commit"] is True
+
+
+# ---------------------------------------------------------------------------
+# repo-local config (.hatchery.yaml) auto_commit override
+# ---------------------------------------------------------------------------
+
+
+class TestRepoConfigAutoCommitResolution:
+    """Repo-local .hatchery.yaml layers between global config and the CLI flag.
+
+    Precedence: --commit/--no-commit flag > repo .hatchery.yaml > global
+    config > default (True). The global config here stays a mock (via
+    _new_env's auto_commit=...); only the repo file is real, at the repo
+    path _new_env patches git_root_or_cwd to return.
+    """
+
+    @staticmethod
+    def _write_repo_config(home, auto_commit):
+        repo = home / "repo"
+        repo.mkdir(parents=True, exist_ok=True)
+        (repo / ".hatchery.yaml").write_text(f"auto_commit: {str(auto_commit).lower()}\n")
+
+    def test_repo_config_overrides_global_true(self, home):
+        """repo auto_commit=False + global auto_commit=True + no flag → no_commit=True."""
+        self._write_repo_config(home, False)
+        with _new_env(auto_commit=True) as ns:
+            result = CliRunner().invoke(cli, ["new", "my-task"])
+        assert result.exit_code == 0, result.output
+        assert ns.create.call_args[1]["no_commit"] is True
+
+    def test_repo_config_overrides_global_false(self, home):
+        """repo auto_commit=True + global auto_commit=False + no flag → no_commit=False."""
+        self._write_repo_config(home, True)
+        with _new_env(auto_commit=False) as ns:
+            result = CliRunner().invoke(cli, ["new", "my-task"])
+        assert result.exit_code == 0, result.output
+        assert ns.create.call_args[1]["no_commit"] is False
+
+    def test_explicit_flag_overrides_repo_config(self, home):
+        """repo auto_commit=False + --commit → no_commit=False (flag wins)."""
+        self._write_repo_config(home, False)
+        with _new_env(auto_commit=True) as ns:
+            result = CliRunner().invoke(cli, ["new", "my-task", "--commit"])
+        assert result.exit_code == 0, result.output
+        assert ns.create.call_args[1]["no_commit"] is False
+
+    def test_missing_repo_config_falls_back_to_global(self, home):
+        """No .hatchery.yaml + global auto_commit=False + no flag → no_commit=True."""
+        with _new_env(auto_commit=False) as ns:
+            result = CliRunner().invoke(cli, ["new", "my-task"])
         assert result.exit_code == 0, result.output
         assert ns.create.call_args[1]["no_commit"] is True

@@ -145,7 +145,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
       - pathlib.Path.home()       — Python's canonical home lookup
       - HOME env var              — covers os.path.expanduser, git, subprocesses
       - constants.HATCHERY_DIR / TASKS_DB_DIR  — module-level constants (import-time)
-      - user_config.UserConfig.CONFIG_PATH — class-level constant (import-time)
+      - user_config.UserConfig.CONFIG_PATH / _LEGACY_CONFIG_PATH — class-level constants (import-time)
     """
     fake_home = tmp_path / "home"
     fake_home.mkdir()
@@ -153,7 +153,8 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HOME", str(fake_home))
     monkeypatch.setattr(constants, "HATCHERY_DIR", fake_home / ".hatchery")
     monkeypatch.setattr(sessions, "_TASKS_DB_DIR", fake_home / ".hatchery" / "tasks")
-    monkeypatch.setattr(user_config.UserConfig, "CONFIG_PATH", fake_home / ".hatchery" / "config.json")
+    monkeypatch.setattr(user_config.UserConfig, "CONFIG_PATH", fake_home / ".hatchery" / "config.yaml")
+    monkeypatch.setattr(user_config.UserConfig, "_LEGACY_CONFIG_PATH", fake_home / ".hatchery" / "config.json")
     # CodexBackend caches ~/.codex/config.toml for the lifetime of the
     # process to avoid re-parsing it 5+ times per launch. Tests mutate the
     # file across assertions, so reset the cache between tests.

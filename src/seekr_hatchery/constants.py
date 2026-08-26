@@ -23,3 +23,8 @@ WORKTREES_SUBDIR = Path(".hatchery") / "worktrees"
 
 # Docker config file name (relative to a hatchery_dir).
 DOCKER_CONFIG = "docker.yaml"
+
+# Repo-local hatchery config file name (relative to the repo root — not
+# hatchery_dir, so it stays trackable even when .hatchery/ itself is
+# git-excluded in no-commit mode).
+REPO_CONFIG = ".hatchery.yaml"
