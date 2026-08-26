@@ -781,7 +781,7 @@ def cmd_resume(
     if prev_status == "running":
         ui.note(f"task '{name}' was marked as running — a previous session may have exited unexpectedly.")
 
-    sessions.restore_dockerfile_if_needed(meta, backend, repo, no_docker=no_docker)
+    sessions.restore_dockerfile_if_needed(meta, backend, no_docker=no_docker)
 
     include_repos = load_include_entries({"include": meta.include})
 

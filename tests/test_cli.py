@@ -151,7 +151,6 @@ def _new_patches():
         patch("seekr_hatchery.cli.git.git_root_or_cwd"),
         patch("seekr_hatchery.cli.sessions.ensure_gitignore"),
         patch("seekr_hatchery.cli.sessions.ensure_tasks_dir"),
-        patch("seekr_hatchery.cli.sessions.ensure_repo_store"),
         patch("seekr_hatchery.cli.sessions.ensure_git_exclude"),
         patch("seekr_hatchery.cli.docker.ensure_dockerfile"),
         patch("seekr_hatchery.cli.docker.ensure_docker_config"),
@@ -903,10 +902,9 @@ class TestCmdStatus:
         worktree = tmp_path / "worktree"
         worktree.mkdir()
         self._make_task_meta(fake_tasks_db, worktree_path=worktree)
-        task_dir = worktree / ".hatchery" / "tasks"
+        task_dir = worktree / ".hatchery" / "tasks" / sessions.task_dir_name("test-task")
         task_dir.mkdir(parents=True)
-        real_name = sessions.task_file_name("test-task")
-        real_file = task_dir / real_name
+        real_file = task_dir / sessions.TASK_FILENAME
         real_file.write_text("# My Task File Content\nSome details here\n")
         result = self._invoke(runner, ["status", "test-task"])
         assert "My Task File Content" in result.output
@@ -1017,7 +1015,6 @@ class TestCliNoWorktree:
             _,
             _,
             _,
-            _,
             mock_db_path,
             mock_wt_dir,
             mock_create_wt,
@@ -1115,7 +1112,6 @@ class TestCliNoWorktree:
                 _,
                 _,
                 _,
-                _,
                 mock_ensure_df,
                 mock_ensure_dc,
                 mock_db_path,
@@ -1149,7 +1145,6 @@ class TestCliNoWorktree:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
                 mock_root,
-                _,
                 _,
                 _,
                 _,
@@ -1980,7 +1975,6 @@ class TestCliNewInclude:
                 _,
                 _,
                 _,
-                _,
                 mock_db_path,
                 mock_wt_dir,
                 mock_create_wt,
@@ -2027,7 +2021,6 @@ class TestCliNewInclude:
                 _,
                 _,
                 _,
-                _,
                 mock_db_path,
                 mock_wt_dir,
                 _,
@@ -2067,7 +2060,6 @@ class TestCliNewInclude:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
                 mock_root,
-                _,
                 _,
                 _,
                 _,
@@ -2118,7 +2110,6 @@ class TestCliNewInclude:
                 _,
                 _,
                 _,
-                _,
                 mock_db_path,
                 mock_wt_dir,
                 _,
@@ -2163,7 +2154,6 @@ class TestCliNewInclude:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
                 mock_root,
-                _,
                 _,
                 _,
                 _,
@@ -2220,7 +2210,6 @@ class TestCliNewInclude:
                 _,
                 _,
                 _,
-                _,
                 mock_db_path,
                 mock_wt_dir,
                 _,
@@ -2262,7 +2251,7 @@ class TestCliNewInclude:
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
-            (mock_root, _, _, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, _, mock_docker, _, _, _) = (
+            (mock_root, _, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, _, mock_docker, _, _, _) = (
                 mocks
             )
             (_,)
@@ -2299,7 +2288,6 @@ class TestCliNewInclude:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
                 mock_root,
-                _,
                 _,
                 _,
                 _,
@@ -2355,7 +2343,6 @@ class TestCliNewInclude:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
                 mock_root,
-                _,
                 _,
                 _,
                 _,
@@ -2691,7 +2678,6 @@ class TestCliResumeInclude:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             (
                 mock_root,
-                _,
                 _,
                 _,
                 _,

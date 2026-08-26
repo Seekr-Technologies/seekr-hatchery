@@ -120,17 +120,14 @@ class SessionMeta(BaseModel):
     def hatchery_dir(self) -> Path:
         """The directory that holds this session's hatchery files.
 
-        No-commit mode: out-of-tree store (``~/.hatchery/repos/<id>/``).
+        No-commit mode: ``<repo>/.hatchery`` (never committed, hidden via
+        ``.git/info/exclude`` — see ``ensure_git_exclude``).
         Commit + no_worktree: ``<repo>/.hatchery``.
         Commit + worktree: ``<worktree>/.hatchery``.
 
         All derived paths (tasks, Dockerfile, docker.yaml) come from this.
         """
-        from seekr_hatchery.sessions import repo_store_dir
-
-        if self.no_commit:
-            return repo_store_dir(self.repo_path)
-        if self.no_worktree:
+        if self.no_commit or self.no_worktree:
             return self.repo_path / ".hatchery"
         return self.worktree_path / ".hatchery"
 

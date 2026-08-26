@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -50,12 +51,12 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 _TASKS_DB_DIR = constants.HATCHERY_DIR / "tasks"
-_DB_SCHEMA_VERSION = 1
+_DB_SCHEMA_VERSION = 2
 
 # Appended to the agent's default system prompt (preserving its built-in
 # tool knowledge and workspace awareness). Edit here — single source of truth.
 _SESSION_SYSTEM = """\
-You are working on a task. The task file is at `.hatchery/tasks/<date>-<name>.md`
+You are working on a task. The task file is at `.hatchery/tasks/<date>-<name>/task.md`
 (the exact path is in your session prompt). This single file serves as brief,
 plan, progress log, and final notes — update it in place as you work.
 
@@ -234,36 +235,57 @@ def sandbox_context(
     return "\n".join(lines)
 
 
-def task_file_name(name: str) -> str:
-    return f"{datetime.now().strftime('%Y-%m-%d')}-{name}.md"
+TASK_FILENAME = "task.md"
+
+
+def task_dir_name(name: str) -> str:
+    return f"{datetime.now().strftime('%Y-%m-%d')}-{name}"
 
 
 def find_task_file(tasks_dir: Path, name: str) -> Path | None:
     """Find a task's markdown file regardless of creation date.
 
     *tasks_dir* is the resolved task-file directory — either the in-tree
-    ``.hatchery/tasks/`` (commit mode) or the out-of-tree record store
-    (no-commit mode). Use ``SessionMeta.task_dir`` to get the right one.
+    ``.hatchery/tasks/`` (commit mode) or the no-commit ``.hatchery/tasks/``
+    at the repo root. Use ``SessionMeta.task_dir`` to get the right one.
 
-    Task files live in a per-task subdirectory (``tasks_dir/<name>/``) so
-    that no-commit mode can bind-mount just that subdirectory read-write —
+    Task files live in a per-task subdirectory (``tasks_dir/<date>-<name>/``)
+    so that no-commit mode can bind-mount just that subdirectory read-write —
     a directory-level RW mount is required for atomic saves (tmp file +
     rename), which a single-file RW mount can't support since rename/unlink
-    need write permission on the containing directory. Tasks created before
-    this layout existed have a flat file directly under ``tasks_dir``; if
-    found, it's lazily migrated into the per-task subdirectory here.
+    need write permission on the containing directory.
+
+    Tasks created before this layout existed are lazily migrated in place:
+    - ``tasks_dir/<name>/<date>-<name>.md`` (per-task subdir, old filename)
+    - ``tasks_dir/<date>-<name>.md`` (flat file, oldest layout)
     """
-    matches = sorted((tasks_dir / name).glob(f"*-{name}.md"))
+    # task_dir_name() stamps today's date, but the task may have been created
+    # on an earlier day — glob by name suffix instead of relying on today's date.
+    matches = sorted(tasks_dir.glob(f"*-{name}/{TASK_FILENAME}"))
     if matches:
         return matches[-1]
+
+    old_subdir_matches = sorted((tasks_dir / name).glob(f"*-{name}.md"))
+    if old_subdir_matches:
+        old_path = old_subdir_matches[-1]
+        new_dir = tasks_dir / old_path.stem
+        new_dir.mkdir(parents=True, exist_ok=True)
+        new_path = new_dir / TASK_FILENAME
+        old_path.rename(new_path)
+        try:
+            old_path.parent.rmdir()
+        except OSError:
+            pass  # other files remain in the old per-task subdir
+        logger.info("Migrated task file %s -> %s", old_path, new_path)
+        return new_path
 
     legacy_matches = sorted(tasks_dir.glob(f"*-{name}.md"))
     if not legacy_matches:
         return None
     legacy_path = legacy_matches[-1]
-    task_subdir = tasks_dir / name
-    task_subdir.mkdir(parents=True, exist_ok=True)
-    new_path = task_subdir / legacy_path.name
+    new_dir = tasks_dir / legacy_path.stem
+    new_dir.mkdir(parents=True, exist_ok=True)
+    new_path = new_dir / TASK_FILENAME
     legacy_path.rename(new_path)
     logger.info("Migrated task file %s -> %s", legacy_path, new_path)
     return new_path
@@ -287,7 +309,7 @@ def session_prompt(meta: SessionMeta, extra_note: str = "") -> str:
         )
         body = (
             f"The task file for '{meta.name}' was expected at "
-            f"`{tasks_dir}/*-{meta.name}.md` but is not "
+            f"`{tasks_dir}/*-{meta.name}/{TASK_FILENAME}` but is not "
             "present. Common causes: a different branch is checked out, "
             "or the file was deleted or renamed. Before doing further "
             "work on this task, check `git status`, the current branch, "
@@ -331,47 +353,17 @@ def worktrees_dir(repo: Path) -> Path:
     return repo / WORKTREES_SUBDIR
 
 
-# ---------------------------------------------------------------------------
-# Out-of-tree store paths (no-commit mode)
-# ---------------------------------------------------------------------------
-
-
-def repo_store_dir(repo: Path) -> Path:
-    """Persistent per-repo store under ~/.hatchery/repos/<repo-id>/.
-
-    Holds docker files, task records, and repo.json metadata when the user
-    opts out of committing hatchery files to the tracked repo.
-    """
-    return constants.HATCHERY_DIR / constants.REPOS_SUBDIR / repo_id(repo)
-
-
 def hatchery_dir(repo: Path, worktree: Path, *, no_commit: bool, no_worktree: bool) -> Path:
     """Resolve the directory that holds this session's hatchery files.
 
-    No-commit: ``~/.hatchery/repos/<id>/`` (the store itself is the hatchery_dir).
+    No-commit: ``<repo>/.hatchery`` (never committed, hidden via
+    ``.git/info/exclude`` — see ``ensure_git_exclude``).
     Commit + no_worktree: ``<repo>/.hatchery``.
     Commit + worktree: ``<worktree>/.hatchery``.
     """
-    if no_commit:
-        return repo_store_dir(repo)
-    if no_worktree:
+    if no_commit or no_worktree:
         return repo / ".hatchery"
     return worktree / ".hatchery"
-
-
-def ensure_repo_store(repo: Path) -> None:
-    """Ensure the repo store exists and repo.json is up to date.
-
-    Creates ``repos/<repo-id>/`` with a ``tasks/`` subdir.
-    Writes/refreshes ``repo.json`` with the repo's absolute path and basename
-    so the store is navigable without scanning all known repos. Idempotent.
-    """
-    store = repo_store_dir(repo)
-    (store / "tasks").mkdir(parents=True, exist_ok=True)
-    repo_meta = {"path": str(repo), "name": repo.name}
-    repo_meta_path = store / "repo.json"
-    repo_meta_path.write_text(json.dumps(repo_meta, indent=2))
-    logger.debug("Ensured repo store at %s", store)
 
 
 def _db_meta_path() -> Path:
@@ -420,6 +412,49 @@ def migrate_db() -> None:
                     scoped_file.unlink()
                     logger.info("DB migrate v0→v1: promoted %s → %s", scoped_file, dest)
         v = 1
+
+    # v1 → v2: relocate no-commit hatchery files from the out-of-tree store
+    # (~/.hatchery/repos/<repo-id>/) into <repo>/.hatchery/. No-commit mode
+    # now keeps files next to the repo instead of away from it, hiding them
+    # via .git/info/exclude instead of a separate store. Repos whose
+    # recorded path no longer exists are left untouched — the user can
+    # migrate them manually if the repo reappears.
+    if v == 1:
+        old_repos_dir = constants.HATCHERY_DIR / "repos"
+        if old_repos_dir.exists():
+            for store in old_repos_dir.iterdir():
+                if not store.is_dir():
+                    continue
+                repo_json = store / "repo.json"
+                if not repo_json.exists():
+                    continue
+                try:
+                    repo_path = Path(json.loads(repo_json.read_text())["path"])
+                except (json.JSONDecodeError, KeyError):
+                    continue
+                if not repo_path.is_dir():
+                    logger.warning(
+                        "DB migrate v1→v2: repo path %s no longer exists, leaving store %s in place",
+                        repo_path,
+                        store,
+                    )
+                    continue
+                dest = repo_path / ".hatchery"
+                dest.mkdir(parents=True, exist_ok=True)
+                for item in store.iterdir():
+                    if item.name == "repo.json":
+                        continue
+                    target = dest / item.name
+                    if target.exists():
+                        if item.is_dir():
+                            shutil.copytree(item, target, dirs_exist_ok=True)
+                            shutil.rmtree(item)
+                        continue
+                    shutil.move(str(item), str(target))
+                ensure_git_exclude(repo_path, ".hatchery/")
+                shutil.rmtree(store)
+                logger.info("DB migrate v1→v2: relocated %s → %s", store, dest)
+        v = 2
 
     # Write updated DB meta
     meta_path.parent.mkdir(parents=True, exist_ok=True)
@@ -701,7 +736,6 @@ def restore_worktree_if_needed(
 def restore_dockerfile_if_needed(
     meta: SessionMeta,
     backend: "AgentBackend",
-    repo: Path,
     *,
     no_docker: bool,
 ) -> None:
@@ -709,10 +743,10 @@ def restore_dockerfile_if_needed(
 
     Resume-time recovery for a missing Dockerfile. In committed mode the
     Dockerfile lives on the task branch, so a recreated worktree may not have
-    it — regenerate from the repo root. In not-committed mode the store
-    persists across worktree removal, so this is usually a no-op; kept as a
-    safety net. No-op when ``no_docker`` is set or the Dockerfile is already
-    present.
+    it — regenerate from the repo root. In not-committed mode the files live
+    at the repo root and persist across worktree removal, so this is usually
+    a no-op; kept as a safety net. No-op when ``no_docker`` is set or the
+    Dockerfile is already present.
     """
     if no_docker:
         return
@@ -721,8 +755,7 @@ def restore_dockerfile_if_needed(
     if agent_df.exists():
         return
     if meta.no_commit:
-        ui.note("Dockerfile missing from store — restoring.")
-        ensure_repo_store(repo)
+        ui.note("Dockerfile missing — restoring.")
         docker.ensure_dockerfile(hdir, backend)
         docker.ensure_docker_config(hdir)
     elif meta.no_worktree:
@@ -1100,11 +1133,13 @@ def create(
         no_worktree = True
         worktree = repo
         branch = ""
+        if no_commit and in_repo:
+            ensure_git_exclude(repo, ".hatchery/")
     else:
         if no_commit:
-            ensure_repo_store(repo)
+            (repo / ".hatchery" / "tasks").mkdir(parents=True, exist_ok=True)
             if in_repo:
-                ensure_git_exclude(repo, ".hatchery/worktrees/")
+                ensure_git_exclude(repo, ".hatchery/")
         else:
             ensure_tasks_dir(repo)
             if in_repo:
@@ -1250,8 +1285,10 @@ def prepare_sandbox(
     mode only) commits any newly created scaffolding. Returns the hatchery dir.
     """
     if no_commit:
-        ensure_repo_store(repo)
-        hdir = repo_store_dir(repo)
+        hdir = repo / ".hatchery"
+        hdir.mkdir(exist_ok=True)
+        if in_repo:
+            ensure_git_exclude(repo, ".hatchery/")
         docker.ensure_dockerfile(hdir, backend)
         docker.ensure_docker_config(hdir)
     else:
@@ -1298,7 +1335,6 @@ def launch(
 
     # Ensure the hatchery dir exists (in case it was deleted between sessions).
     if meta.no_commit and not is_chat:
-        ensure_repo_store(meta.repo_path)
         meta.hatchery_dir.mkdir(parents=True, exist_ok=True)
 
     if kind == "new":
@@ -1457,9 +1493,9 @@ def repo_tasks_for_current_repo(repo: Path) -> list[dict]:
 
 
 def write_task_file(tasks_dir: Path, name: str, branch: str, objective: str | None = None) -> Path:
-    task_subdir = tasks_dir / name
+    task_subdir = tasks_dir / task_dir_name(name)
     task_subdir.mkdir(parents=True, exist_ok=True)
-    task_path = task_subdir / task_file_name(name)
+    task_path = task_subdir / TASK_FILENAME
     logger.debug("Task file written at %s", task_path)
     branch_line = f"**Branch**: {branch}" if branch else "**Branch**: (none — no-worktree mode)"
     if objective is not None:
@@ -1534,8 +1570,8 @@ def ensure_tasks_dir(repo: Path) -> None:
         readme.write_text("""\
 # .hatchery
 
-Each file under `tasks/` is a record of a completed task, written by the agent
-that performed the work. Named `YYYY-MM-DD-<task-name>.md`.
+Each directory under `tasks/` is a record of a completed task, written by the
+agent that performed the work. Named `YYYY-MM-DD-<task-name>/task.md`.
 
 Future agents should browse these files for context on past decisions,
 patterns, and gotchas before starting new work.
@@ -1569,9 +1605,10 @@ def ensure_gitignore(repo: Path) -> None:
 def ensure_git_exclude(repo: Path, entry: str) -> None:
     """Add *entry* to the repo's ``.git/info/exclude`` (local, uncommitted).
 
-    Used in no-commit mode to hide ``.hatchery/worktrees/`` from
-    ``git status`` without touching the committed ``.gitignore``.
-    Idempotent — skips silently if the entry is already present.
+    Used in no-commit mode to hide ``.hatchery/`` (the whole hatchery dir —
+    tasks, Dockerfiles, worktrees) from ``git status`` without touching the
+    committed ``.gitignore``. Idempotent — skips silently if the entry is
+    already present.
     """
     main_repo = git._resolve_main_repo(repo)
     exclude_path = main_repo / ".git" / "info" / "exclude"

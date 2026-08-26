@@ -220,7 +220,7 @@ def fake_hatchery_dir(home: Path) -> Path:
 
 class TestMigrateDb:
     def test_v0_no_tasks_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """migrate_db() with no tasks dir creates meta.json with schema_version 1, no error."""
+        """migrate_db() with no tasks dir creates meta.json at the latest schema version, no error."""
         hatchery = tmp_path / "hatchery"
         hatchery.mkdir()
         monkeypatch.setattr(constants, "HATCHERY_DIR", hatchery)
@@ -230,7 +230,7 @@ class TestMigrateDb:
 
         meta_path = hatchery / "meta.json"
         assert meta_path.exists()
-        assert json.loads(meta_path.read_text())["schema_version"] == 1
+        assert json.loads(meta_path.read_text())["schema_version"] == sessions._DB_SCHEMA_VERSION
 
     def test_v0_scoped_json_promoted(self, fake_hatchery_dir: Path) -> None:
         """Scoped <name>.json is promoted to <name>/meta.json after migrate_db()."""
@@ -273,10 +273,10 @@ class TestMigrateDb:
         assert saved["status"] == "complete"
 
     def test_already_at_latest_no_change(self, fake_hatchery_dir: Path) -> None:
-        """When meta.json already has schema_version 1, no files are touched."""
+        """When meta.json already has the latest schema_version, no files are touched."""
         db = fake_hatchery_dir / "tasks"
         meta_path = fake_hatchery_dir / "meta.json"
-        meta_path.write_text(json.dumps({"schema_version": 1}))
+        meta_path.write_text(json.dumps({"schema_version": sessions._DB_SCHEMA_VERSION}))
 
         # Put a scoped JSON in there that should NOT be touched
         repo_subdir = db / "some-repo-11223344"
@@ -288,8 +288,47 @@ class TestMigrateDb:
 
         # Scoped file is untouched (migration did not run)
         assert scoped_file.exists()
-        # meta.json still says version 1
-        assert json.loads(meta_path.read_text())["schema_version"] == 1
+        # meta.json still says the same version
+        assert json.loads(meta_path.read_text())["schema_version"] == sessions._DB_SCHEMA_VERSION
+
+    def test_v1_relocates_no_commit_store_into_repo(self, fake_hatchery_dir: Path, tmp_path: Path) -> None:
+        """v1→v2: repos/<id>/ files move into <repo>/.hatchery/, exclude is set, store is removed."""
+        meta_path = fake_hatchery_dir / "meta.json"
+        meta_path.write_text(json.dumps({"schema_version": 1}))
+
+        repo = tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+
+        store = fake_hatchery_dir / "repos" / "myrepo-abcd1234"
+        (store / "tasks" / "2026-01-01-t").mkdir(parents=True)
+        (store / "tasks" / "2026-01-01-t" / "task.md").write_text("# task\n")
+        (store / "Dockerfile.codex").write_text("FROM scratch\n")
+        (store / "docker.yaml").write_text("include: []\n")
+        (store / "repo.json").write_text(json.dumps({"path": str(repo), "name": "repo"}))
+
+        sessions.migrate_db()
+
+        assert (repo / ".hatchery" / "tasks" / "2026-01-01-t" / "task.md").read_text() == "# task\n"
+        assert (repo / ".hatchery" / "Dockerfile.codex").exists()
+        assert (repo / ".hatchery" / "docker.yaml").exists()
+        assert not store.exists()
+        exclude = (repo / ".git" / "info" / "exclude").read_text()
+        assert ".hatchery/" in exclude
+        assert json.loads(meta_path.read_text())["schema_version"] == sessions._DB_SCHEMA_VERSION
+
+    def test_v1_leaves_store_when_repo_path_gone(self, fake_hatchery_dir: Path, tmp_path: Path) -> None:
+        """A store whose recorded repo path no longer exists is left in place."""
+        meta_path = fake_hatchery_dir / "meta.json"
+        meta_path.write_text(json.dumps({"schema_version": 1}))
+
+        store = fake_hatchery_dir / "repos" / "gone-abcd1234"
+        store.mkdir(parents=True)
+        (store / "repo.json").write_text(json.dumps({"path": str(tmp_path / "gone"), "name": "gone"}))
+
+        sessions.migrate_db()
+
+        assert store.exists()
+        assert (store / "repo.json").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -776,21 +815,19 @@ class TestPrepareSandbox:
         monkeypatch.setattr(sessions, "_commit_docker_files", mcommit)
         return mdf, mdc, mcommit
 
-    def test_no_commit_writes_to_store_and_never_commits(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path / "h")
+    def test_no_commit_writes_to_repo_and_never_commits(self, tmp_path, monkeypatch):
         repo = tmp_path / "repo"
-        repo.mkdir()
+        (repo / ".git").mkdir(parents=True)
         mdf, mdc, mcommit = self._patch_docker(monkeypatch, df_created=True, dc_created=True)
 
         hdir = sessions.prepare_sandbox(repo, in_repo=True, backend=agent.CODEX, no_commit=True)
 
-        store = sessions.repo_store_dir(repo)
-        assert hdir == store
-        assert mdf.call_args[0][0] == store
-        assert mdc.call_args[0][0] == store
+        assert hdir == repo / ".hatchery"
+        assert mdf.call_args[0][0] == repo / ".hatchery"
+        assert mdc.call_args[0][0] == repo / ".hatchery"
         assert not mcommit.called
-        # No in-tree .hatchery created for the sandbox in no-commit mode.
-        assert not (repo / ".hatchery").exists()
+        exclude = (repo / ".git" / "info" / "exclude").read_text()
+        assert ".hatchery/" in exclude
 
     def test_commit_writes_to_repo_and_commits_when_created(self, tmp_path, monkeypatch):
         repo = tmp_path / "repo"
@@ -996,9 +1033,9 @@ class TestUpdateTaskFileStatus:
     """update_task_file_status rewrites the front-matter Status line."""
 
     def _write_task(self, tasks_dir, name, status):
-        task_subdir = tasks_dir / name
+        task_subdir = tasks_dir / f"2026-01-01-{name}"
         task_subdir.mkdir(parents=True, exist_ok=True)
-        p = task_subdir / f"2026-01-01-{name}.md"
+        p = task_subdir / sessions.TASK_FILENAME
         p.write_text(f"# Task: {name}\n\n**Status**: {status}\n**Branch**: x\n\nBody\n")
         return p
 
@@ -1099,16 +1136,18 @@ class TestSessionLaunch:
 
     def test_new_fires_hooks_in_order(self, spy_backend, fake_tasks_db, tmp_path, no_input):
         meta = self._meta(tmp_path)
-        (meta.worktree_path / ".hatchery" / "tasks").mkdir(parents=True, exist_ok=True)
-        (meta.worktree_path / ".hatchery" / "tasks" / sessions.task_file_name(meta.name)).write_text("body\n")
+        task_dir = meta.worktree_path / ".hatchery" / "tasks" / sessions.task_dir_name(meta.name)
+        task_dir.mkdir(parents=True, exist_ok=True)
+        (task_dir / sessions.TASK_FILENAME).write_text("body\n")
         self._drive(meta, kind="new", backend=spy_backend)
         names = [c[0] for c in spy_backend.calls]
         assert names == ["on_new_task", "on_before_launch", "build_new_command", "background_threads"]
 
     def test_resume_skips_on_new_task(self, spy_backend, fake_tasks_db, tmp_path, no_input):
         meta = self._meta(tmp_path)
-        (meta.worktree_path / ".hatchery" / "tasks").mkdir(parents=True, exist_ok=True)
-        (meta.worktree_path / ".hatchery" / "tasks" / sessions.task_file_name(meta.name)).write_text("body\n")
+        task_dir = meta.worktree_path / ".hatchery" / "tasks" / sessions.task_dir_name(meta.name)
+        task_dir.mkdir(parents=True, exist_ok=True)
+        (task_dir / sessions.TASK_FILENAME).write_text("body\n")
         self._drive(meta, kind="resume", backend=spy_backend)
         names = [c[0] for c in spy_backend.calls]
         assert names == ["on_before_launch", "build_resume_command", "background_threads"]
@@ -1147,8 +1186,9 @@ class TestSessionLaunch:
         """prompt_note threads through launch() and ends up at the start of
         the agent's initial prompt — used to surface branch-recreated etc."""
         meta = self._meta(tmp_path)
-        (meta.worktree_path / ".hatchery" / "tasks").mkdir(parents=True, exist_ok=True)
-        (meta.worktree_path / ".hatchery" / "tasks" / sessions.task_file_name(meta.name)).write_text("body\n")
+        task_dir = meta.worktree_path / ".hatchery" / "tasks" / sessions.task_dir_name(meta.name)
+        task_dir.mkdir(parents=True, exist_ok=True)
+        (task_dir / sessions.TASK_FILENAME).write_text("body\n")
         self._drive(meta, kind="resume", backend=spy_backend, prompt_note="HELLO-NOTE")
         build = next(c for c in spy_backend.calls if c[0] == "build_resume_command")
         _, _sid, _system, initial, _docker, _wd = build
@@ -1164,8 +1204,9 @@ class TestSessionLaunch:
 
     def test_status_flips_running_then_in_progress(self, spy_backend, fake_tasks_db, tmp_path, no_input):
         meta = self._meta(tmp_path)
-        (meta.worktree_path / ".hatchery" / "tasks").mkdir(parents=True, exist_ok=True)
-        (meta.worktree_path / ".hatchery" / "tasks" / sessions.task_file_name(meta.name)).write_text("body\n")
+        task_dir = meta.worktree_path / ".hatchery" / "tasks" / sessions.task_dir_name(meta.name)
+        task_dir.mkdir(parents=True, exist_ok=True)
+        (task_dir / sessions.TASK_FILENAME).write_text("body\n")
         statuses: list[str] = []
         original = sessions.set_status
 
@@ -1218,8 +1259,9 @@ class TestSessionLaunchBackgroundThreads:
         spy_backend.background_threads = lambda meta, **kw: [w1, w2]
 
         meta = self._meta(tmp_path)
-        (meta.worktree_path / ".hatchery" / "tasks").mkdir(parents=True, exist_ok=True)
-        (meta.worktree_path / ".hatchery" / "tasks" / sessions.task_file_name(meta.name)).write_text("body\n")
+        task_dir = meta.worktree_path / ".hatchery" / "tasks" / sessions.task_dir_name(meta.name)
+        task_dir.mkdir(parents=True, exist_ok=True)
+        (task_dir / sessions.TASK_FILENAME).write_text("body\n")
         with patch("seekr_hatchery.sessions.subprocess.run"):
             sessions.launch(meta, kind="new", backend=spy_backend, runtime=None, main_branch="main", session_id="sid")
         # Both workers must have executed
@@ -1243,8 +1285,9 @@ class TestSessionLaunchBackgroundThreads:
         spy_backend.background_threads = hook
 
         meta = self._meta(tmp_path)
-        (meta.worktree_path / ".hatchery" / "tasks").mkdir(parents=True, exist_ok=True)
-        (meta.worktree_path / ".hatchery" / "tasks" / sessions.task_file_name(meta.name)).write_text("body\n")
+        task_dir = meta.worktree_path / ".hatchery" / "tasks" / sessions.task_dir_name(meta.name)
+        task_dir.mkdir(parents=True, exist_ok=True)
+        (task_dir / sessions.TASK_FILENAME).write_text("body\n")
         with patch("seekr_hatchery.sessions.subprocess.run"):
             sessions.launch(meta, kind="new", backend=spy_backend, runtime=None, main_branch="main", session_id="sid")
         assert stop_captured["stop"].is_set()
@@ -1258,8 +1301,9 @@ class TestSessionLaunchBackgroundThreads:
         spy_backend.background_threads = lambda meta, **kw: [crashing_worker]
 
         meta = self._meta(tmp_path)
-        (meta.worktree_path / ".hatchery" / "tasks").mkdir(parents=True, exist_ok=True)
-        (meta.worktree_path / ".hatchery" / "tasks" / sessions.task_file_name(meta.name)).write_text("body\n")
+        task_dir = meta.worktree_path / ".hatchery" / "tasks" / sessions.task_dir_name(meta.name)
+        task_dir.mkdir(parents=True, exist_ok=True)
+        (task_dir / sessions.TASK_FILENAME).write_text("body\n")
         with patch("seekr_hatchery.sessions.subprocess.run"):
             # Must not raise
             sessions.launch(meta, kind="new", backend=spy_backend, runtime=None, main_branch="main", session_id="sid")
@@ -1282,8 +1326,9 @@ class TestSessionLaunchBackgroundThreads:
         spy_backend.background_threads = hook
 
         meta = self._meta(tmp_path)
-        (meta.worktree_path / ".hatchery" / "tasks").mkdir(parents=True, exist_ok=True)
-        (meta.worktree_path / ".hatchery" / "tasks" / sessions.task_file_name(meta.name)).write_text("body\n")
+        task_dir = meta.worktree_path / ".hatchery" / "tasks" / sessions.task_dir_name(meta.name)
+        task_dir.mkdir(parents=True, exist_ok=True)
+        (task_dir / sessions.TASK_FILENAME).write_text("body\n")
         with patch("seekr_hatchery.sessions.subprocess.run", side_effect=RuntimeError("agent boom")):
             with pytest.raises(RuntimeError, match="agent boom"):
                 sessions.launch(
@@ -1428,8 +1473,9 @@ class TestSessionLaunchDockerBranch:
             status="in-progress",
         )
         sessions.save(meta)
-        (wt / ".hatchery" / "tasks").mkdir(parents=True, exist_ok=True)
-        (wt / ".hatchery" / "tasks" / sessions.task_file_name("t")).write_text("body\n")
+        task_dir = wt / ".hatchery" / "tasks" / sessions.task_dir_name("t")
+        task_dir.mkdir(parents=True, exist_ok=True)
+        (task_dir / sessions.TASK_FILENAME).write_text("body\n")
 
         # Stub the docker primitives that sessions.launch would otherwise hit.
         from unittest.mock import MagicMock
@@ -1598,13 +1644,11 @@ class TestMergeIncludesWithConfig:
 
 
 class TestHatcheryDir:
-    def test_no_commit_uses_store(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path)
-        monkeypatch.setattr(sessions, "_TASKS_DB_DIR", tmp_path / "tasks")
+    def test_no_commit_uses_repo(self, tmp_path):
         repo = tmp_path / "myrepo"
         worktree = repo / ".hatchery" / "worktrees" / "t"
         result = sessions.hatchery_dir(repo, worktree, no_commit=True, no_worktree=False)
-        assert result == sessions.repo_store_dir(repo)
+        assert result == repo / ".hatchery"
 
     def test_commit_worktree(self, tmp_path):
         repo = tmp_path / "myrepo"
@@ -1619,55 +1663,19 @@ class TestHatcheryDir:
 
 
 # ---------------------------------------------------------------------------
-# repo_store_dir / ensure_repo_store
-# ---------------------------------------------------------------------------
-
-
-class TestRepoStorePaths:
-    def test_repo_store_dir_composes_correctly(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path)
-        monkeypatch.setattr(sessions, "_TASKS_DB_DIR", tmp_path / "tasks")
-        repo = tmp_path / "myrepo"
-        result = sessions.repo_store_dir(repo)
-        assert result == tmp_path / "repos" / utils.repo_id(repo)
-
-
-class TestEnsureRepoStore:
-    def test_creates_dirs_and_repo_json(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path)
-        monkeypatch.setattr(sessions, "_TASKS_DB_DIR", tmp_path / "tasks")
-        repo = tmp_path / "myrepo"
-        sessions.ensure_repo_store(repo)
-        store = sessions.repo_store_dir(repo)
-        assert (store / "tasks").is_dir()
-        repo_meta = json.loads((store / "repo.json").read_text())
-        assert repo_meta == {"path": str(repo), "name": repo.name}
-
-    def test_idempotent(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path)
-        monkeypatch.setattr(sessions, "_TASKS_DB_DIR", tmp_path / "tasks")
-        repo = tmp_path / "myrepo"
-        sessions.ensure_repo_store(repo)
-        sessions.ensure_repo_store(repo)
-        store = sessions.repo_store_dir(repo)
-        assert (store / "repo.json").exists()
-
-
-# ---------------------------------------------------------------------------
 # SessionMeta derived properties (hatchery_dir, task_dir)
 # ---------------------------------------------------------------------------
 
 
 class TestSessionMetaDerivedPaths:
-    def test_hatchery_dir_no_commit(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path)
+    def test_hatchery_dir_no_commit(self, tmp_path):
         meta = sessions.SessionMeta(
             name="t",
             repo=str(tmp_path),
             worktree=str(tmp_path / "wt"),
             no_commit=True,
         )
-        assert meta.hatchery_dir == sessions.repo_store_dir(tmp_path)
+        assert meta.hatchery_dir == tmp_path / ".hatchery"
 
     def test_hatchery_dir_committed_no_worktree(self, tmp_path):
         meta = sessions.SessionMeta(
@@ -1717,14 +1725,14 @@ class TestSessionMetaDerivedPaths:
             no_commit=True,
         )
         tasks_dir = meta.task_dir
-        task_subdir = tasks_dir / "t"
+        task_subdir = tasks_dir / "2026-01-15-t"
         task_subdir.mkdir(parents=True)
-        task_file = task_subdir / "2026-01-15-t.md"
+        task_file = task_subdir / sessions.TASK_FILENAME
         task_file.write_text("# task\n")
         assert meta.task_file == task_file
 
     def test_task_file_migrates_legacy_flat_file(self, tmp_path, monkeypatch):
-        """Tasks created before the per-task-subdir layout are lazily migrated."""
+        """Tasks created before the per-task-directory layout are lazily migrated."""
         monkeypatch.setattr(constants, "HATCHERY_DIR", tmp_path)
         meta = sessions.SessionMeta(
             name="t",
@@ -1739,7 +1747,7 @@ class TestSessionMetaDerivedPaths:
 
         resolved = meta.task_file
 
-        assert resolved == tasks_dir / "t" / "2026-01-15-t.md"
+        assert resolved == tasks_dir / "2026-01-15-t" / sessions.TASK_FILENAME
         assert resolved.read_text() == "# task\n"
         assert not legacy_file.exists()
 
@@ -1771,8 +1779,8 @@ class TestCreateNoCommit:
             no_commit=True,
             objective="do stuff",
         )
-        task_file = meta.hatchery_dir / "tasks" / "t" / sessions.task_file_name("t")
-        assert task_file.exists()
+        task_file = meta.task_file
+        assert task_file is not None and task_file.exists()
         wt_tasks = meta.worktree_path / ".hatchery" / "tasks"
         assert not wt_tasks.exists() or not list(wt_tasks.glob("*.md"))
 
@@ -1848,7 +1856,7 @@ class TestCreateNoCommit:
             objective="x",
         )
         assert len(exclude_called) == 1
-        assert ".hatchery/worktrees/" in exclude_called[0][1]
+        assert ".hatchery/" in exclude_called[0][1]
         assert gitignore_called == []
 
 
@@ -1863,8 +1871,8 @@ class TestRecordSurvivesDone:
             no_commit=True,
             objective="x",
         )
-        task_file = meta.hatchery_dir / "tasks" / "t" / sessions.task_file_name("t")
-        assert task_file.exists()
+        task_file = meta.task_file
+        assert task_file is not None and task_file.exists()
         sessions.mark_done(meta, commit_changes=False)
         assert task_file.exists()
 
@@ -1924,8 +1932,11 @@ class TestSandboxContextNoCommit:
 
 
 class TestCreateNoCommitNotInRepo:
-    def test_docker_files_go_to_store_when_not_in_repo(self, tmp_path, fake_tasks_db, no_input, monkeypatch):
-        """When not in a repo and not committed, docker files go to the store."""
+    def test_docker_files_go_to_repo_hatchery_dir_when_not_in_repo(
+        self, tmp_path, fake_tasks_db, no_input, monkeypatch
+    ):
+        """When not in a git repo, docker files still land in <repo>/.hatchery — just
+        without a git exclude entry, since there's no git repo to exclude from."""
         repo = tmp_path / "repo"
         repo.mkdir()
 
@@ -1940,6 +1951,6 @@ class TestCreateNoCommitNotInRepo:
             objective="x",
         )
         hdir = meta.hatchery_dir
+        assert hdir == repo / ".hatchery"
         assert (hdir / "Dockerfile.codex").exists()
         assert (hdir / "docker.yaml").exists()
-        assert not (repo / ".hatchery" / "Dockerfile.codex").exists()
