@@ -1242,8 +1242,8 @@ class TestBuildMountsNoCommit:
         )
         # Create the task file (in its per-task subdirectory) so meta.task_file resolves
         hdir = meta.hatchery_dir
-        (hdir / "tasks" / "t").mkdir(parents=True)
-        task_file = hdir / "tasks" / "t" / "2026-01-01-t.md"
+        (hdir / "tasks" / "2026-01-01-t").mkdir(parents=True)
+        task_file = hdir / "tasks" / "2026-01-01-t" / "task.md"
         task_file.write_text("# task\n")
 
         cfg = docker.DockerConfig()

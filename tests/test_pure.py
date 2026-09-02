@@ -20,7 +20,7 @@ from seekr_hatchery.models import SessionMeta
 
 class TestFindTaskFile:
     def test_finds_matching_file(self, tmp_path):
-        task_file = tmp_path / ".hatchery" / "tasks" / "my-task" / "2026-01-15-my-task.md"
+        task_file = tmp_path / ".hatchery" / "tasks" / "2026-01-15-my-task" / "task.md"
         task_file.parent.mkdir(parents=True)
         task_file.write_text("contents")
         assert sessions.find_task_file(tmp_path / ".hatchery" / "tasks", "my-task") == task_file
@@ -31,12 +31,12 @@ class TestFindTaskFile:
 
     def test_returns_latest_when_multiple(self, tmp_path):
         tasks_dir = tmp_path / ".hatchery" / "tasks"
-        task_subdir = tasks_dir / "my-task"
-        task_subdir.mkdir(parents=True)
-        (task_subdir / "2026-01-10-my-task.md").write_text("old")
-        (task_subdir / "2026-03-04-my-task.md").write_text("new")
+        (tasks_dir / "2026-01-10-my-task").mkdir(parents=True)
+        (tasks_dir / "2026-01-10-my-task" / "task.md").write_text("old")
+        (tasks_dir / "2026-03-04-my-task").mkdir(parents=True)
+        (tasks_dir / "2026-03-04-my-task" / "task.md").write_text("new")
         result = sessions.find_task_file(tasks_dir, "my-task")
-        assert result == task_subdir / "2026-03-04-my-task.md"
+        assert result == tasks_dir / "2026-03-04-my-task" / "task.md"
 
     def test_migrates_legacy_flat_file(self, tmp_path):
         tasks_dir = tmp_path / ".hatchery" / "tasks"
@@ -46,9 +46,23 @@ class TestFindTaskFile:
 
         result = sessions.find_task_file(tasks_dir, "my-task")
 
-        assert result == tasks_dir / "my-task" / "2026-01-15-my-task.md"
+        assert result == tasks_dir / "2026-01-15-my-task" / "task.md"
         assert result.read_text() == "contents"
         assert not legacy_file.exists()
+
+    def test_migrates_legacy_per_task_subdir(self, tmp_path):
+        """Middle layout: tasks_dir/<name>/<date>-<name>.md — pre-unification."""
+        tasks_dir = tmp_path / ".hatchery" / "tasks"
+        old_subdir = tasks_dir / "my-task"
+        old_subdir.mkdir(parents=True)
+        old_file = old_subdir / "2026-01-15-my-task.md"
+        old_file.write_text("contents")
+
+        result = sessions.find_task_file(tasks_dir, "my-task")
+
+        assert result == tasks_dir / "2026-01-15-my-task" / "task.md"
+        assert result.read_text() == "contents"
+        assert not old_file.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -107,23 +121,22 @@ class TestToName:
 
 
 # ---------------------------------------------------------------------------
-# task_file_name
+# task_dir_name
 # ---------------------------------------------------------------------------
 
 
-class TestTaskFileName:
+class TestTaskDirName:
     def test_format(self):
         with patch("seekr_hatchery.sessions.datetime") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 1, 15, 10, 30)
-            result = sessions.task_file_name("my-task")
-        assert result == "2026-01-15-my-task.md"
+            result = sessions.task_dir_name("my-task")
+        assert result == "2026-01-15-my-task"
 
     def test_uses_current_date(self):
         # Without mocking — just check format shape
-        result = sessions.task_file_name("test")
+        result = sessions.task_dir_name("test")
         parts = result.split("-")
         assert len(parts) >= 4
-        assert result.endswith(".md")
         assert parts[0].isdigit() and len(parts[0]) == 4  # year
 
 
@@ -138,11 +151,11 @@ class TestSessionPrompt:
         return SessionMeta(name=name, repo=str(worktree), worktree=str(worktree))
 
     def test_contains_task_file_path(self, tmp_path):
-        task_file = tmp_path / ".hatchery" / "tasks" / "my-task" / "2026-01-15-my-task.md"
+        task_file = tmp_path / ".hatchery" / "tasks" / "2026-01-15-my-task" / "task.md"
         task_file.parent.mkdir(parents=True)
         task_file.write_text("task contents")
         result = sessions.session_prompt(self._meta(tmp_path, "my-task"))
-        assert ".hatchery/tasks/my-task/2026-01-15-my-task.md" in result
+        assert ".hatchery/tasks/2026-01-15-my-task/task.md" in result
 
     def test_is_string(self, tmp_path):
         task_file = tmp_path / ".hatchery" / "tasks" / "2026-01-15-foo.md"
@@ -184,11 +197,11 @@ class TestSessionPrompt:
 
     def test_finds_file_from_different_date(self, tmp_path):
         """Regression: resuming a task created on a different day must work."""
-        task_file = tmp_path / ".hatchery" / "tasks" / "2026-01-01-old-task.md"
+        task_file = tmp_path / ".hatchery" / "tasks" / "2026-01-01-old-task" / "task.md"
         task_file.parent.mkdir(parents=True)
         task_file.write_text("created yesterday")
         result = sessions.session_prompt(self._meta(tmp_path, "old-task"))
-        assert "2026-01-01-old-task.md" in result
+        assert "2026-01-01-old-task/task.md" in result
         assert "created yesterday" in result
 
 

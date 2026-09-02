@@ -21,6 +21,7 @@ import seekr_hatchery.agents as agent
 import seekr_hatchery.docker as docker
 import seekr_hatchery.git as git
 import seekr_hatchery.logging_ as logging_
+import seekr_hatchery.repo_config as repo_config
 import seekr_hatchery.seeded_volumes as seeded_volumes
 import seekr_hatchery.sessions as sessions
 import seekr_hatchery.ui as ui
@@ -528,7 +529,8 @@ def cli(log_level: str) -> None:
     default=None,
     help=(
         "Whether hatchery should auto-commit its scaffolding (task file, "
-        "Docker configuration, etc.). Default: from config (true). "
+        "Docker configuration, etc.). Default: from repo config "
+        "(.hatchery.yaml) if set, else global config (true). "
         "Use --no-commit to skip all hatchery commits."
     ),
 )
@@ -556,7 +558,7 @@ def cmd_new(
     cfg = user_config.UserConfig.load()
     backend = cfg.resolve_backend(agent_name)
     use_editor = editor if editor is not None else cfg.open_editor
-    no_commit = (not commit) if commit is not None else (not cfg.auto_commit)
+    no_commit = repo_config.resolve_no_commit(repo, cfg, commit)
 
     # Resolve --include paths: convert CLI tuples → entries, then sessions
     # merges them with docker.yaml's 'include:' list.
@@ -632,7 +634,8 @@ def cmd_new(
     default=None,
     help=(
         "Whether hatchery should auto-commit its scaffolding (Docker configuration, etc.). "
-        "Default: from config (true). Use --no-commit to skip all hatchery commits."
+        "Default: from repo config (.hatchery.yaml) if set, else global config (true). "
+        "Use --no-commit to skip all hatchery commits."
     ),
 )
 def cmd_chat(name: str | None, agent_name: str, commit: bool | None) -> None:
@@ -644,7 +647,7 @@ def cmd_chat(name: str | None, agent_name: str, commit: bool | None) -> None:
 
     cfg = user_config.UserConfig.load()
     backend = cfg.resolve_backend(agent_name)
-    no_commit = (not commit) if commit is not None else (not cfg.auto_commit)
+    no_commit = repo_config.resolve_no_commit(repo, cfg, commit)
 
     name = sessions.next_chat_name(repo) if name is None else utils.to_name(name)
 
@@ -781,7 +784,7 @@ def cmd_resume(
     if prev_status == "running":
         ui.note(f"task '{name}' was marked as running — a previous session may have exited unexpectedly.")
 
-    sessions.restore_dockerfile_if_needed(meta, backend, repo, no_docker=no_docker)
+    sessions.restore_dockerfile_if_needed(meta, backend, no_docker=no_docker)
 
     include_repos = load_include_entries({"include": meta.include})
 
@@ -817,7 +820,8 @@ def cmd_resume(
     default=None,
     help=(
         "Whether hatchery should auto-commit its scaffolding (Docker configuration, etc.). "
-        "Default: from config (true). Use --no-commit to skip all hatchery commits."
+        "Default: from repo config (.hatchery.yaml) if set, else global config (true). "
+        "Use --no-commit to skip all hatchery commits."
     ),
 )
 def cmd_sandbox(shell: str, rebuild_sandbox: bool, commit: bool | None) -> None:
@@ -825,7 +829,7 @@ def cmd_sandbox(shell: str, rebuild_sandbox: bool, commit: bool | None) -> None:
     repo, in_repo = git.git_root_or_cwd()
     cfg = user_config.UserConfig.load()
     backend = cfg.resolve_backend(None)
-    no_commit = (not commit) if commit is not None else (not cfg.auto_commit)
+    no_commit = repo_config.resolve_no_commit(repo, cfg, commit)
 
     hdir = sessions.prepare_sandbox(repo, in_repo=in_repo, backend=backend, no_commit=no_commit)
 
@@ -1031,7 +1035,7 @@ def cmd_config_edit() -> None:
     """Open config in $EDITOR with validation."""
     config_path = user_config.UserConfig.CONFIG_PATH
     # Backup the original file before we touch it
-    backup_path = config_path.with_suffix(".json.bak")
+    backup_path = config_path.with_suffix(".yaml.bak")
     if config_path.exists():
         shutil.copy2(config_path, backup_path)
     # Load, migrate, fill defaults, and write back so the user sees all options

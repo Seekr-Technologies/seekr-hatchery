@@ -1,4 +1,4 @@
-"""User-level configuration — ~/.hatchery/config.json.
+"""User-level configuration — ~/.hatchery/config.yaml.
 
 Callers interact exclusively with :class:`UserConfig`.  Construct one via
 :meth:`UserConfig.load`, which reads and migrates the on-disk file.  Mutating
@@ -8,17 +8,21 @@ call :meth:`save` explicitly to persist.
 Pass an explicit *path* to :meth:`UserConfig.load` for test isolation —
 tests always supply a ``tmp_path``-based path rather than relying on the
 production default.
+
+Legacy ``~/.hatchery/config.json`` files (pre-YAML) are migrated
+transparently on first load — see :meth:`UserConfig.load`.
 """
 
-import json
 import logging
 import shutil
 from pathlib import Path
 from typing import ClassVar, Literal
 
+import yaml
 from pydantic import BaseModel, ValidationError
 
 import seekr_hatchery.agents as agent
+import seekr_hatchery.schema_migration as schema_migration
 import seekr_hatchery.ui as ui
 
 logger = logging.getLogger(__name__)
@@ -43,14 +47,7 @@ class UserConfigModel(BaseModel):
 
 def _migrate(data: dict) -> dict:
     """Bring a raw config dict up to the current schema version in place."""
-    v = str(data.get("schema_version", "0"))
-
-    # "0" → "1": initial versioned schema (just stamp the version)
-    if v == "0":
-        v = "1"
-
-    data["schema_version"] = v
-    return data
+    return schema_migration.stamp_v1(data)
 
 
 # ---------------------------------------------------------------------------
@@ -68,9 +65,9 @@ def validate_config_file(path: Path) -> str | None:
     Returns ``None`` on success or an error message string on failure.
     """
     try:
-        data = json.loads(path.read_text())
-    except json.JSONDecodeError as e:
-        return f"Invalid JSON: {e}"
+        data = yaml.safe_load(path.read_text()) or {}
+    except yaml.YAMLError as e:
+        return f"Invalid YAML: {e}"
     data = _migrate(data)
 
     class StrictConfigModel(UserConfigModel):
@@ -105,7 +102,9 @@ class UserConfig:
     Mutation methods do **not** auto-save — the caller decides when to write.
     """
 
-    CONFIG_PATH: ClassVar[Path] = Path.home() / ".hatchery" / "config.json"
+    CONFIG_PATH: ClassVar[Path] = Path.home() / ".hatchery" / "config.yaml"
+    # Pre-YAML config location; migrated transparently on first load (see `load`).
+    _LEGACY_CONFIG_PATH: ClassVar[Path] = Path.home() / ".hatchery" / "config.json"
 
     def __init__(self, model: UserConfigModel, path: Path) -> None:
         self._model = model
@@ -120,25 +119,40 @@ class UserConfig:
         Returns a default-valued instance if the file is absent or corrupt.
         Pass an explicit *path* in tests; omit it in production to use
         :attr:`CONFIG_PATH`.
+
+        When called with no explicit path and :attr:`CONFIG_PATH` doesn't
+        exist yet, a pre-YAML :attr:`_LEGACY_CONFIG_PATH` (``config.json``)
+        is read, written out as YAML at the new location, and removed —
+        a one-time, transparent format migration.
         """
         if path is None:
             path = cls.CONFIG_PATH
-        if not path.exists():
-            return cls(UserConfigModel(), path)
+            if not path.exists() and cls._LEGACY_CONFIG_PATH.exists():
+                cfg = cls._read(cls._LEGACY_CONFIG_PATH, path)
+                cfg.save()
+                cls._LEGACY_CONFIG_PATH.unlink()
+                return cfg
+        return cls._read(path, path)
+
+    @classmethod
+    def _read(cls, source: Path, target_path: Path) -> "UserConfig":
+        """Read+migrate config data from *source*, binding the result to *target_path*."""
+        if not source.exists():
+            return cls(UserConfigModel(), target_path)
         try:
-            data = json.loads(path.read_text())
-        except (json.JSONDecodeError, OSError):
-            logger.warning("Could not read config at %s — using defaults", path)
-            return cls(UserConfigModel(), path)
+            data = yaml.safe_load(source.read_text()) or {}
+        except (yaml.YAMLError, OSError):
+            logger.warning("Could not read config at %s — using defaults", source)
+            return cls(UserConfigModel(), target_path)
         data = _migrate(data)
-        return cls(UserConfigModel(**data), path)
+        return cls(UserConfigModel(**data), target_path)
 
     # ── Persistence ───────────────────────────────────────────────────────────
 
     def save(self) -> None:
         """Persist the current state to :attr:`_path`."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(self._model.model_dump_json(indent=2))
+        self._path.write_text(yaml.safe_dump(self._model.model_dump(), sort_keys=True))
         logger.debug("Config saved to %s", self._path)
 
     # ── Properties / setters ─────────────────────────────────────────────────
@@ -229,5 +243,5 @@ class UserConfig:
         self.set_default_agent(chosen.kind)
         self.save()
         ui.success(f"Default agent set to '{chosen.binary}'.")
-        ui.info("To change it, edit ~/.hatchery/config.json directly.")
+        ui.info("To change it, edit ~/.hatchery/config.yaml directly.")
         return chosen

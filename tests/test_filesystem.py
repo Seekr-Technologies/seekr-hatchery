@@ -34,7 +34,7 @@ class TestWriteTaskFile:
         with patch("seekr_hatchery.sessions.datetime") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 1, 15, 10, 30)
             path = sessions.write_task_file(worktree / ".hatchery" / "tasks", "my-task", "hatchery/my-task")
-        expected = worktree / ".hatchery" / "tasks" / "my-task" / "2026-01-15-my-task.md"
+        expected = worktree / ".hatchery" / "tasks" / "2026-01-15-my-task" / "task.md"
         assert path == expected
 
     def test_contains_task_name(self, tmp_path):

@@ -24,7 +24,7 @@ WORKTREES_SUBDIR = Path(".hatchery") / "worktrees"
 # Docker config file name (relative to a hatchery_dir).
 DOCKER_CONFIG = "docker.yaml"
 
-# Persistent out-of-tree store for repos that opt out of committing hatchery
-# files. Lives under ~/.hatchery/repos/<repo-id>/ and holds the no-commit
-# hatchery_dir. Used by sessions.py path helpers.
-REPOS_SUBDIR = "repos"
+# Repo-local hatchery config file name (relative to the repo root — not
+# hatchery_dir, so it stays trackable even when .hatchery/ itself is
+# git-excluded in no-commit mode).
+REPO_CONFIG = ".hatchery.yaml"
