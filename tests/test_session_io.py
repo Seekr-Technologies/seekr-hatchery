@@ -826,9 +826,7 @@ class TestSessionCreateChat:
 
     def test_chat_no_commit_in_repo_excludes_hatchery_dir(self, git_repo, fake_tasks_db, no_input):
         """no-commit chat sessions still hide .hatchery/ via .git/info/exclude."""
-        sessions.create(
-            name="chat-1", repo=git_repo, type="chat", backend=agent.CODEX, no_commit=True, in_repo=True
-        )
+        sessions.create(name="chat-1", repo=git_repo, type="chat", backend=agent.CODEX, no_commit=True, in_repo=True)
         exclude = (git_repo / ".git" / "info" / "exclude").read_text()
         assert ".hatchery/" in exclude
 

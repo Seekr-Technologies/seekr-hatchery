@@ -2290,9 +2290,7 @@ class TestCliNewInclude:
 
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
-            (mock_root, _, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, _, mock_docker, _, _, _) = (
-                mocks
-            )
+            (mock_root, _, _, _, _, _, mock_db_path, mock_wt_dir, _, _, mock_write, _, _, mock_docker, _, _, _) = mocks
             (_,)
             (_,)
             mock_root.return_value = (Path.home() / "repo", True)
