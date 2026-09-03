@@ -124,17 +124,17 @@ class TestBuildFinalizeCommand:
 
 
 # ---------------------------------------------------------------------------
-# proxy_kwargs
+# proxy_endpoints
 # ---------------------------------------------------------------------------
 
 
-class TestProxyKwargs:
+class TestProxyEndpoints:
     def test_apikey_mode(self, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-        assert agent.CODEX.proxy_kwargs() == {
-            "target_host": "api.openai.com",
-        }
-        assert "inject_header" not in agent.CODEX.proxy_kwargs()
+        (endpoint,) = agent.CODEX.proxy_endpoints()
+        assert endpoint.key == "default"
+        assert endpoint.target_host == "api.openai.com"
+        assert endpoint.path_prefix == ""
 
     def test_oauth_mode(self, home, monkeypatch):
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -142,35 +142,26 @@ class TestProxyKwargs:
         (home / ".codex" / "auth.json").write_text(
             json.dumps({"OPENAI_API_KEY": None, "tokens": {"access_token": "oauth-tok", "refresh_token": "r"}})
         )
-        assert agent.CODEX.proxy_kwargs() == {
-            "target_host": "chatgpt.com",
-            "path_prefix": "/backend-api/codex",
-        }
-        assert "inject_header" not in agent.CODEX.proxy_kwargs()
+        (endpoint,) = agent.CODEX.proxy_endpoints()
+        assert endpoint.target_host == "chatgpt.com"
+        assert endpoint.path_prefix == "/backend-api/codex"
 
-
-# ---------------------------------------------------------------------------
-# make_header_mutator
-# ---------------------------------------------------------------------------
-
-
-class TestMakeHeaderMutator:
     def test_injects_bearer(self, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test-123")
-        mutator = agent.CODEX.make_header_mutator()
-        result = mutator({})
+        (endpoint,) = agent.CODEX.proxy_endpoints()
+        result = endpoint.header_mutator({})
         assert result.get("Authorization") == "Bearer sk-test-123"
         assert "x-api-key" not in {k.lower() for k in result}
 
     def test_raises_when_no_credentials(self, monkeypatch):
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         with pytest.raises(RuntimeError, match="no API token found"):
-            agent.CODEX.make_header_mutator()
+            agent.CODEX.proxy_endpoints()
 
     def test_strips_inbound_auth_headers(self, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "real-key")
-        mutator = agent.CODEX.make_header_mutator()
-        result = mutator(
+        (endpoint,) = agent.CODEX.proxy_endpoints()
+        result = endpoint.header_mutator(
             {"x-api-key": "proxy-tok", "authorization": "Bearer proxy-tok", "content-type": "application/json"}
         )
         assert result.get("Authorization") == "Bearer real-key"
@@ -189,7 +180,7 @@ class TestMakeHeaderMutator:
 class TestContainerEnv:
     def test_apikey_mode(self, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-        assert agent.CODEX.container_env("tok", 9999) == {
+        assert agent.CODEX.container_env("default", "tok", 9999) == {
             "OPENAI_API_KEY": "tok",
             "OPENAI_BASE_URL": "http://host.docker.internal:9999/v1",
         }
@@ -200,7 +191,7 @@ class TestContainerEnv:
         (home / ".codex" / "auth.json").write_text(
             json.dumps({"OPENAI_API_KEY": None, "tokens": {"access_token": "oauth-tok", "refresh_token": "r"}})
         )
-        assert agent.CODEX.container_env("tok", 9999) == {
+        assert agent.CODEX.container_env("default", "tok", 9999) == {
             "OPENAI_API_KEY": "tok",
             "OPENAI_BASE_URL": "http://host.docker.internal:9999",
         }
@@ -554,7 +545,7 @@ base_url = "https://api.openai.com/v1"
         assert agent.CodexBackend._read_custom_provider() is None
 
 
-class TestCustomProviderProxyKwargs:
+class TestCustomProviderProxyEndpoints:
     def test_returns_target_host(self, home):
         """The provider's URL path lives in OPENAI_BASE_URL (see
         container_env), not in path_prefix — putting it in both would
@@ -563,13 +554,15 @@ class TestCustomProviderProxyKwargs:
         TLS validation uses the OS trust store (see proxy.api_server),
         so no CA-bundle kwarg is needed here."""
         _make_custom_provider_config(home)
-        assert agent.CODEX.proxy_kwargs() == {"target_host": "adapter.example.com"}
+        (endpoint,) = agent.CODEX.proxy_endpoints()
+        assert endpoint.target_host == "adapter.example.com"
 
     def test_http_base_url_works(self, home):
         """Plain-HTTP providers don't need TLS validation either way —
         same code path, no extra config."""
         _make_custom_provider_config(home, base_url="http://localhost:8000/v1")
-        assert agent.CODEX.proxy_kwargs() == {"target_host": "localhost:8000"}
+        (endpoint,) = agent.CODEX.proxy_endpoints()
+        assert endpoint.target_host == "localhost:8000"
 
     def test_custom_provider_wins_over_oauth(self, home):
         """A host with both an OAuth auth.json and a custom provider config
@@ -579,23 +572,21 @@ class TestCustomProviderProxyKwargs:
         (home / ".codex" / "auth.json").write_text(
             json.dumps({"auth_mode": "chatgpt", "tokens": {"access_token": "oauth-tok"}})
         )
-        kwargs = agent.CODEX.proxy_kwargs()
-        assert kwargs["target_host"] == "adapter.example.com"
+        (endpoint,) = agent.CODEX.proxy_endpoints()
+        assert endpoint.target_host == "adapter.example.com"
 
-
-class TestCustomProviderMakeHeaderMutator:
     def test_injects_bearer_from_config(self, home, monkeypatch):
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         _make_custom_provider_config(home, bearer="real-bearer-1234")
-        mutator = agent.CODEX.make_header_mutator()
-        result = mutator({})
+        (endpoint,) = agent.CODEX.proxy_endpoints()
+        result = endpoint.header_mutator({})
         assert result.get("Authorization") == "Bearer real-bearer-1234"
 
     def test_strips_inbound_auth_headers(self, home, monkeypatch):
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         _make_custom_provider_config(home, bearer="real-bearer-1234")
-        mutator = agent.CODEX.make_header_mutator()
-        result = mutator(
+        (endpoint,) = agent.CODEX.proxy_endpoints()
+        result = endpoint.header_mutator(
             {"x-api-key": "proxy-tok", "authorization": "Bearer proxy-tok", "content-type": "application/json"}
         )
         assert result.get("Authorization") == "Bearer real-bearer-1234"
@@ -608,15 +599,15 @@ class TestCustomProviderMakeHeaderMutator:
     def test_refresh_kwarg_is_noop(self, home, monkeypatch):
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         _make_custom_provider_config(home, bearer="real-bearer-1234")
-        mutator = agent.CODEX.make_header_mutator()
+        (endpoint,) = agent.CODEX.proxy_endpoints()
         # refresh=True must not raise (no kubectl, no internal lookup)
-        assert mutator({}, refresh=True).get("Authorization") == "Bearer real-bearer-1234"
+        assert endpoint.header_mutator({}, refresh=True).get("Authorization") == "Bearer real-bearer-1234"
 
 
 class TestCustomProviderContainerEnv:
     def test_returns_expected_env(self, home):
         _make_custom_provider_config(home)
-        env = agent.CODEX.container_env("proxy-tok", 9999)
+        env = agent.CODEX.container_env("default", "proxy-tok", 9999)
         assert env == {
             "OPENAI_API_KEY": "proxy-tok",
             "OPENAI_BASE_URL": "http://host.docker.internal:9999/v1",
@@ -625,7 +616,7 @@ class TestCustomProviderContainerEnv:
 
     def test_empty_path_when_base_url_has_no_path(self, home):
         _make_custom_provider_config(home, base_url="https://adapter.example.com")
-        env = agent.CODEX.container_env("proxy-tok", 9999)
+        env = agent.CODEX.container_env("default", "proxy-tok", 9999)
         assert env["OPENAI_BASE_URL"] == "http://host.docker.internal:9999"
 
 

@@ -120,7 +120,7 @@ def _wait_for_port(port: int, timeout: float = 2.0) -> None:
 
 class TestProxyStartsAndStops:
     def test_port_is_positive(self):
-        with proxy.api_server(_make_api_key_mutator("dummy-key"), _TOKEN) as server:
+        with proxy.api_server(_make_api_key_mutator("dummy-key"), _TOKEN, target_host="api.example.com") as server:
             assert server.port > 0
 
     def test_pool_uses_truststore_ssl_context(self):
@@ -130,13 +130,13 @@ class TestProxyStartsAndStops:
         than performing a real handshake."""
         import truststore
 
-        with proxy.api_server(_make_api_key_mutator("dummy-key"), _TOKEN) as server:
+        with proxy.api_server(_make_api_key_mutator("dummy-key"), _TOKEN, target_host="api.example.com") as server:
             handler_pool = server._server.RequestHandlerClass.pool  # type: ignore[attr-defined]
             ssl_ctx = handler_pool.connection_pool_kw.get("ssl_context")
             assert isinstance(ssl_ctx, truststore.SSLContext)
 
     def test_stops_cleanly(self):
-        with proxy.api_server(_make_api_key_mutator("dummy-key"), _TOKEN) as server:
+        with proxy.api_server(_make_api_key_mutator("dummy-key"), _TOKEN, target_host="api.example.com") as server:
             port = server.port
         # After exiting the context, the port should no longer be accepting connections.
         try:
@@ -155,7 +155,7 @@ class TestProxyStartsAndStops:
 
 class TestProxyTokenValidation:
     def test_rejects_wrong_token(self):
-        with proxy.api_server(_make_api_key_mutator("real-key"), _TOKEN) as server:
+        with proxy.api_server(_make_api_key_mutator("real-key"), _TOKEN, target_host="api.example.com") as server:
             port = server.port
             _wait_for_port(port)
             conn = http.client.HTTPConnection("localhost", port)
@@ -164,7 +164,7 @@ class TestProxyTokenValidation:
             assert resp.status == 401
 
     def test_rejects_missing_token(self):
-        with proxy.api_server(_make_api_key_mutator("real-key"), _TOKEN) as server:
+        with proxy.api_server(_make_api_key_mutator("real-key"), _TOKEN, target_host="api.example.com") as server:
             port = server.port
             _wait_for_port(port)
             conn = http.client.HTTPConnection("localhost", port)
@@ -174,7 +174,9 @@ class TestProxyTokenValidation:
 
     def test_accepts_correct_token(self):
         pool = _MockPool()
-        with proxy.api_server(_make_api_key_mutator("real-key"), _TOKEN, _pool=pool) as server:
+        with proxy.api_server(
+            _make_api_key_mutator("real-key"), _TOKEN, target_host="api.example.com", _pool=pool
+        ) as server:
             port = server.port
             _wait_for_port(port)
             conn = http.client.HTTPConnection("localhost", port)
@@ -193,7 +195,9 @@ class TestProxyInjectsApiKey:
     def test_real_key_injected_on_outbound(self):
         """Proxy must replace the proxy token with the real API key on the outbound leg."""
         pool = _MockPool()
-        with proxy.api_server(_make_api_key_mutator("real-api-key-xyz"), _TOKEN, _pool=pool) as server:
+        with proxy.api_server(
+            _make_api_key_mutator("real-api-key-xyz"), _TOKEN, target_host="api.example.com", _pool=pool
+        ) as server:
             port = server.port
             _wait_for_port(port)
             conn = http.client.HTTPConnection("localhost", port)
@@ -206,7 +210,9 @@ class TestProxyInjectsApiKey:
     def test_inbound_auth_headers_stripped(self):
         """Neither the proxy token nor any authorization header must reach upstream."""
         pool = _MockPool()
-        with proxy.api_server(_make_api_key_mutator("real-key"), _TOKEN, _pool=pool) as server:
+        with proxy.api_server(
+            _make_api_key_mutator("real-key"), _TOKEN, target_host="api.example.com", _pool=pool
+        ) as server:
             port = server.port
             _wait_for_port(port)
             conn = http.client.HTTPConnection("localhost", port)
@@ -284,10 +290,12 @@ class TestProxyOpenAIFormat:
         assert len(pool.calls) == 1
         assert urlparse(pool.calls[0]["url"]).hostname == "api.openai.com"
 
-    def test_xapikey_still_accepted_for_anthropic_proxy(self):
-        """Default Anthropic proxy still accepts x-api-key tokens."""
+    def test_xapikey_still_accepted(self):
+        """Proxy still accepts x-api-key-style tokens."""
         pool = _MockPool()
-        with proxy.api_server(_make_api_key_mutator("real-key"), _TOKEN, _pool=pool) as server:
+        with proxy.api_server(
+            _make_api_key_mutator("real-key"), _TOKEN, target_host="api.example.com", _pool=pool
+        ) as server:
             port = server.port
             _wait_for_port(port)
             conn = http.client.HTTPConnection("localhost", port)
@@ -326,7 +334,9 @@ class TestConnectionClose:
 
     def test_success_response_advertises_connection_close(self):
         pool = _MockPool()
-        with proxy.api_server(_make_api_key_mutator("real-key"), _TOKEN, _pool=pool) as server:
+        with proxy.api_server(
+            _make_api_key_mutator("real-key"), _TOKEN, target_host="api.example.com", _pool=pool
+        ) as server:
             port = server.port
             _wait_for_port(port)
             conn = http.client.HTTPConnection("localhost", port)
@@ -336,7 +346,7 @@ class TestConnectionClose:
             assert resp.getheader("Connection") == "close"
 
     def test_401_response_advertises_connection_close(self):
-        with proxy.api_server(_make_api_key_mutator("real-key"), _TOKEN) as server:
+        with proxy.api_server(_make_api_key_mutator("real-key"), _TOKEN, target_host="api.example.com") as server:
             port = server.port
             _wait_for_port(port)
             conn = http.client.HTTPConnection("localhost", port)
@@ -355,7 +365,9 @@ class TestHeaderSanitization:
             ("x-bad\r\nAnother: oops", "clean-value"),
         ]
         pool = _MockPool(responses=[_MockPoolResp(headers=malicious_headers, body=b"ok")])
-        with proxy.api_server(_make_api_key_mutator("real-key"), _TOKEN, _pool=pool) as server:
+        with proxy.api_server(
+            _make_api_key_mutator("real-key"), _TOKEN, target_host="api.example.com", _pool=pool
+        ) as server:
             port = server.port
             _wait_for_port(port)
             conn = http.client.HTTPConnection("localhost", port)
@@ -381,7 +393,9 @@ class TestProxyConcurrentRequests:
                 return super().urlopen(method, url, body=body, headers=headers, **kwargs)
 
         pool = _BarrierPool(responses=[_MockPoolResp(), _MockPoolResp()])
-        with proxy.api_server(_make_api_key_mutator("api-key"), _TOKEN, _pool=pool) as server:
+        with proxy.api_server(
+            _make_api_key_mutator("api-key"), _TOKEN, target_host="api.example.com", _pool=pool
+        ) as server:
             port = server.port
             _wait_for_port(port)
 
@@ -406,27 +420,27 @@ class TestProxyConcurrentRequests:
 
 
 class TestHeaderMutatorIntegration:
-    def test_oauth_beta_header_prepended(self):
-        """OAuth mutator must prepend oauth-2025-04-20 to existing anthropic-beta."""
+    def test_mutator_prepends_to_existing_header(self):
+        """A mutator that prepends to an inbound header is forwarded intact."""
         pool = _MockPool()
 
         def _oauth_mutate(headers, **kwargs):
             out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")}
             out["Authorization"] = "Bearer oauth-token"
-            existing = out.get("anthropic-beta", "")
-            out["anthropic-beta"] = ("oauth-2025-04-20," + existing) if existing else "oauth-2025-04-20"
+            existing = out.get("x-beta", "")
+            out["x-beta"] = ("injected-flag," + existing) if existing else "injected-flag"
             return out
 
-        with proxy.api_server(_oauth_mutate, _TOKEN, _pool=pool) as server:
+        with proxy.api_server(_oauth_mutate, _TOKEN, target_host="api.example.com", _pool=pool) as server:
             port = server.port
             _wait_for_port(port)
             conn = http.client.HTTPConnection("localhost", port)
-            conn.request("POST", "/v1/messages", headers={"x-api-key": _TOKEN, "anthropic-beta": "existing-beta"})
+            conn.request("POST", "/v1/messages", headers={"x-api-key": _TOKEN, "x-beta": "existing-flag"})
             conn.getresponse().read()
 
         assert len(pool.calls) == 1
         h = pool.calls[0]["headers"]
-        assert h.get("anthropic-beta") == "oauth-2025-04-20,existing-beta"
+        assert h.get("x-beta") == "injected-flag,existing-flag"
         assert h.get("Authorization") == "Bearer oauth-token"
         assert "x-api-key" not in {k.lower() for k in h}
 
@@ -448,7 +462,7 @@ class TestProxyReauthOn401:
             return out
 
         pool = _MockPool(responses=[_MockPoolResp(status=401), _MockPoolResp(status=200)])
-        with proxy.api_server(_mutator, _TOKEN, _pool=pool) as server:
+        with proxy.api_server(_mutator, _TOKEN, target_host="api.example.com", _pool=pool) as server:
             port = server.port
             _wait_for_port(port)
             conn = http.client.HTTPConnection("localhost", port)
@@ -470,7 +484,9 @@ class TestProxyReauthOn401:
     def test_retry_also_401_forwarded_without_further_retry(self):
         """If the retry also returns 401, it is forwarded to the client with no further attempt."""
         pool = _MockPool(responses=[_MockPoolResp(status=401), _MockPoolResp(status=401)])
-        with proxy.api_server(_make_api_key_mutator("key"), _TOKEN, _pool=pool) as server:
+        with proxy.api_server(
+            _make_api_key_mutator("key"), _TOKEN, target_host="api.example.com", _pool=pool
+        ) as server:
             port = server.port
             _wait_for_port(port)
             conn = http.client.HTTPConnection("localhost", port)
@@ -486,7 +502,9 @@ class TestProxyReauthOn401:
     def test_non_401_error_forwarded_without_retry(self):
         """A 500 from upstream must be forwarded immediately without any retry."""
         pool = _MockPool(responses=[_MockPoolResp(status=500)])
-        with proxy.api_server(_make_api_key_mutator("key"), _TOKEN, _pool=pool) as server:
+        with proxy.api_server(
+            _make_api_key_mutator("key"), _TOKEN, target_host="api.example.com", _pool=pool
+        ) as server:
             port = server.port
             _wait_for_port(port)
             conn = http.client.HTTPConnection("localhost", port)
@@ -549,7 +567,7 @@ class TestProxyWebSocketRelay:
                     self.sock.close()
 
         monkeypatch.setattr(http.client, "HTTPSConnection", _WSConn)
-        with proxy.api_server(_make_bearer_mutator("real-key"), _TOKEN) as server:
+        with proxy.api_server(_make_bearer_mutator("real-key"), _TOKEN, target_host="api.example.com") as server:
             port = server.port
             _wait_for_port(port)
             conn = http.client.HTTPConnection("localhost", port)
@@ -616,7 +634,7 @@ class TestProxyWebSocketRelay:
                     self.sock.close()
 
         monkeypatch.setattr(http.client, "HTTPSConnection", _WSConn)
-        with proxy.api_server(_make_bearer_mutator("real-key"), _TOKEN) as server:
+        with proxy.api_server(_make_bearer_mutator("real-key"), _TOKEN, target_host="api.example.com") as server:
             port = server.port
             _wait_for_port(port)
             conn = http.client.HTTPConnection("localhost", port)
@@ -653,7 +671,7 @@ class TestProxyLogging:
         """Token mismatch emits an INFO log with method and path."""
 
         with caplog.at_level(logging.INFO, logger="seekr_hatchery"):
-            with proxy.api_server(_make_api_key_mutator("real-key"), _TOKEN) as server:
+            with proxy.api_server(_make_api_key_mutator("real-key"), _TOKEN, target_host="api.example.com") as server:
                 port = server.port
                 _wait_for_port(port)
                 conn = http.client.HTTPConnection("localhost", port)
@@ -668,7 +686,9 @@ class TestProxyLogging:
 
         pool = _MockPool()
         with caplog.at_level(logging.INFO, logger="seekr_hatchery"):
-            with proxy.api_server(_make_api_key_mutator("real-key"), _TOKEN, _pool=pool) as server:
+            with proxy.api_server(
+                _make_api_key_mutator("real-key"), _TOKEN, target_host="api.example.com", _pool=pool
+            ) as server:
                 port = server.port
                 _wait_for_port(port)
                 conn = http.client.HTTPConnection("localhost", port)
@@ -690,7 +710,9 @@ class TestProxyLogging:
                 raise ConnectionError("upstream unreachable")
 
         with caplog.at_level(logging.WARNING, logger="seekr_hatchery"):
-            with proxy.api_server(_make_api_key_mutator("real-key"), _TOKEN, _pool=_ErrorPool()) as server:
+            with proxy.api_server(
+                _make_api_key_mutator("real-key"), _TOKEN, target_host="api.example.com", _pool=_ErrorPool()
+            ) as server:
                 port = server.port
                 _wait_for_port(port)
                 conn = http.client.HTTPConnection("localhost", port)
@@ -716,7 +738,9 @@ class TestProxyLogging:
 
         pool = _MockPool(responses=[_ExplodingResp()])
         with caplog.at_level(logging.WARNING, logger="seekr_hatchery"):
-            with proxy.api_server(_make_api_key_mutator("real-key"), _TOKEN, _pool=pool) as server:
+            with proxy.api_server(
+                _make_api_key_mutator("real-key"), _TOKEN, target_host="api.example.com", _pool=pool
+            ) as server:
                 port = server.port
                 _wait_for_port(port)
                 conn = http.client.HTTPConnection("localhost", port)

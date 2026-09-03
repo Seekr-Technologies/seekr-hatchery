@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 
 import tomli_w
 
-from seekr_hatchery.agents.agent_backend import CONTAINER_HOME, AgentBackend
+from seekr_hatchery.agents.agent_backend import CONTAINER_HOME, AgentBackend, ProxyEndpoint
 from seekr_hatchery.locks import hatchery_lock
 from seekr_hatchery.mount import BindMount, Mount, SeedContext, VolumeMount
 
@@ -75,7 +75,7 @@ def _host_config_data() -> dict:
 
     Cached for the lifetime of the Python process so the same launch
     reads the host config exactly once — avoids drift between
-    ``proxy_kwargs`` / ``make_header_mutator`` / ``container_env`` /
+    ``proxy_endpoints`` / ``container_env`` /
     ``_render_container_config`` if the file is rewritten mid-launch
     (e.g. by a token-rotation script).
 
@@ -617,7 +617,7 @@ class CodexBackend(AgentBackend):
         ``auth.json`` always uses ``auth_mode="apikey"`` regardless of the
         host's real mode. In apikey mode codex respects
         ``OPENAI_BASE_URL`` (which ``container_env`` sets to the proxy).
-        For OAuth hosts, ``container_env`` and ``proxy_kwargs`` together
+        For OAuth hosts, ``container_env`` and ``proxy_endpoints`` together
         route codex's apikey path through the OAuth backend; the
         container never sees the host's OAuth tokens.
 
@@ -637,21 +637,24 @@ class CodexBackend(AgentBackend):
         }
 
     @staticmethod
-    def proxy_kwargs() -> dict:
-        # Custom-provider mode wins over OAuth / API-key — the user
-        # explicitly configured a different upstream in config.toml.
-        #
-        # The provider's URL path (e.g. ``/v1``) lives in the container's
-        # ``OPENAI_BASE_URL`` — see ``container_env`` — not in
-        # ``path_prefix``.  Putting it in both would forward to
-        # ``<host>/v1/v1/responses`` and yield a 404 from the upstream.
-        # This mirrors the OpenAI API-key path (target_host=api.openai.com,
-        # container sees ``…/v1``).
-        #
-        # TLS verification uses the OS trust store via
-        # ``truststore.SSLContext`` in ``sidecars.api_sidecar.proxy.api_server``, so any
-        # non-public CA the user has installed system-wide is trusted
-        # automatically — no hatchery-specific CA config needed.
+    def _proxy_target() -> dict:
+        """Return ``{"target_host": ..., "path_prefix": ...}`` for the active auth source.
+
+        Custom-provider mode wins over OAuth / API-key — the user
+        explicitly configured a different upstream in config.toml.
+
+        The provider's URL path (e.g. ``/v1``) lives in the container's
+        ``OPENAI_BASE_URL`` — see ``container_env`` — not in
+        ``path_prefix``.  Putting it in both would forward to
+        ``<host>/v1/v1/responses`` and yield a 404 from the upstream.
+        This mirrors the OpenAI API-key path (target_host=api.openai.com,
+        container sees ``…/v1``).
+
+        TLS verification uses the OS trust store via
+        ``truststore.SSLContext`` in ``sidecars.api_sidecar.proxy.api_server``, so any
+        non-public CA the user has installed system-wide is trusted
+        automatically — no hatchery-specific CA config needed.
+        """
         custom = CodexBackend._read_custom_provider()
         if custom is not None:
             _provider, base_url, _bearer = custom
@@ -665,7 +668,18 @@ class CodexBackend(AgentBackend):
         return {"target_host": "api.openai.com"}
 
     @staticmethod
-    def make_header_mutator() -> Callable[..., dict[str, str]]:
+    def _build_header_mutator() -> Callable[..., dict[str, str]]:
+        """Return a callable that transforms outbound request headers.
+
+        Strips inbound auth headers, injects the real API key in the
+        correct format, and returns the modified dict. Accepts an optional
+        ``refresh: bool = False`` keyword argument: when True, attempts to
+        obtain a fresh credential (OAuth sources only; API_KEY is a no-op)
+        before injecting the token.
+
+        Raises RuntimeError (with a human-readable message) if no
+        credentials are available.
+        """
         custom = CodexBackend._read_custom_provider()
         if custom is not None:
             _provider, _base_url, bearer = custom
@@ -734,7 +748,21 @@ class CodexBackend(AgentBackend):
         return _mutate
 
     @staticmethod
-    def container_env(proxy_token: str, proxy_port: int) -> dict[str, str]:
+    def proxy_endpoints() -> list[ProxyEndpoint]:
+        target = CodexBackend._proxy_target()
+        mutator = CodexBackend._build_header_mutator()
+        return [
+            ProxyEndpoint(
+                key="default",
+                header_mutator=mutator,
+                target_host=target["target_host"],
+                path_prefix=target.get("path_prefix", ""),
+            )
+        ]
+
+    @staticmethod
+    def container_env(endpoint_key: str, proxy_token: str, proxy_port: int) -> dict[str, str]:
+        del endpoint_key  # codex has exactly one endpoint
         custom = CodexBackend._read_custom_provider()
         if custom is not None:
             provider, base_url, _bearer = custom

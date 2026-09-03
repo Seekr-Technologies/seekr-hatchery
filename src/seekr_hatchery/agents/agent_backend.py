@@ -3,6 +3,7 @@
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -14,6 +15,46 @@ if TYPE_CHECKING:
 
 # Home directory of the non-root user inside every sandbox container.
 CONTAINER_HOME = "/home/hatchery"
+
+
+@dataclass(frozen=True)
+class ProxyEndpoint:
+    """One provider's reverse proxy, as returned by ``AgentBackend.proxy_endpoints()``.
+
+    Attributes:
+      key:
+        Provider id (e.g. ``"default"``). Used to namespace
+        per-endpoint state; must be unique across the endpoints one backend
+        returns.
+      header_mutator:
+        Callable that transforms outbound request headers. Called for every
+        proxied request with the inbound headers (hop-by-hop already
+        stripped). Must strip inbound auth headers, inject the real API key
+        in the correct format, and return the modified dict.
+
+        The callable accepts an optional ``refresh: bool = False`` keyword
+        argument. When ``refresh=True`` the backend should attempt to obtain
+        a fresh credential (e.g. by firing a short test query for OAuth
+        sources) before injecting the token into the returned headers. For
+        ``API_KEY`` sources, ``refresh=True`` is a no-op.
+      target_host:
+        Upstream API hostname this endpoint's proxy forwards to.
+      path_prefix:
+        String prepended to every forwarded path (default: ``""``).
+      container_token:
+        Per-endpoint override for the fake token the container presents (and
+        this proxy validates). When ``None`` the shared session proxy token is
+        used. Set it only when the agent derives request state from the token
+        client-side and therefore needs a specific value baked in — e.g. pi's
+        openai-codex path decodes its local token as a JWT to read the ChatGPT
+        account id, so that endpoint supplies a JWT carrying the real id.
+    """
+
+    key: str
+    header_mutator: Callable[..., dict[str, str]]
+    target_host: str
+    path_prefix: str = ""
+    container_token: str | None = None
 
 
 class AgentBackend(ABC):
@@ -104,26 +145,6 @@ class AgentBackend(ABC):
 
     @staticmethod
     @abstractmethod
-    def make_header_mutator() -> Callable[..., dict[str, str]]:
-        """Return a callable that transforms outbound request headers.
-
-        Called once at proxy startup. The returned function is invoked for every
-        proxied request with the inbound headers (hop-by-hop already stripped).
-        It must strip inbound auth headers, inject the real API key in the
-        correct format, and return the modified dict.
-
-        The returned callable accepts an optional ``refresh: bool = False``
-        keyword argument.  When ``refresh=True`` the backend should attempt to
-        obtain a fresh credential (e.g. by firing a short test query for OAuth
-        sources) before injecting the token into the returned headers.  For
-        ``API_KEY`` sources, ``refresh=True`` is a no-op.
-
-        Raises RuntimeError (with a human-readable message) if no credentials
-        are available.
-        """
-
-    @staticmethod
-    @abstractmethod
     def construct_mounts(session_dir: Path) -> list[Mount]:
         """Return the agent's container mounts.
 
@@ -138,17 +159,22 @@ class AgentBackend(ABC):
 
     @staticmethod
     @abstractmethod
-    def proxy_kwargs() -> dict:
-        """Return keyword arguments to pass to ``sidecars.api_sidecar.proxy.api_server()``.
+    def proxy_endpoints() -> list["ProxyEndpoint"]:
+        """Return one ProxyEndpoint per provider with resolvable credentials.
 
-        Note: does not include ``header_mutator`` — that is provided separately
-        via ``make_header_mutator()``.
+        Called once per launch. Raises RuntimeError (human-readable) when no
+        credentials resolve for any provider.
         """
 
     @staticmethod
     @abstractmethod
-    def container_env(proxy_token: str, proxy_port: int) -> dict[str, str]:
-        """Return environment variables to inject into the container."""
+    def container_env(endpoint_key: str, proxy_token: str, proxy_port: int) -> dict[str, str]:
+        """Return environment variables to inject into the container.
+
+        Called once per ``ProxyEndpoint`` returned by ``proxy_endpoints()``.
+        The returned env keys must be unique per endpoint — they are merged
+        across endpoints and a collision raises.
+        """
 
     # ── Lifecycle hooks ───────────────────────────────────────────────────────
     #
