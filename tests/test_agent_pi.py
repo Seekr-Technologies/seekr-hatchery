@@ -372,7 +372,9 @@ class TestContainerEnv:
 
 
 class TestConstructMounts:
-    def test_returns_volume_mount_no_real_creds(self, tmp_path):
+    def test_returns_only_volume_when_no_host_config(self, tmp_path):
+        # autouse ``home`` fixture points Path.home() at an empty temp dir,
+        # so neither settings.json nor models-store.json exists.
         mounts = agent.PI.construct_mounts(tmp_path)
         assert len(mounts) == 1
         (m,) = mounts
@@ -380,12 +382,36 @@ class TestConstructMounts:
         assert m.dst == f"{agent.CONTAINER_HOME}/.pi/agent"
         assert m.seed is None
 
-    def test_no_bind_mount_of_real_pi_auth(self, tmp_path):
+    def test_layers_host_config_binds_over_volume(self, home, tmp_path):
+        agent_dir = home / ".pi" / "agent"
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "settings.json").write_text("{}")
+        (agent_dir / "models-store.json").write_text("{}")
+
+        vol, settings, store = agent.PI.construct_mounts(tmp_path)
+
+        assert isinstance(vol, mount.VolumeMount)
+        assert vol.dst == f"{agent.CONTAINER_HOME}/.pi/agent"
+        assert (settings.src, settings.dst, settings.mode) == (
+            agent_dir / "settings.json",
+            f"{agent.CONTAINER_HOME}/.pi/agent/settings.json",
+            "RW",
+        )
+        assert (store.src, store.dst, store.mode) == (
+            agent_dir / "models-store.json",
+            f"{agent.CONTAINER_HOME}/.pi/agent/models-store.json",
+            "RO",
+        )
+
+    def test_never_binds_the_real_auth_json(self, home, tmp_path):
+        agent_dir = home / ".pi" / "agent"
+        agent_dir.mkdir(parents=True)
+        for name in ("auth.json", "settings.json", "models-store.json"):
+            (agent_dir / name).write_text("{}")
+
         mounts = agent.PI.construct_mounts(tmp_path)
-        for m in mounts:
-            if isinstance(m, mount.BindMount):
-                assert "auth.json" not in str(m.src)
-                assert ".pi" not in str(m.src)
+
+        assert not any(isinstance(m, mount.BindMount) and Path(m.src).name == "auth.json" for m in mounts)
 
 
 # ---------------------------------------------------------------------------

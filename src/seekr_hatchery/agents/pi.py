@@ -46,7 +46,7 @@ from urllib.parse import urlsplit
 
 from seekr_hatchery.agents.agent_backend import CONTAINER_HOME, AgentBackend, ProxyEndpoint
 from seekr_hatchery.locks import hatchery_lock
-from seekr_hatchery.mount import Mount, VolumeMount
+from seekr_hatchery.mount import BindMount, Mount, VolumeMount
 
 logger = logging.getLogger(__name__)
 
@@ -326,9 +326,24 @@ class PiBackend(AgentBackend):
         port, which aren't known until then. The host's real
         ``~/.pi/agent/auth.json`` (containing real keys/OAuth tokens) is
         never mounted or read into the container.
+
+        Two host config files are layered on top of the volume so they flow
+        through: ``settings.json`` RW (user config, bidirectional) and
+        ``models-store.json`` RO (pi's model catalogue; RO keeps upstream
+        target resolution host-authoritative). Both are ``.exists()``-guarded
+        — a bind whose source is missing would make Docker create a directory
+        there. ``bin/`` and ``sessions/`` stay container-local in the volume.
         """
         del session_dir  # pi needs no per-task host-side staging
-        return [VolumeMount(name="pi-dir", dst=f"{CONTAINER_HOME}/.pi/agent")]
+        agent_dir = Path.home() / ".pi" / "agent"
+        mounts: list[Mount] = [VolumeMount(name="pi-dir", dst=f"{CONTAINER_HOME}/.pi/agent")]
+        settings = agent_dir / "settings.json"
+        if settings.exists():
+            mounts.append(BindMount(src=settings, dst=f"{CONTAINER_HOME}/.pi/agent/settings.json", mode="RW"))
+        store = agent_dir / "models-store.json"
+        if store.exists():
+            mounts.append(BindMount(src=store, dst=f"{CONTAINER_HOME}/.pi/agent/models-store.json", mode="RO"))
+        return mounts
 
     @staticmethod
     def proxy_endpoints() -> list[ProxyEndpoint]:
