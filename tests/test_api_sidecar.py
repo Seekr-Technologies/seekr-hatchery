@@ -318,6 +318,34 @@ class TestPathPrefix:
         assert pool.calls[0]["url"].endswith("/backend-api/codex/responses")
 
 
+class TestConnectionClose:
+    """Proxy advertises ``Connection: close`` so HTTP/1.1 clients (codex's
+    reqwest) don't pool a socket the proxy closes after each request — the
+    reuse-a-dead-socket path that stalled codex for minutes after an idle gap.
+    """
+
+    def test_success_response_advertises_connection_close(self):
+        pool = _MockPool()
+        with proxy.api_server(_make_api_key_mutator("real-key"), _TOKEN, _pool=pool) as server:
+            port = server.port
+            _wait_for_port(port)
+            conn = http.client.HTTPConnection("localhost", port)
+            conn.request("GET", "/v1/models", headers={"x-api-key": _TOKEN})
+            resp = conn.getresponse()
+            resp.read()
+            assert resp.getheader("Connection") == "close"
+
+    def test_401_response_advertises_connection_close(self):
+        with proxy.api_server(_make_api_key_mutator("real-key"), _TOKEN) as server:
+            port = server.port
+            _wait_for_port(port)
+            conn = http.client.HTTPConnection("localhost", port)
+            conn.request("GET", "/v1/models", headers={"x-api-key": "wrong-token"})
+            resp = conn.getresponse()
+            resp.read()
+            assert resp.getheader("Connection") == "close"
+
+
 class TestHeaderSanitization:
     def test_crlf_stripped_from_response_headers(self):
         """Headers containing \\r\\n must be sanitized to prevent HTTP response splitting."""
@@ -543,6 +571,75 @@ class TestProxyWebSocketRelay:
             assert headers_lower.get("upgrade", "").lower() == "websocket"
             assert headers_lower.get("sec-websocket-accept") == "abc123=="
 
+    def test_relay_clears_idle_read_timeout_on_upstream_socket(self, monkeypatch):
+        """A long-lived WS tunnel must not keep the connect timeout.
+
+        codex's /v1/responses WebSocket sits idle between turns; a finite read
+        timeout on the upstream socket fires during that idle, kills the relay,
+        and hangs the next turn.  The proxy must clear it once relaying starts.
+        """
+        import socket as _socket
+        import time as _time
+
+        created = []
+
+        class _WSResp:
+            status = 101
+            fp = None
+
+            def getheaders(self):
+                return [("upgrade", "websocket"), ("connection", "Upgrade"), ("sec-websocket-accept", "abc123==")]
+
+            def read(self, n=None):
+                return b""
+
+        class _WSConn:
+            def __init__(self, host, timeout=None):
+                self._upstream, self._downstream = _socket.socketpair()
+                # Mirror http.client.HTTPSConnection(timeout=60): the real
+                # socket carries a finite read timeout that would kill an idle
+                # relay if the proxy did not clear it.
+                self._upstream.settimeout(60)
+                self.sock = self._upstream
+                created.append(self)
+
+            def request(self, method, path, body=None, headers=None):
+                resp = _WSResp()
+                resp.fp = self._downstream.makefile("rb")
+                self._resp = resp
+
+            def getresponse(self):
+                return self._resp
+
+            def close(self):
+                if self.sock is not None:
+                    self.sock.close()
+
+        monkeypatch.setattr(http.client, "HTTPSConnection", _WSConn)
+        with proxy.api_server(_make_bearer_mutator("real-key"), _TOKEN) as server:
+            port = server.port
+            _wait_for_port(port)
+            conn = http.client.HTTPConnection("localhost", port)
+            conn.request(
+                "GET",
+                "/ws",
+                headers={
+                    "Authorization": f"Bearer {_TOKEN}",
+                    "Upgrade": "websocket",
+                    "Connection": "Upgrade",
+                    "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+                    "Sec-WebSocket-Version": "13",
+                },
+            )
+            assert conn.getresponse().status == 101
+            assert created, "upstream WS connection was never created"
+            upstream = created[0]._upstream
+            # settimeout(None) happens just after the 101 is flushed; poll briefly.
+            deadline = _time.monotonic() + 2.0
+            while upstream.gettimeout() is not None and _time.monotonic() < deadline:
+                _time.sleep(0.01)
+            assert upstream.gettimeout() is None
+
 
 # ---------------------------------------------------------------------------
 # test_proxy_logging
@@ -602,3 +699,32 @@ class TestProxyLogging:
 
         messages = [r.getMessage() for r in caplog.records]
         assert any("upstream error" in m for m in messages)
+
+    def test_midstream_read_error_logged_at_warning(self, caplog):
+        """A failure while streaming the body is logged, not swallowed."""
+
+        class _ExplodingResp(_MockPoolResp):
+            def __init__(self) -> None:
+                super().__init__(status=200, body=b"data: chunk\n\n")
+                self._reads = 0
+
+            def read(self, n: int) -> bytes:
+                self._reads += 1
+                if self._reads == 1:
+                    return b"data: chunk\n\n"
+                raise OSError("upstream reset mid-stream")
+
+        pool = _MockPool(responses=[_ExplodingResp()])
+        with caplog.at_level(logging.WARNING, logger="seekr_hatchery"):
+            with proxy.api_server(_make_api_key_mutator("real-key"), _TOKEN, _pool=pool) as server:
+                port = server.port
+                _wait_for_port(port)
+                conn = http.client.HTTPConnection("localhost", port)
+                conn.request("GET", "/v1/stream", headers={"x-api-key": _TOKEN})
+                try:
+                    conn.getresponse().read()
+                except Exception:
+                    pass
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("body stream aborted" in m for m in messages)

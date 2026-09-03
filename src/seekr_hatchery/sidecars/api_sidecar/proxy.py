@@ -24,9 +24,11 @@ Public interface::
 
 import http.client
 import http.server
+import itertools
 import logging
 import ssl
 import threading
+import time
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from typing import Any
@@ -80,14 +82,41 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
     path_prefix: str = ""  # prepended to every forwarded path (e.g. "/backend-api/codex")
     pool: urllib3.PoolManager  # set per-instance by api_server()
 
+    # Monotonic per-connection id so every log line for one socket can be
+    # correlated across the threaded handlers ("[cN]").  Thread-safe: CPython's
+    # GIL makes itertools.count.__next__ atomic.
+    _conn_counter = itertools.count(1)
+
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         pass  # suppress per-request access log lines
+
+    def handle(self) -> None:
+        """Record connection-accept time before servicing the request.
+
+        The first request log line (in ``_handle_request``) is emitted only
+        after the request body is fully read, so the accept→request-parsed
+        window — where an idle-triggered client-side connect/send stall would
+        otherwise be invisible — is measured against this timestamp.
+        """
+        self._conn_id = next(_ProxyHandler._conn_counter)
+        self._accepted_at = time.monotonic()
+        peer = self.client_address[0] if self.client_address else "?"
+        logger.info("proxy: [c%d] connection accepted from %s", self._conn_id, peer)
+        try:
+            super().handle()
+        finally:
+            logger.info(
+                "proxy: [c%d] connection closed after %.1fs",
+                self._conn_id,
+                time.monotonic() - self._accepted_at,
+            )
 
     def _send_simple(self, code: int, message: str) -> None:
         body = message.encode()
         self.send_response(code)
         self.send_header("Content-Type", "text/plain")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body)
 
@@ -120,8 +149,11 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
         upstream_sock   — the underlying SSL socket; used for writes to upstream.
         """
         self.wfile.flush()
+        cid = getattr(self, "_conn_id", 0)
+        relay_start = time.monotonic()
 
         def upstream_to_client() -> None:
+            up_bytes = 0
             try:
                 while True:
                     chunk = upstream_reader.read1(_CHUNK_SIZE)
@@ -129,20 +161,48 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
                         break
                     self.wfile.write(chunk)
                     self.wfile.flush()
-            except Exception:
-                pass
+                    up_bytes += len(chunk)
+            except Exception as exc:
+                logger.warning(
+                    "proxy: [c%d] WS relay upstream→client aborted after %.1fs (%d bytes): %s",
+                    cid,
+                    time.monotonic() - relay_start,
+                    up_bytes,
+                    exc,
+                )
+            else:
+                logger.info(
+                    "proxy: [c%d] WS relay upstream→client ended after %.1fs (%d bytes)",
+                    cid,
+                    time.monotonic() - relay_start,
+                    up_bytes,
+                )
 
         relay_thread = threading.Thread(target=upstream_to_client, daemon=True)
         relay_thread.start()
+        down_bytes = 0
         try:
             while True:
                 chunk = self.rfile.read1(_CHUNK_SIZE)
                 if not chunk:
                     break
                 upstream_sock.sendall(chunk)
-        except Exception:
-            pass
+                down_bytes += len(chunk)
+        except Exception as exc:
+            logger.warning(
+                "proxy: [c%d] WS relay client→upstream aborted after %.1fs (%d bytes): %s",
+                cid,
+                time.monotonic() - relay_start,
+                down_bytes,
+                exc,
+            )
         finally:
+            logger.info(
+                "proxy: [c%d] WS relay client→upstream ended after %.1fs (%d bytes)",
+                cid,
+                time.monotonic() - relay_start,
+                down_bytes,
+            )
             relay_thread.join(timeout=30)
 
     def _handle_request(self, *, _retried: bool = False) -> None:
@@ -151,12 +211,27 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
         # relay sets this implicitly by returning after the relay completes.
         self.close_connection = True
 
+        # Earliest point we hold the request line — logged before token
+        # validation and body read so a request that arrives but then stalls
+        # (slow body, upstream hang) is still visible.
+        cid = getattr(self, "_conn_id", 0)
+        is_ws = self.headers.get("upgrade", "").lower() == "websocket"
+        logger.info(
+            "proxy: [c%d] %s %s (cl=%s%s) after %.1fs",
+            cid,
+            self.command,
+            self.path,
+            self.headers.get("content-length", "0"),
+            ", ws-upgrade" if is_ws else "",
+            time.monotonic() - getattr(self, "_accepted_at", time.monotonic()),
+        )
+
         # ── 0. Validate proxy token ───────────────────────────────────────────
         # Reject requests whose token doesn't match the stable per-task proxy
         # token.  This prevents other containers (which share the host gateway
         # and can discover open ports) from routing through this proxy.
         if not self._validate_token():
-            logger.info("proxy: 401 rejected — token mismatch on %s %s", self.command, self.path)
+            logger.info("proxy: [c%d] 401 rejected — token mismatch on %s %s", cid, self.command, self.path)
             self._send_simple(401, "Unauthorized")
             return
 
@@ -179,18 +254,29 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         # ── 2. Read request body ──────────────────────────────────────────────
         content_length = int(self.headers.get("content-length", 0) or 0)
-        body = self.rfile.read(content_length) if content_length else None
+        if content_length:
+            body_start = time.monotonic()
+            body = self.rfile.read(content_length)
+            logger.info(
+                "proxy: [c%d] body read %d bytes in %.1fs",
+                cid,
+                len(body),
+                time.monotonic() - body_start,
+            )
+        else:
+            body = None
 
         # ── 3. Forward to target host ─────────────────────────────────────────
         # WebSocket upgrades need raw socket access for bidirectional relay;
         # urllib3 does not support 101, so keep http.client for that path only.
         if self.headers.get("upgrade", "").lower() == "websocket":
+            logger.info("proxy: [c%d] WS upgrade → %s%s", cid, self.target_host, self.path)
             conn = http.client.HTTPSConnection(self.target_host, timeout=60)
             try:
                 conn.request(self.command, self.path_prefix + self.path, body=body, headers=out_headers)
                 resp = conn.getresponse()
                 if resp.status == 101:
-                    logger.debug("proxy: WebSocket upgrade to %s, starting relay", self.target_host)
+                    logger.info("proxy: [c%d] WS 101 relay start → %s", cid, self.target_host)
                     self.send_response(101)
                     for key, value in resp.getheaders():
                         if key.lower() in _HOP_BY_HOP and key.lower() not in self._WS_KEEP:
@@ -199,10 +285,21 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
                     self.end_headers()
                     upstream_sock = conn.sock
                     conn.sock = None
+                    # The 60s timeout above bounds connect/handshake, but a
+                    # WebSocket tunnel is meant to sit idle between turns.  Left
+                    # in place it fires ~60s into an idle gap, killing the
+                    # upstream→client relay thread and silently half-breaking the
+                    # socket — the next frame is forwarded but its reply is never
+                    # relayed back, so the client (e.g. codex's /v1/responses WS)
+                    # hangs until its own multi-minute timeout tears the dead
+                    # tunnel down.  Clear the timeout on both legs for the relay.
+                    upstream_sock.settimeout(None)
+                    self.connection.settimeout(None)
                     self._relay_websocket(resp.fp, upstream_sock)
                     return
                 # Upgrade refused — forward the error response.
                 self.send_response(resp.status)
+                self.send_header("Connection", "close")
                 for key, value in resp.getheaders():
                     if key.lower() in _HOP_BY_HOP:
                         continue
@@ -215,7 +312,7 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
                     self.wfile.write(chunk)
                     self.wfile.flush()
             except Exception as exc:
-                logger.warning("proxy: upstream error (websocket): %s", exc)
+                logger.warning("proxy: [c%d] upstream error (websocket): %s", cid, exc)
                 try:
                     self._send_simple(502, f"Bad Gateway: {exc}")
                 except Exception:
@@ -226,7 +323,12 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         # Normal request — use the shared connection pool.
         url = f"https://{self.target_host}{self.path_prefix}{self.path}"
-        logger.info("proxy: %s %s → %s", self.command, self.path, self.target_host)
+        # ``waited`` is accept→request-fully-read: a large value here means the
+        # client was slow to establish/send after connecting (the idle-stall
+        # window this proxy was previously blind to).
+        waited = time.monotonic() - getattr(self, "_accepted_at", time.monotonic())
+        logger.info("proxy: [c%d] %s %s → %s (waited %.1fs)", cid, self.command, self.path, self.target_host, waited)
+        forwarded_at = time.monotonic()
         try:
             resp = self.pool.urlopen(
                 self.command,
@@ -239,7 +341,7 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
                 timeout=_UPSTREAM_TIMEOUT,
             )
         except Exception as exc:
-            logger.warning("proxy: upstream error: %s", exc)
+            logger.warning("proxy: [c%d] upstream error: %s", cid, exc)
             try:
                 self._send_simple(502, f"Bad Gateway: {exc}")
             except Exception:
@@ -249,7 +351,10 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
         # ── 3a. 401 retry — refresh credentials once ─────────────────────────
         if resp.status == 401 and not _retried:
             logger.info(
-                "proxy: 401 from upstream on %s %s, retrying with refreshed credentials", self.command, self.path
+                "proxy: [c%d] 401 from upstream on %s %s, retrying with refreshed credentials",
+                cid,
+                self.command,
+                self.path,
             )
             try:
                 resp.drain_conn()
@@ -269,16 +374,33 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
                     timeout=_UPSTREAM_TIMEOUT,
                 )
             except Exception as exc:
-                logger.warning("proxy: upstream error (retry): %s", exc)
+                logger.warning("proxy: [c%d] upstream error (retry): %s", cid, exc)
                 try:
                     self._send_simple(502, f"Bad Gateway: {exc}")
                 except Exception:
                     pass
                 return
 
-        # Forward status + headers (strip hop-by-hop).
-        logger.info("proxy: %s %s → %d (target=%s)", self.command, self.path, resp.status, self.target_host)
+        # Forward status + headers (strip hop-by-hop). ``upstream`` is
+        # forward→response-headers latency (time-to-first-byte from the target).
+        logger.info(
+            "proxy: [c%d] %s %s → %d (target=%s, upstream %.1fs)",
+            cid,
+            self.command,
+            self.path,
+            resp.status,
+            self.target_host,
+            time.monotonic() - forwarded_at,
+        )
         self.send_response(resp.status)
+        # The proxy closes the connection after every request (close_connection
+        # is set True above), but stripping the upstream Connection header left
+        # the client with no close signal — so an HTTP/1.1 client (e.g. codex's
+        # reqwest) pooled the socket as keep-alive, then stalled for minutes
+        # writing its next request into a half-dead connection after an idle
+        # gap.  Advertising the close makes the client open a fresh connection
+        # each turn instead of reusing a dead one.
+        self.send_header("Connection", "close")
         for key, value in resp.headers.items():
             if key.lower() in _HOP_BY_HOP:
                 continue
@@ -286,6 +408,8 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
         # Stream response body in chunks (handles SSE correctly).
+        streamed = 0
+        stream_start = time.monotonic()
         try:
             while True:
                 chunk = resp.read(_CHUNK_SIZE)
@@ -293,8 +417,29 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
                     break
                 self.wfile.write(chunk)
                 self.wfile.flush()
-        except Exception:
-            pass
+                streamed += len(chunk)
+        except Exception as exc:
+            # Previously swallowed silently — a mid-stream abort (client
+            # disconnect, or a read=60 ReadTimeoutError on a long reasoning
+            # stream) is exactly the kind of failure we need to see.
+            logger.warning(
+                "proxy: [c%d] body stream aborted after %.1fs (%d bytes) on %s %s: %s",
+                cid,
+                time.monotonic() - stream_start,
+                streamed,
+                self.command,
+                self.path,
+                exc,
+            )
+        else:
+            logger.info(
+                "proxy: [c%d] %s %s body streamed %d bytes in %.1fs",
+                cid,
+                self.command,
+                self.path,
+                streamed,
+                time.monotonic() - stream_start,
+            )
         finally:
             try:
                 resp.drain_conn()
