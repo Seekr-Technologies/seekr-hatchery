@@ -4,6 +4,7 @@ Cross-module constants live in :mod:`seekr_hatchery.constants`; generic
 subprocess / editor / naming utilities live in :mod:`seekr_hatchery.utils`.
 """
 
+import base64
 import json
 import logging
 import os
@@ -557,6 +558,33 @@ def save(meta: SessionMeta) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _b64_segment(payload: dict) -> str:
+    """Compact-JSON-encode and standard-base64 *payload*, no ``=`` padding."""
+    raw = json.dumps(payload, separators=(",", ":")).encode()
+    return base64.b64encode(raw).decode().rstrip("=")
+
+
+def _mint_proxy_token() -> str:
+    """Mint a JWT-shaped proxy token.
+
+    All backends treat this token as an opaque secret. pi's openai-codex
+    client path is the exception: before sending any request it decodes the
+    *local* credential as a JWT and reads a chatgpt-account-id claim out of
+    it (``extractAccountId`` in pi-ai's openai-codex-responses.js), crashing
+    client-side if the string isn't a well-formed 3-segment JWT. Shaping the
+    token this way lets that check pass; the embedded account id is a dummy
+    ("hatchery") that gets overwritten host-side by the real OAuth token's
+    claim once the request reaches the proxy (see agents/pi.py's
+    ``_chatgpt_account_id``/header mutator). The third segment — a
+    uuid4 hex, not a real signature — carries the actual entropy and is
+    what the proxy's exact-string token check validates against.
+    """
+    header = _b64_segment({"alg": "none", "typ": "JWT"})
+    payload = _b64_segment({"https://api.openai.com/auth": {"chatgpt_account_id": "hatchery"}})
+    sig = uuid.uuid4().hex
+    return f"{header}.{payload}.{sig}"
+
+
 def get_or_create_proxy_token(repo: Path, name: str) -> str:
     """Return the stable API proxy token for this session, creating it on first call.
 
@@ -572,7 +600,7 @@ def get_or_create_proxy_token(repo: Path, name: str) -> str:
         token = token_file.read_text().strip()
         logger.debug("Reusing proxy token for session %r", name)
         return token
-    token = str(uuid.uuid4())
+    token = _mint_proxy_token()
     token_file.write_text(token)
     logger.debug("Created proxy token for session %r", name)
     return token

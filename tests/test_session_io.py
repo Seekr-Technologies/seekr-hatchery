@@ -2,6 +2,7 @@
 plus real-fs lifecycle tests for sessions.create / mark_done / archive /
 delete / launch / merge_include_updates."""
 
+import base64
 import json
 import subprocess
 from pathlib import Path
@@ -11,6 +12,7 @@ import pytest
 from pydantic import ValidationError
 
 import seekr_hatchery.agents as agent
+import seekr_hatchery.agents.pi as pi_backend
 import seekr_hatchery.constants as constants
 import seekr_hatchery.git as git
 import seekr_hatchery.sessions as sessions
@@ -1668,6 +1670,42 @@ class TestMergeIncludesWithConfig:
 # ---------------------------------------------------------------------------
 # Out-of-tree store path helpers
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# get_or_create_proxy_token
+# ---------------------------------------------------------------------------
+
+
+class TestGetOrCreateProxyToken:
+    def test_persists_and_reuses_token(self, fake_repo):
+        first = sessions.get_or_create_proxy_token(fake_repo, "my-task")
+        second = sessions.get_or_create_proxy_token(fake_repo, "my-task")
+        assert first == second
+
+    def test_two_sessions_mint_different_tokens(self, fake_repo):
+        token_a = sessions.get_or_create_proxy_token(fake_repo, "task-a")
+        token_b = sessions.get_or_create_proxy_token(fake_repo, "task-b")
+        assert token_a != token_b
+
+    def test_token_is_jwt_shaped_with_three_nonempty_segments(self, fake_repo):
+        token = sessions.get_or_create_proxy_token(fake_repo, "my-task")
+        parts = token.split(".")
+        assert len(parts) == 3
+        assert all(parts)
+
+    def test_payload_segment_carries_dummy_chatgpt_account_id_claim(self, fake_repo):
+        token = sessions.get_or_create_proxy_token(fake_repo, "my-task")
+        _, payload_b64, _ = token.split(".")
+        padded = payload_b64 + "=" * (-len(payload_b64) % 4)
+        payload = json.loads(base64.b64decode(padded))
+        assert payload["https://api.openai.com/auth"]["chatgpt_account_id"] == "hatchery"
+
+    def test_matches_pi_backends_own_jwt_extraction(self, fake_repo):
+        # Ties the minted shape to the exact extraction agents/pi.py mirrors
+        # from pi-ai's extractAccountId().
+        token = sessions.get_or_create_proxy_token(fake_repo, "my-task")
+        assert pi_backend._chatgpt_account_id(token) == "hatchery"
 
 
 # ---------------------------------------------------------------------------
