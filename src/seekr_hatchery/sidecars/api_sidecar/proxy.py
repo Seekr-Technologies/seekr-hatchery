@@ -1,6 +1,6 @@
 """Host-side HTTP reverse proxy for API key injection.
 
-The container is given ``ANTHROPIC_BASE_URL`` (or ``OPENAI_BASE_URL``) pointing
+The container is given a ``*_BASE_URL`` env var (e.g. ``OPENAI_BASE_URL``) pointing
 to this proxy.  All outbound AI API calls from inside the container pass through
 here; the proxy validates the inbound proxy token, strips auth credentials the
 container sends, injects the real API key, and forwards to the target host.
@@ -8,8 +8,8 @@ container sends, injects the real API key, and forwards to the target host.
 The real API key never enters the container.
 
 The proxy validates the inbound token using one of two formats:
-  - ``x-api-key: <token>``       — Anthropic style
-  - ``Authorization: Bearer <token>`` — OpenAI style
+  - ``x-api-key: <token>``       — x-api-key style
+  - ``Authorization: Bearer <token>`` — Bearer style
 
 Requests with a wrong or missing token are rejected with 401.
 This prevents concurrent container sessions from routing through each other's
@@ -17,7 +17,7 @@ proxy (all containers can reach ``host.docker.internal``).
 
 Public interface::
 
-    with api_server(header_mutator, proxy_token) as server:
+    with api_server(header_mutator, proxy_token, target_host) as server:
         port = server.port
         # ... run container ...
 """
@@ -78,7 +78,7 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
     # injecting `self` as the first argument when called as self.header_mutator().
     header_mutator = staticmethod(lambda h: h)
     proxy_token: str = ""
-    target_host: str = "api.anthropic.com"
+    target_host: str  # set per-instance by api_server(); no default upstream
     path_prefix: str = ""  # prepended to every forwarded path (e.g. "/backend-api/codex")
     pool: urllib3.PoolManager  # set per-instance by api_server()
 
@@ -123,8 +123,8 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
     def _validate_token(self) -> bool:
         """Return True if the inbound request carries the correct proxy token.
 
-        Accepts either ``x-api-key: <token>`` (Anthropic style) or
-        ``Authorization: Bearer <token>`` (OpenAI style).
+        Accepts either ``x-api-key: <token>`` (x-api-key style) or
+        ``Authorization: Bearer <token>`` (Bearer style).
         """
         # x-api-key style
         if self.headers.get("x-api-key", "") == self.proxy_token:
@@ -492,7 +492,7 @@ class APIServer:
 def api_server(
     header_mutator: Callable[..., dict[str, str]],
     proxy_token: str,
-    target_host: str = "api.anthropic.com",
+    target_host: str,
     path_prefix: str = "",
     *,
     _pool: urllib3.PoolManager | None = None,
@@ -521,8 +521,7 @@ def api_server(
             already stripped). Must strip inbound auth headers, inject the real
             API key in the correct format, and return the modified dict.
         proxy_token: The stable per-task token the container uses.
-        target_host: Upstream API hostname (default: ``api.anthropic.com``).
-            Use ``"api.openai.com"`` for OpenAI/codex.
+        target_host: Upstream API hostname requests are forwarded to (required).
         path_prefix: String prepended to every forwarded path (default: ``""``).
             Use ``"/backend-api/codex"`` for ChatGPT OAuth mode.
     """

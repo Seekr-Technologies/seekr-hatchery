@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from seekr_hatchery.agents import CONTAINER_HOME
+from seekr_hatchery.agents import CONTAINER_HOME, ProxyEndpoint
 from seekr_hatchery.models import KubectlConfig
 from seekr_hatchery.mount import BindMount
 from seekr_hatchery.sidecars import base
@@ -120,35 +120,14 @@ class TestRunSidecars:
 
 
 class _FakeBackend:
-    def __init__(self, *, kwargs_error: bool = False) -> None:
-        self._kwargs_error = kwargs_error
-
-    def proxy_kwargs(self) -> dict:
-        if self._kwargs_error:
-            raise RuntimeError("clean message for the user")
-        return {"target_host": "api.example.com"}
-
-    def container_env(self, proxy_token: str, proxy_port: int) -> dict[str, str]:
+    def container_env(self, endpoint_key: str, proxy_token: str, proxy_port: int) -> dict[str, str]:
         return {
-            "OPENAI_API_KEY": proxy_token,
-            "OPENAI_BASE_URL": f"http://host.docker.internal:{proxy_port}",
+            f"{endpoint_key.upper()}_API_KEY": proxy_token,
+            f"{endpoint_key.upper()}_BASE_URL": f"http://host.docker.internal:{proxy_port}",
         }
 
 
 class TestApiProxySidecar:
-    def test_disabled_when_mutator_is_none(self) -> None:
-        sidecar = api_sidecar.ApiProxySidecar(None, None, _FakeBackend())
-        assert sidecar.start() is None
-        sidecar.stop()  # safe after a no-op start
-
-    def test_proxy_kwargs_runtime_error_exits_cleanly(self, monkeypatch, capsys) -> None:
-        sidecar = api_sidecar.ApiProxySidecar(lambda h: h, "tok", _FakeBackend(kwargs_error=True))
-        with pytest.raises(SystemExit) as excinfo:
-            sidecar.start()
-        assert excinfo.value.code == 1
-        captured = capsys.readouterr()
-        assert "clean message for the user" in (captured.err + captured.out)
-
     def test_enabled_builds_env_from_backend_and_requests_gateway(self, monkeypatch) -> None:
         entered: list[str] = []
 
@@ -161,15 +140,62 @@ class TestApiProxySidecar:
                 entered.append("exit")
 
         monkeypatch.setattr(api_sidecar.proxy, "api_server", fake_api_server)
-        sidecar = api_sidecar.ApiProxySidecar(lambda h: h, "proxy-token", _FakeBackend())
+        endpoint = ProxyEndpoint(key="default", header_mutator=lambda h: h, target_host="api.example.com")
+        sidecar = api_sidecar.ApiProxySidecar(endpoint, "proxy-token", _FakeBackend())
         contrib = sidecar.start()
         assert contrib == base.SidecarContribution(
-            env={"OPENAI_API_KEY": "proxy-token", "OPENAI_BASE_URL": "http://host.docker.internal:4242"},
+            env={"DEFAULT_API_KEY": "proxy-token", "DEFAULT_BASE_URL": "http://host.docker.internal:4242"},
             needs_host_gateway=True,
         )
         assert entered == ["enter"]
         sidecar.stop()
         assert entered == ["enter", "exit"]
+
+    def test_two_endpoints_merge_into_one_contribution_without_collision(self, monkeypatch) -> None:
+        ports = iter([4242, 5353])
+
+        @contextmanager
+        def fake_api_server(mutator, token, **kwargs):
+            yield SimpleNamespace(port=next(ports))
+
+        monkeypatch.setattr(api_sidecar.proxy, "api_server", fake_api_server)
+        backend = _FakeBackend()
+        endpoints = [
+            ProxyEndpoint(key="acme", header_mutator=lambda h: h, target_host="api.acme.com"),
+            ProxyEndpoint(key="openai", header_mutator=lambda h: h, target_host="api.openai.com"),
+        ]
+        sidecars_list = [api_sidecar.ApiProxySidecar(ep, "tok", backend) for ep in endpoints]
+        with base.run_sidecars(sidecars_list) as contrib:
+            assert contrib == base.SidecarContribution(
+                env={
+                    "ACME_API_KEY": "tok",
+                    "ACME_BASE_URL": "http://host.docker.internal:4242",
+                    "OPENAI_API_KEY": "tok",
+                    "OPENAI_BASE_URL": "http://host.docker.internal:5353",
+                },
+                needs_host_gateway=True,
+            )
+
+    def test_colliding_env_keys_across_endpoints_raise(self, monkeypatch) -> None:
+        @contextmanager
+        def fake_api_server(mutator, token, **kwargs):
+            yield SimpleNamespace(port=4242)
+
+        monkeypatch.setattr(api_sidecar.proxy, "api_server", fake_api_server)
+
+        class _CollidingBackend:
+            def container_env(self, endpoint_key: str, proxy_token: str, proxy_port: int) -> dict[str, str]:
+                return {"SHARED_KEY": proxy_token}
+
+        backend = _CollidingBackend()
+        endpoints = [
+            ProxyEndpoint(key="a", header_mutator=lambda h: h, target_host="api.a.example"),
+            ProxyEndpoint(key="b", header_mutator=lambda h: h, target_host="api.b.example"),
+        ]
+        sidecars_list = [api_sidecar.ApiProxySidecar(ep, "tok", backend) for ep in endpoints]
+        with pytest.raises(ValueError, match="SHARED_KEY"):
+            with base.run_sidecars(sidecars_list):
+                pytest.fail("body must not run when contributions collide")
 
 
 # ── KubectlSidecar ──────────────────────────────────────────────────────────

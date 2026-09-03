@@ -76,21 +76,18 @@ class SpyBackend(agent.AgentBackend):
 
     # ── Docker infrastructure ─────────────────────────────────────────────
 
-    def make_header_mutator(self):
-        def _mutate(headers):
+    def construct_mounts(self, session_dir: Path | None) -> list[mount.Mount]:
+        return []
+
+    def proxy_endpoints(self) -> list[agent.ProxyEndpoint]:
+        def _mutate(headers, *, refresh: bool = False):
             out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")}
             out["x-api-key"] = "spy-key"
             return out
 
-        return _mutate
+        return [agent.ProxyEndpoint(key="default", header_mutator=_mutate, target_host="api.spy.example")]
 
-    def construct_mounts(self, session_dir: Path | None) -> list[mount.Mount]:
-        return []
-
-    def proxy_kwargs(self) -> dict:
-        return {}
-
-    def container_env(self, proxy_token: str, proxy_port: int) -> dict[str, str]:
+    def container_env(self, endpoint_key: str, proxy_token: str, proxy_port: int) -> dict[str, str]:
         return {}
 
     # ── Lifecycle hooks ───────────────────────────────────────────────────
