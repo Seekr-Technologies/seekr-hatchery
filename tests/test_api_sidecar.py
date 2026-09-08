@@ -553,7 +553,7 @@ class TestProxyWebSocketRelay:
                 },
             )
             assert conn.getresponse().status == 101
-            created[0]._downstream.close()
+            created[0]._upstream.shutdown(_socket.SHUT_WR)
 
             assert conn.sock.recv(1) == b""
 
