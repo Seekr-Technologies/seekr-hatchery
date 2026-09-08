@@ -26,6 +26,7 @@ import http.client
 import http.server
 import itertools
 import logging
+import socket
 import ssl
 import threading
 import time
@@ -151,6 +152,20 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.flush()
         cid = getattr(self, "_conn_id", 0)
         relay_start = time.monotonic()
+        terminated = threading.Event()
+        termination_lock = threading.Lock()
+
+        def terminate(source: str) -> None:
+            with termination_lock:
+                if terminated.is_set():
+                    return
+                terminated.set()
+                logger.info("proxy: [c%d] WS relay terminated by %s; closing both legs", cid, source)
+            for sock in (upstream_sock, self.connection):
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
 
         def upstream_to_client() -> None:
             up_bytes = 0
@@ -158,6 +173,7 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
                 while True:
                     chunk = upstream_reader.read1(_CHUNK_SIZE)
                     if not chunk:
+                        terminate("upstream→client EOF")
                         break
                     self.wfile.write(chunk)
                     self.wfile.flush()
@@ -170,6 +186,7 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
                     up_bytes,
                     exc,
                 )
+                terminate("upstream→client error")
             else:
                 logger.info(
                     "proxy: [c%d] WS relay upstream→client ended after %.1fs (%d bytes)",
@@ -185,6 +202,7 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
             while True:
                 chunk = self.rfile.read1(_CHUNK_SIZE)
                 if not chunk:
+                    terminate("client→upstream EOF")
                     break
                 upstream_sock.sendall(chunk)
                 down_bytes += len(chunk)
@@ -196,6 +214,7 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
                 down_bytes,
                 exc,
             )
+            terminate("client→upstream error")
         finally:
             logger.info(
                 "proxy: [c%d] WS relay client→upstream ended after %.1fs (%d bytes)",
@@ -204,6 +223,8 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
                 down_bytes,
             )
             relay_thread.join(timeout=30)
+            upstream_reader.close()
+            upstream_sock.close()
 
     def _handle_request(self, *, _retried: bool = False) -> None:
         # HTTP/1.1 defaults to keep-alive; force close after each request so
