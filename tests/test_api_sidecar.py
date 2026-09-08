@@ -505,6 +505,58 @@ class TestProxyReauthOn401:
 
 
 class TestProxyWebSocketRelay:
+    def test_upstream_eof_closes_client_websocket_without_waiting_for_client_data(self, monkeypatch):
+        """An upstream close must reach Codex without waiting for its timeout."""
+        import socket as _socket
+
+        created = []
+
+        class _WSResp:
+            status = 101
+            fp = None
+
+            def getheaders(self):
+                return [("upgrade", "websocket"), ("connection", "Upgrade"), ("sec-websocket-accept", "abc123==")]
+
+        class _WSConn:
+            def __init__(self, host, timeout=None):
+                self._upstream, self._downstream = _socket.socketpair()
+                self.sock = self._upstream
+                created.append(self)
+
+            def request(self, method, path, body=None, headers=None):
+                resp = _WSResp()
+                resp.fp = self._downstream.makefile("rb")
+                self._resp = resp
+
+            def getresponse(self):
+                return self._resp
+
+            def close(self):
+                if self.sock is not None:
+                    self.sock.close()
+
+        monkeypatch.setattr(http.client, "HTTPSConnection", _WSConn)
+        with proxy.api_server(_make_bearer_mutator("real-key"), _TOKEN) as server:
+            port = server.port
+            _wait_for_port(port)
+            conn = http.client.HTTPConnection("localhost", port, timeout=1)
+            conn.request(
+                "GET",
+                "/ws",
+                headers={
+                    "Authorization": f"Bearer {_TOKEN}",
+                    "Upgrade": "websocket",
+                    "Connection": "Upgrade",
+                    "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+                    "Sec-WebSocket-Version": "13",
+                },
+            )
+            assert conn.getresponse().status == 101
+            created[0]._downstream.close()
+
+            assert conn.sock.recv(1) == b""
+
     def test_101_forwarded_with_websocket_headers(self, monkeypatch):
         """Proxy must forward 101 with Connection/Upgrade headers intact and relay bytes."""
         import socket as _socket
