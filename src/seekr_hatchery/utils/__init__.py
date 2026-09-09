@@ -6,6 +6,6 @@ helpers live in submodules (e.g. :mod:`seekr_hatchery.utils.npm`) and are
 imported from there directly.
 """
 
-from seekr_hatchery.utils.common import open_for_editing, repo_id, run, to_name
+from seekr_hatchery.utils.common import edit_with_validation, open_for_editing, repo_id, run, to_name
 
-__all__ = ["open_for_editing", "repo_id", "run", "to_name"]
+__all__ = ["edit_with_validation", "open_for_editing", "repo_id", "run", "to_name"]

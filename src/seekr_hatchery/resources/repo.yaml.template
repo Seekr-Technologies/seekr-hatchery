@@ -1,0 +1,11 @@
+# .hatchery/config.yaml — per-repo hatchery configuration.
+#
+# Overrides the global ~/.hatchery/config.yaml for this repo only. Any field
+# left unset (commented out) inherits the global value. In commit mode this
+# file is tracked and shared; in no-commit mode it's git-excluded with the rest
+# of .hatchery/ (force-add it if you want a shared per-repo default).
+
+# Uncomment any field below to override the global config for this repo.
+# default_agent: CODEX
+# open_editor: false
+# auto_commit: false

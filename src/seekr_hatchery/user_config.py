@@ -16,13 +16,12 @@ transparently on first load — see :meth:`UserConfig.load`.
 import logging
 import shutil
 from pathlib import Path
-from typing import ClassVar, Literal
+from typing import ClassVar
 
 import yaml
 from pydantic import BaseModel, ValidationError
 
 import seekr_hatchery.agents as agent
-import seekr_hatchery.schema_migration as schema_migration
 import seekr_hatchery.ui as ui
 
 logger = logging.getLogger(__name__)
@@ -34,7 +33,6 @@ logger = logging.getLogger(__name__)
 
 
 class UserConfigModel(BaseModel):
-    schema_version: Literal["1"] = "1"
     default_agent: str | None = None
     open_editor: bool = False
     auto_commit: bool = True
@@ -46,8 +44,14 @@ class UserConfigModel(BaseModel):
 
 
 def _migrate(data: dict) -> dict:
-    """Bring a raw config dict up to the current schema version in place."""
-    return schema_migration.stamp_v1(data)
+    """Normalise a raw config dict in place.
+
+    Drops the legacy ``schema_version`` key: configs are no longer versioned
+    (a version earns its place only once there are two of them). A future v2
+    would re-introduce the key and treat its absence as v1.
+    """
+    data.pop("schema_version", None)
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +153,14 @@ class UserConfig:
 
     # ── Persistence ───────────────────────────────────────────────────────────
 
+    def with_overrides(self, values: dict) -> "UserConfig":
+        """Return a copy with *values* overlaid on the model.
+
+        Used to layer repo-level overrides (see :mod:`seekr_hatchery.repo_config`)
+        onto the global config without mutating this instance.
+        """
+        return UserConfig(self._model.model_copy(update=values), self._path)
+
     def save(self) -> None:
         """Persist the current state to :attr:`_path`."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -156,10 +168,6 @@ class UserConfig:
         logger.debug("Config saved to %s", self._path)
 
     # ── Properties / setters ─────────────────────────────────────────────────
-
-    @property
-    def schema_version(self) -> str:
-        return self._model.schema_version
 
     @property
     def default_agent(self) -> str | None:

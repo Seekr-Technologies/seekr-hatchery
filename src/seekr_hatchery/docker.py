@@ -580,8 +580,14 @@ def _pin_harness_latest(text: str, backend: agent.AgentBackend) -> str:
 def ensure_dockerfile(
     hatchery_dir: Path,
     backend: agent.AgentBackend = agent.CODEX,
+    *,
+    prompt: bool = True,
 ) -> bool:
-    """Write a starter Dockerfile if none exists. Returns True if created."""
+    """Write a starter Dockerfile if none exists. Returns True if created.
+
+    When *prompt* is False the file is written silently and the caller is
+    responsible for opening it (used when an editor drives the flow itself).
+    """
     df = dockerfile_path(hatchery_dir, backend)
     if df.exists():
         return False
@@ -592,9 +598,10 @@ def ensure_dockerfile(
     text = _pin_harness_latest(text, backend)
     df.write_text(text)
     ui.info(f"  Created {df.relative_to(hatchery_dir)}")
-    answer = input("  Would you like to edit the Dockerfile? [Y/n] ").strip().lower()
-    if answer != "n":
-        open_for_editing(df)
+    if prompt:
+        answer = input("  Would you like to edit the Dockerfile? [Y/n] ").strip().lower()
+        if answer != "n":
+            open_for_editing(df)
     return True
 
 
@@ -624,10 +631,12 @@ def _migrate_docker_config(data: dict) -> dict:
     return data
 
 
-def ensure_docker_config(hatchery_dir: Path) -> bool:
+def ensure_docker_config(hatchery_dir: Path, *, prompt: bool = True) -> bool:
     """Write docker.yaml from template if it does not already exist.
 
-    Returns True if the file was created, False if it already existed.
+    Returns True if the file was created, False if it already existed. When
+    *prompt* is False the file is written silently and the caller is responsible
+    for opening it (used when an editor drives the flow itself).
     """
     config_file = hatchery_dir / DOCKER_CONFIG
     if config_file.exists():
@@ -635,9 +644,10 @@ def ensure_docker_config(hatchery_dir: Path) -> bool:
     config_file.parent.mkdir(parents=True, exist_ok=True)
     config_file.write_text(_DOCKER_CONFIG_TEMPLATE.read_text())
     ui.info(f"  Created {DOCKER_CONFIG}")
-    answer = input("  Would you like to edit the docker config? [Y/n] ").strip().lower()
-    if answer != "n":
-        open_for_editing(config_file)
+    if prompt:
+        answer = input("  Would you like to edit the docker config? [Y/n] ").strip().lower()
+        if answer != "n":
+            open_for_editing(config_file)
     return True
 
 
@@ -671,6 +681,24 @@ def docker_features(config: DockerConfig) -> list[str]:
 
 
 # ── Mount construction ────────────────────────────────────────────────────────
+
+
+def validate_docker_config_file(path: Path) -> str | None:
+    """Validate a docker.yaml file against the schema.
+
+    Returns ``None`` on success or an error message string on failure — the
+    string form (rather than a hard exit) lets the interactive edit loop
+    re-prompt the user.
+    """
+    try:
+        raw = yaml.safe_load(path.read_text()) or {}
+    except yaml.YAMLError as exc:
+        return f"Invalid YAML: {exc}"
+    try:
+        DockerConfig.model_validate(_migrate_docker_config(raw))
+    except Exception as exc:
+        return str(exc)
+    return None
 
 
 def load_docker_config(hatchery_dir: Path) -> DockerConfig:

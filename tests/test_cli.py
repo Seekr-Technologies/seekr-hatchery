@@ -1,6 +1,7 @@
 """Tests for the Click CLI entry point and cmd_list/cmd_status."""
 
 import json
+import subprocess
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -219,7 +220,7 @@ def _new_env(
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path.home() / "repo", in_repo))
         )
         if not real_config:
-            stack.enter_context(patch("seekr_hatchery.cli.user_config.UserConfig.load", return_value=cfg))
+            stack.enter_context(patch("seekr_hatchery.user_config.UserConfig.load", return_value=cfg))
         stack.enter_context(patch("seekr_hatchery.cli.docker.load_docker_config", return_value=MagicMock(include=[])))
         stack.enter_context(patch("seekr_hatchery.cli.sessions.merge_includes_with_config", return_value=[]))
         stack.enter_context(patch("seekr_hatchery.cli.load_include_entries", return_value=[]))
@@ -340,10 +341,10 @@ class TestCmdConfigEdit:
         runner = CliRunner()
 
         def fake_editor(path):
-            path.write_text("schema_version: '1'\ndefault_agent: CODEX\nopen_editor: true\n")
+            path.write_text("default_agent: CODEX\nopen_editor: true\n")
 
-        with patch("seekr_hatchery.cli.open_for_editing", side_effect=fake_editor):
-            result = runner.invoke(cli, ["config", "edit"])
+        with patch("seekr_hatchery.utils.common.open_for_editing", side_effect=fake_editor):
+            result = runner.invoke(cli, ["config", "edit", "global"])
 
         assert result.exit_code == 0
         assert "Config updated" in result.output
@@ -352,7 +353,7 @@ class TestCmdConfigEdit:
         """Editor corrupts file, user declines → exit 1, original file restored."""
         runner = CliRunner()
         config_path = home / ".hatchery" / "config.yaml"
-        # Write a v0 config (missing schema_version and open_editor)
+        # Write a partial config (missing the newer open_editor / auto_commit fields).
         config_path.parent.mkdir(parents=True, exist_ok=True)
         original = "default_agent: CODEX\n"
         config_path.write_text(original)
@@ -360,8 +361,8 @@ class TestCmdConfigEdit:
         def fake_editor(path):
             path.write_text("not valid yaml: [{{")
 
-        with patch("seekr_hatchery.cli.open_for_editing", side_effect=fake_editor):
-            result = runner.invoke(cli, ["config", "edit"], input="n\n")
+        with patch("seekr_hatchery.utils.common.open_for_editing", side_effect=fake_editor):
+            result = runner.invoke(cli, ["config", "edit", "global"], input="n\n")
 
         assert result.exit_code == 1
         assert "Invalid config" in result.output
@@ -379,8 +380,8 @@ class TestCmdConfigEdit:
         def fake_editor(path):
             path.write_text("not valid yaml: [{{")
 
-        with patch("seekr_hatchery.cli.open_for_editing", side_effect=fake_editor):
-            result = runner.invoke(cli, ["config", "edit"], input="n\n")
+        with patch("seekr_hatchery.utils.common.open_for_editing", side_effect=fake_editor):
+            result = runner.invoke(cli, ["config", "edit", "global"], input="n\n")
 
         assert result.exit_code == 1
         assert not config_path.exists()
@@ -396,10 +397,10 @@ class TestCmdConfigEdit:
             if call_count == 1:
                 path.write_text("not valid yaml: [{{")
             else:
-                path.write_text("schema_version: '1'\nopen_editor: true\n")
+                path.write_text("open_editor: true\n")
 
-        with patch("seekr_hatchery.cli.open_for_editing", side_effect=fake_editor):
-            result = runner.invoke(cli, ["config", "edit"], input="\n")  # default=Y
+        with patch("seekr_hatchery.utils.common.open_for_editing", side_effect=fake_editor):
+            result = runner.invoke(cli, ["config", "edit", "global"], input="\n")  # default=Y
 
         assert result.exit_code == 0
         assert "Invalid config" in result.output
@@ -415,11 +416,26 @@ class TestCmdConfigEdit:
         def fake_editor(path):
             pass  # leave defaults in place
 
-        with patch("seekr_hatchery.cli.open_for_editing", side_effect=fake_editor):
-            result = runner.invoke(cli, ["config", "edit"])
+        with patch("seekr_hatchery.utils.common.open_for_editing", side_effect=fake_editor):
+            result = runner.invoke(cli, ["config", "edit", "global"])
 
         assert result.exit_code == 0
         assert config_path.exists()
+
+    def test_existing_partial_config_gets_defaults_merged(self, home):
+        """An existing file missing newer fields is normalised before editing."""
+        runner = CliRunner()
+        config_path = home / ".hatchery" / "config.yaml"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text("default_agent: CODEX\n")
+
+        with patch("seekr_hatchery.utils.common.open_for_editing", side_effect=lambda path: None):
+            result = runner.invoke(cli, ["config", "edit", "global"])
+
+        assert result.exit_code == 0
+        text = config_path.read_text()
+        assert "open_editor" in text
+        assert "auto_commit" in text
 
     def test_backup_cleaned_up_on_success(self, home):
         """On success, the .bak file should be removed."""
@@ -429,11 +445,199 @@ class TestCmdConfigEdit:
         def fake_editor(path):
             pass  # leave valid defaults
 
-        with patch("seekr_hatchery.cli.open_for_editing", side_effect=fake_editor):
-            result = runner.invoke(cli, ["config", "edit"])
+        with patch("seekr_hatchery.utils.common.open_for_editing", side_effect=fake_editor):
+            result = runner.invoke(cli, ["config", "edit", "global"])
 
         assert result.exit_code == 0
         assert not config_path.with_suffix(".yaml.bak").exists()
+
+
+class TestCmdConfigEditLocal:
+    """`config edit local` — the repo's .hatchery/config.yaml."""
+
+    def _run(self, repo, args, **invoke_kwargs):
+        runner = CliRunner()
+        editor = invoke_kwargs.pop("editor", lambda path: None)
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
+            patch("seekr_hatchery.utils.common.open_for_editing", side_effect=editor),
+        ):
+            return runner.invoke(cli, args, **invoke_kwargs)
+
+    def test_seeds_and_validates(self, tmp_path):
+        result = self._run(tmp_path, ["config", "edit", "local"])
+        assert result.exit_code == 0
+        assert "Config updated" in result.output
+        assert (tmp_path / ".hatchery" / "config.yaml").exists()
+
+    def test_invalid_then_decline_restores(self, tmp_path):
+        config_path = tmp_path / ".hatchery" / "config.yaml"
+        config_path.parent.mkdir()
+        original = "auto_commit: false\n"
+        config_path.write_text(original)
+
+        result = self._run(
+            tmp_path,
+            ["config", "edit", "local"],
+            input="n\n",
+            editor=lambda path: path.write_text("bogus_key: 1\n"),
+        )
+        assert result.exit_code == 1
+        assert "Invalid config" in result.output
+        assert config_path.read_text() == original
+
+    def test_bare_edit_does_nothing(self, tmp_path):
+        """`config edit` with no target edits nothing — shows subcommand help."""
+        result = self._run(tmp_path, ["config", "edit"])
+        assert not (tmp_path / ".hatchery" / "config.yaml").exists()
+        assert "global" in result.output and "local" in result.output
+
+
+def _git_log(repo: Path) -> str:
+    return subprocess.run(["git", "-C", str(repo), "log", "--oneline"], capture_output=True, text=True).stdout
+
+
+def _porcelain(repo: Path, path: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain", "--", path], capture_output=True, text=True
+    ).stdout
+
+
+class TestSandboxEdit:
+    """`sandbox edit` — the sandbox runtime config (docker.yaml)."""
+
+    @pytest.fixture(autouse=True)
+    def _neutral_cwd(self, tmp_path, monkeypatch):
+        """chdir to a dir with no .hatchery so the walk-up falls back to the repo root."""
+        monkeypatch.chdir(tmp_path)
+
+    def _run(self, repo, args, **invoke_kwargs):
+        runner = CliRunner()
+        editor = invoke_kwargs.pop("editor", lambda path: None)
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
+            patch("seekr_hatchery.utils.common.open_for_editing", side_effect=editor),
+            patch("seekr_hatchery.sessions.repo_config.resolve_no_commit", return_value=True),
+        ):
+            return runner.invoke(cli, args, **invoke_kwargs)
+
+    def test_seeds_from_template(self, tmp_path):
+        repo = tmp_path / "repo"
+        result = self._run(repo, ["sandbox", "edit"])
+        assert result.exit_code == 0, result.output
+        assert (repo / ".hatchery" / "docker.yaml").exists()
+
+    def test_invalid_then_decline_restores(self, tmp_path):
+        repo = tmp_path / "repo"
+        config_path = repo / ".hatchery" / "docker.yaml"
+        config_path.parent.mkdir(parents=True)
+        original = "schema_version: '1'\n"
+        config_path.write_text(original)
+
+        result = self._run(
+            repo,
+            ["sandbox", "edit"],
+            input="n\n",
+            editor=lambda path: path.write_text("cap_add: [BOGUS_CAP]\n"),
+        )
+        assert result.exit_code == 1
+        assert config_path.read_text() == original
+
+    def test_task_edits_worktree_copy(self, tmp_path):
+        """--task routes the edit to that task's worktree copy, not the repo template."""
+        repo = tmp_path / "repo"
+        worktree = repo / ".hatchery" / "worktrees" / "my-task"
+        (worktree / ".hatchery").mkdir(parents=True)
+        (worktree / ".hatchery" / "docker.yaml").write_text("schema_version: '1'\n")
+
+        result = self._run(repo, ["sandbox", "edit", "--task", "my-task"])
+        assert result.exit_code == 0, result.output
+        assert "resume my-task --rebuild-sandbox" in result.output
+
+    def test_commits_when_tracked(self, git_repo):
+        repo = git_repo
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
+            patch("seekr_hatchery.utils.common.open_for_editing", side_effect=lambda path: None),
+        ):
+            result = CliRunner().invoke(cli, ["sandbox", "edit", "--commit"])
+        assert result.exit_code == 0, result.output
+        assert "update hatchery docker.yaml" in _git_log(repo)
+        assert _porcelain(repo, ".hatchery/docker.yaml") == ""
+
+    def test_skips_commit_when_ignored(self, git_repo):
+        repo = git_repo
+        (repo / ".git" / "info" / "exclude").write_text(".hatchery/\n")
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
+            patch("seekr_hatchery.utils.common.open_for_editing", side_effect=lambda path: None),
+        ):
+            result = CliRunner().invoke(cli, ["sandbox", "edit", "--commit"])
+        assert result.exit_code == 0, result.output
+        assert "update hatchery docker.yaml" not in _git_log(repo)
+        assert (repo / ".hatchery" / "docker.yaml").exists()
+
+    def test_skips_commit_with_no_commit_flag(self, git_repo):
+        repo = git_repo
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
+            patch("seekr_hatchery.utils.common.open_for_editing", side_effect=lambda path: None),
+        ):
+            result = CliRunner().invoke(cli, ["sandbox", "edit", "--no-commit"])
+        assert result.exit_code == 0, result.output
+        assert "update hatchery docker.yaml" not in _git_log(repo)
+        assert (repo / ".hatchery" / "docker.yaml").exists()
+
+
+class TestSandboxHarnessEdit:
+    """`sandbox harness edit` — an agent's Dockerfile.<agent>."""
+
+    @pytest.fixture(autouse=True)
+    def _neutral_cwd(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+
+    def _run(self, repo, args, **invoke_kwargs):
+        runner = CliRunner()
+        editor = invoke_kwargs.pop("editor", lambda path: None)
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
+            patch("seekr_hatchery.utils.common.open_for_editing", side_effect=editor),
+            patch("seekr_hatchery.sessions.repo_config.resolve_no_commit", return_value=True),
+        ):
+            return runner.invoke(cli, args, **invoke_kwargs)
+
+    def test_seeds_and_edits(self, tmp_path):
+        repo = tmp_path / "repo"
+        result = self._run(repo, ["sandbox", "harness", "edit", "--agent", "codex"])
+        assert result.exit_code == 0, result.output
+        assert (repo / ".hatchery" / "Dockerfile.codex").exists()
+
+    def test_unknown_agent_errors(self, tmp_path):
+        repo = tmp_path / "repo"
+        result = self._run(repo, ["sandbox", "harness", "edit", "--agent", "nope"])
+        assert result.exit_code != 0
+        assert "nope" in result.output
+
+    def test_task_edits_worktree_copy(self, tmp_path):
+        repo = tmp_path / "repo"
+        worktree = repo / ".hatchery" / "worktrees" / "my-task"
+        (worktree / ".hatchery").mkdir(parents=True)
+        (worktree / ".hatchery" / "Dockerfile.codex").write_text("USER hatchery\n")
+
+        result = self._run(repo, ["sandbox", "harness", "edit", "--agent", "codex", "--task", "my-task"])
+        assert result.exit_code == 0, result.output
+        assert "resume my-task --rebuild-sandbox" in result.output
+
+    def test_commits_when_tracked(self, git_repo):
+        repo = git_repo
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
+            patch("seekr_hatchery.utils.common.open_for_editing", side_effect=lambda path: None),
+        ):
+            result = CliRunner().invoke(cli, ["sandbox", "harness", "edit", "--agent", "codex", "--commit"])
+        assert result.exit_code == 0, result.output
+        assert "update CODEX Dockerfile" in _git_log(repo)
+        assert _porcelain(repo, ".hatchery/Dockerfile.codex") == ""
 
 
 # ---------------------------------------------------------------------------
@@ -761,10 +965,11 @@ class TestSandbox:
         assert mock_prep.call_args[1]["no_commit"] is True
 
     def test_sandbox_repo_config_sets_no_commit_without_flag(self, tmp_path):
-        """repo .hatchery.yaml auto_commit=false + no flag → no_commit=True."""
+        """repo .hatchery/config.yaml auto_commit=false + no flag → no_commit=True."""
         repo = tmp_path / "repo"
         repo.mkdir()
-        (repo / ".hatchery.yaml").write_text("auto_commit: false\n")
+        (repo / ".hatchery").mkdir(exist_ok=True)
+        (repo / ".hatchery" / "config.yaml").write_text("auto_commit: false\n")
         p_root, p_prep, p_rt, p_cfg, p_feat = self._patches(repo, tmp_path / "hdir")
         runner = CliRunner()
         with p_root, p_prep as mock_prep, p_rt, p_cfg, p_feat, patch("seekr_hatchery.cli.docker.launch_sandbox_shell"):
@@ -2011,10 +2216,11 @@ class TestCmdChatDispatch:
         assert mock_launch.call_args[1]["no_cache"] is False
 
     def test_chat_repo_config_sets_no_commit_without_flag(self, fake_tasks_db, home):
-        """repo .hatchery.yaml auto_commit=false + no flag → no_commit=True."""
+        """repo .hatchery/config.yaml auto_commit=false + no flag → no_commit=True."""
         repo = home / "repo"
         repo.mkdir(parents=True, exist_ok=True)
-        (repo / ".hatchery.yaml").write_text("auto_commit: false\n")
+        (repo / ".hatchery").mkdir(exist_ok=True)
+        (repo / ".hatchery" / "config.yaml").write_text("auto_commit: false\n")
         runner = CliRunner()
         saved_meta = {}
 
@@ -3410,7 +3616,7 @@ class TestAutoCommitResolution:
     def _write_config(home, auto_commit):
         path = home / ".hatchery" / "config.yaml"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(yaml.dump({"schema_version": "1", "auto_commit": auto_commit}))
+        path.write_text(yaml.dump({"auto_commit": auto_commit}))
 
     def test_no_flag_auto_commit_true(self, home):
         """No flag + auto_commit=True → no_commit=False."""
@@ -3446,52 +3652,63 @@ class TestAutoCommitResolution:
 
 
 # ---------------------------------------------------------------------------
-# repo-local config (.hatchery.yaml) auto_commit override
+# repo-local config (.hatchery/config.yaml) auto_commit override
 # ---------------------------------------------------------------------------
 
 
 class TestRepoConfigAutoCommitResolution:
-    """Repo-local .hatchery.yaml layers between global config and the CLI flag.
+    """Repo-local .hatchery/config.yaml layers between global config and the CLI flag.
 
-    Precedence: --commit/--no-commit flag > repo .hatchery.yaml > global
-    config > default (True). The global config here stays a mock (via
-    _new_env's auto_commit=...); only the repo file is real, at the repo
-    path _new_env patches git_root_or_cwd to return.
+    Precedence: --commit/--no-commit flag > repo .hatchery/config.yaml > global
+    config > default (True). Both the global config and the repo file are real
+    (written to the home-redirected paths); real_config=True leaves
+    UserConfig.load unpatched so load_effective_config merges them for real.
     """
+
+    @staticmethod
+    def _write_global_config(home, auto_commit):
+        path = home / ".hatchery" / "config.yaml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(yaml.dump({"auto_commit": auto_commit}))
 
     @staticmethod
     def _write_repo_config(home, auto_commit):
         repo = home / "repo"
         repo.mkdir(parents=True, exist_ok=True)
-        (repo / ".hatchery.yaml").write_text(f"auto_commit: {str(auto_commit).lower()}\n")
+        (repo / ".hatchery").mkdir(exist_ok=True)
+        (repo / ".hatchery" / "config.yaml").write_text(f"auto_commit: {str(auto_commit).lower()}\n")
 
     def test_repo_config_overrides_global_true(self, home):
         """repo auto_commit=False + global auto_commit=True + no flag → no_commit=True."""
+        self._write_global_config(home, True)
         self._write_repo_config(home, False)
-        with _new_env(auto_commit=True) as ns:
+        with _new_env(real_config=True) as ns:
             result = CliRunner().invoke(cli, ["new", "my-task"])
         assert result.exit_code == 0, result.output
         assert ns.create.call_args[1]["no_commit"] is True
 
     def test_repo_config_overrides_global_false(self, home):
         """repo auto_commit=True + global auto_commit=False + no flag → no_commit=False."""
+        self._write_global_config(home, False)
         self._write_repo_config(home, True)
-        with _new_env(auto_commit=False) as ns:
+        with _new_env(real_config=True) as ns:
             result = CliRunner().invoke(cli, ["new", "my-task"])
         assert result.exit_code == 0, result.output
         assert ns.create.call_args[1]["no_commit"] is False
 
     def test_explicit_flag_overrides_repo_config(self, home):
         """repo auto_commit=False + --commit → no_commit=False (flag wins)."""
+        self._write_global_config(home, True)
         self._write_repo_config(home, False)
-        with _new_env(auto_commit=True) as ns:
+        with _new_env(real_config=True) as ns:
             result = CliRunner().invoke(cli, ["new", "my-task", "--commit"])
         assert result.exit_code == 0, result.output
         assert ns.create.call_args[1]["no_commit"] is False
 
     def test_missing_repo_config_falls_back_to_global(self, home):
-        """No .hatchery.yaml + global auto_commit=False + no flag → no_commit=True."""
-        with _new_env(auto_commit=False) as ns:
+        """No .hatchery/config.yaml + global auto_commit=False + no flag → no_commit=True."""
+        self._write_global_config(home, False)
+        with _new_env(real_config=True) as ns:
             result = CliRunner().invoke(cli, ["new", "my-task"])
         assert result.exit_code == 0, result.output
         assert ns.create.call_args[1]["no_commit"] is True
