@@ -586,6 +586,28 @@ class TestGoldenSpecAndArgv:
         assert "SYS_ADMIN" in spec.cap_add
         assert spec.add_hosts == []
 
+    def test_user_env_renders_and_yields_to_extra_env(self):
+        """user_env lands after HATCHERY_* but extra_env (sidecar) wins on conflict."""
+        spec = docker.build_spec(
+            image="test-image",
+            mounts=[],
+            workdir="/workspace",
+            name="test-task",
+            hatchery_repo="/repo",
+            container_name=None,
+            agent_cmd=["codex"],
+            user_env={"MY_FLAG": "1", "OPENAI_API_KEY": "user-clobber"},
+            extra_env={"OPENAI_API_KEY": "sidecar-wins"},
+        )
+        assert spec.env == {
+            "HATCHERY_TASK": "test-task",
+            "HATCHERY_REPO": "/repo",
+            "MY_FLAG": "1",
+            "OPENAI_API_KEY": "sidecar-wins",
+        }
+        assert "-e" in docker.DockerRuntime().render_run_argv(spec)
+        assert "MY_FLAG=1" in docker.DockerRuntime().render_run_argv(spec)
+
     def test_docker_argv_non_dind(self, monkeypatch):
         """Full rendered argv for Docker, non-DinD, with proxy on Linux."""
         monkeypatch.setattr(docker.sys, "platform", "linux")

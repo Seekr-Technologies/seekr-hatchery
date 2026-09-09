@@ -1,6 +1,7 @@
 """Docker sandbox helpers."""
 
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -429,6 +430,7 @@ class DockerConfig(BaseModel):
     follow_symlinks: bool = False
     clipboard_images: bool = True
     cap_add: list[str] = []
+    environment: list[str] = []
     kubernetes: KubectlConfig | None = None
 
     @field_validator("cap_add", mode="before")
@@ -445,6 +447,19 @@ class DockerConfig(BaseModel):
                 raise ValueError(f"cap_add[{i}]: unknown capability {entry!r}")
             result.append(cap)
         return result
+
+    @field_validator("environment", mode="before")
+    @classmethod
+    def validate_environment(cls, v: list | None) -> list[str]:
+        if v is None:
+            return []
+        for i, entry in enumerate(v):
+            if not isinstance(entry, str):
+                raise ValueError(f"environment[{i}]: expected a string, got {type(entry).__name__!r}")
+            name = entry.split("=", 1)[0]
+            if not name:
+                raise ValueError(f'environment[{i}]: invalid entry {entry!r} — expected "VAR=value" or "VAR"')
+        return v
 
     @field_validator("volumes", mode="before")
     @classmethod
@@ -738,6 +753,22 @@ def _construct_volume_mounts(config: DockerConfig) -> list[Mount]:
         VolumeMount(name=f"{_VOLUME_NAME_PREFIX}{v.name}", dst=v.path, mode="RW", task_scoped=False)
         for v in config.volumes
     ]
+
+
+def _resolve_environment(config: DockerConfig) -> dict[str, str]:
+    """Resolve declared ``environment`` entries into a name→value dict.
+
+    ``VAR=value`` yields a literal; bare ``VAR`` pulls the host's current
+    ``os.environ["VAR"]`` and is skipped when the host has no such variable.
+    """
+    resolved: dict[str, str] = {}
+    for entry in config.environment:
+        name, sep, value = entry.partition("=")
+        if sep:
+            resolved[name] = value
+        elif name in os.environ:
+            resolved[name] = os.environ[name]
+    return resolved
 
 
 # Container directories whose contents are provided by the image or the kernel.
@@ -1219,6 +1250,7 @@ def build_spec(
     hatchery_repo: str,
     container_name: str | None,
     agent_cmd: list[str],
+    user_env: dict[str, str] | None = None,
     extra_env: dict[str, str] | None = None,
     needs_host_gateway: bool = False,
     dind: bool = False,
@@ -1233,8 +1265,9 @@ def build_spec(
     Engine-specific flags (userns, label=disable) are
     *not* here — those live on ``ContainerRuntime.render_run_argv``.
 
-    *extra_env* is merged into the base env after the mandatory ``HATCHERY_*``
-    vars.
+    *user_env* (repo ``environment:`` config) and *extra_env* (sidecar-provided)
+    are both merged in after the mandatory ``HATCHERY_*`` vars; *extra_env* is
+    applied last so infra values (proxy URLs, tokens) win over user config.
 
     *needs_host_gateway* emits ``--add-host=host.docker.internal:host-gateway``
     on Linux; the platform gate is applied here as a spec concern.
@@ -1247,6 +1280,8 @@ def build_spec(
         "HATCHERY_TASK": name,
         "HATCHERY_REPO": hatchery_repo,
     }
+    if user_env:
+        env.update(user_env)
     if extra_env:
         env.update(extra_env)
 
@@ -1429,6 +1464,7 @@ def run_session(
             hatchery_repo=container_repo,
             container_name=meta.container_name,
             agent_cmd=agent_cmd,
+            user_env=_resolve_environment(config),
             extra_env=contrib.env,
             needs_host_gateway=contrib.needs_host_gateway,
             dind=config.dind,
@@ -1493,6 +1529,7 @@ def launch_sandbox_shell(
                 hatchery_repo=str(repo),
                 container_name=None,
                 agent_cmd=[],
+                user_env=_resolve_environment(config),
                 extra_env=contrib.env,
                 needs_host_gateway=contrib.needs_host_gateway,
                 command_override=[shell],
