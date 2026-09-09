@@ -2916,6 +2916,68 @@ class TestDoMarkDoneInclude:
 
         mock_remove.assert_not_called()
 
+    def test_marks_task_file_complete_before_removal(self, fake_tasks_db, tmp_path):
+        """_do_mark_done syncs the task file's **Status**: line to complete."""
+        repo = Path("/my/repo")
+        wt = tmp_path / "wt"
+        task_file = wt / ".hatchery" / "tasks" / "2026-09-09-my-task" / "task.md"
+        task_file.parent.mkdir(parents=True)
+        task_file.write_text("# Task\n\n**Status**: in-progress\n\n## Summary\n")
+
+        sessions.save_task(
+            {
+                "name": "my-task",
+                "branch": "hatchery/my-task",
+                "worktree": str(wt),
+                "repo": str(repo),
+                "status": "in-progress",
+                "no_worktree": False,
+            }
+        )
+
+        import seekr_hatchery.cli as cli_mod
+
+        with (
+            patch("seekr_hatchery.cli.git.remove_worktree"),
+            patch("seekr_hatchery.cli.git.has_uncommitted_changes", return_value=False),
+        ):
+            cli_mod._do_mark_done("my-task", repo, wt)
+
+        assert "**Status**: complete" in task_file.read_text()
+
+
+class TestPostExitDoneOption:
+    def test_done_choice_marks_complete_without_relaunch(self, fake_tasks_db, tmp_path):
+        """Choosing 'd' at the not-complete exit menu calls _do_mark_done, not _launch."""
+        repo = Path("/my/repo")
+        wt = tmp_path / "wt"
+        task_file = wt / ".hatchery" / "tasks" / "2026-09-09-my-task" / "task.md"
+        task_file.parent.mkdir(parents=True)
+        task_file.write_text("# Task\n\n**Status**: in-progress\n")
+
+        sessions.save_task(
+            {
+                "name": "my-task",
+                "branch": "hatchery/my-task",
+                "worktree": str(wt),
+                "repo": str(repo),
+                "status": "in-progress",
+                "no_worktree": False,
+            }
+        )
+
+        import seekr_hatchery.cli as cli_mod
+
+        with (
+            patch("builtins.input", return_value="d"),
+            patch("seekr_hatchery.cli._do_mark_done") as mock_done,
+            patch("seekr_hatchery.cli._launch") as mock_launch,
+        ):
+            cli_mod._post_exit_check("my-task", repo, wt)
+
+        mock_done.assert_called_once_with("my-task", repo, wt)
+        mock_launch.assert_not_called()
+
 
 class TestDoDeleteInclude:
     def test_delete_removes_worktrees_and_branches(self, fake_tasks_db, tmp_path):
