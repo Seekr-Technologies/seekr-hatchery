@@ -332,6 +332,19 @@ def add(repo: Path, paths: list[str] | None = None) -> None:
         run(["git", "add", *paths], cwd=repo)
 
 
+def is_ignored(repo: Path, path: str) -> bool:
+    """Return True if *path* (relative to *repo*) is excluded by gitignore rules.
+
+    Uses ``--no-index`` so the answer reflects the ignore rules alone, matching
+    what ``git add`` will refuse. Without it, ``check-ignore`` consults the
+    index and reports a *tracked* file as not-ignored even when its parent dir
+    is excluded (e.g. ``.hatchery/`` in ``.git/info/exclude``) — in which case
+    ``git add`` still balks and the plain check would wrongly say "commit it".
+    """
+    result = run(["git", "check-ignore", "-q", "--no-index", path], cwd=repo, check=False)
+    return result.returncode == 0
+
+
 def commit(repo: Path, message: str) -> None:
     """Create a commit in *repo* with *message*."""
     run(["git", "commit", "-m", message], cwd=repo)

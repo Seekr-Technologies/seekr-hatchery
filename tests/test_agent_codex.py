@@ -442,6 +442,22 @@ class TestDockerfileInstall:
         assert "npm" in snippet
         assert "@openai/codex" in snippet
 
+    def test_dockerfile_install_is_unpinned(self):
+        # The version is resolved to latest at Dockerfile-generation time, not
+        # baked into the snippet — so the package appears without an @version.
+        assert "@openai/codex@" not in agent.CODEX.dockerfile_install
+        assert "@openai/codex" in agent.CODEX.dockerfile_install
+
+
+class TestUpdate:
+    def test_bumps_pin_to_latest(self):
+        text = "RUN npm install -g @openai/codex@0.1.0"
+        with patch.object(codex_backend.npm, "npm_latest_version", return_value="9.9.9"):
+            new_text, old_version, version = agent.CODEX.update(text)
+        assert old_version == "0.1.0"
+        assert version == "9.9.9"
+        assert new_text == "RUN npm install -g @openai/codex@9.9.9"
+
 
 # ---------------------------------------------------------------------------
 # format_image_reference

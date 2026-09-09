@@ -562,6 +562,21 @@ def detect_runtime() -> ContainerRuntime:
 # ── Setup ─────────────────────────────────────────────────────────────────────
 
 
+def _pin_harness_latest(text: str, backend: agent.AgentBackend) -> str:
+    """Pin the backend's harness to the registry's latest version in *text*.
+
+    Returns *text* unchanged if the backend has no pinnable harness (e.g. one
+    that installs at build time), or if the version lookup fails — in that case
+    the harness is left unpinned and the build pulls latest itself.
+    """
+    try:
+        result = backend.update(text)
+    except (OSError, ValueError, KeyError) as e:
+        ui.warn(f"  Couldn't fetch latest {backend.kind.lower()} version ({e}); leaving harness unpinned.")
+        return text
+    return text if result is None else result[0]
+
+
 def ensure_dockerfile(
     hatchery_dir: Path,
     backend: agent.AgentBackend = agent.CODEX,
@@ -574,6 +589,7 @@ def ensure_dockerfile(
     text = _DOCKERFILE_TEMPLATE.read_text()
     text = text.replace("{{AGENT_INSTALL}}", backend.dockerfile_install)
     text = text.replace("{{DIND}}", _comment_out(DIND_DOCKERFILE_LINES))
+    text = _pin_harness_latest(text, backend)
     df.write_text(text)
     ui.info(f"  Created {df.relative_to(hatchery_dir)}")
     answer = input("  Would you like to edit the Dockerfile? [Y/n] ").strip().lower()
@@ -1172,13 +1188,18 @@ def build_docker_image(
     backend: agent.AgentBackend,
     runtime: ContainerRuntime | None = None,
     no_cache: bool = False,
-) -> None:
+    exit_on_error: bool = True,
+) -> bool:
     """Build the sandbox image from the hatchery_dir's Dockerfile.<agent>.
 
     Using the hatchery_dir copy means Dockerfile changes made as part of a task
     are isolated to that task's image and merge into main with the task.
 
     Caller resolves *image_name* — typically ``sessions.image_name(repo, name)``.
+
+    Returns True on a successful build. On failure the default is to print the
+    error and ``sys.exit(1)``; pass ``exit_on_error=False`` to return False
+    instead so the caller can recover (e.g. revert a Dockerfile edit).
     """
     runtime = runtime or DockerRuntime()
     image = image_name
@@ -1198,19 +1219,22 @@ def build_docker_image(
 
         if logger.isEnabledFor(logging.DEBUG):
             # Let the runtime's own output pass through so build progress is visible.
-            result = subprocess.run(build_cmd, cwd=repo, stdin=subprocess.DEVNULL)
-            if result.returncode != 0:
-                ui.error(f"{runtime.binary} build failed.")
-                sys.exit(1)
+            returncode = subprocess.run(build_cmd, cwd=repo, stdin=subprocess.DEVNULL).returncode
         else:
             ui.info(click.style(f"Building sandbox image '{image}'", fg="magenta", bold=True))
             returncode, output = _stream_build(build_cmd, cwd=repo)
-            if returncode != 0:
+            if returncode == 0:
+                ui.success("  Image built.")
+            else:
                 for line in output[-20:]:
                     ui.info(f"  {line}")
-                ui.error(f"{runtime.binary} build failed.")
+
+        if returncode != 0:
+            ui.error(f"{runtime.binary} build failed.")
+            if exit_on_error:
                 sys.exit(1)
-            ui.success("  Image built.")
+            return False
+        return True
 
 
 # ── Spec builder ─────────────────────────────────────────────────────────────

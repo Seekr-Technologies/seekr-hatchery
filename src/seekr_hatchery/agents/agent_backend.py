@@ -275,6 +275,17 @@ class AgentBackend(ABC):
     def dockerfile_install(self) -> str:
         """Dockerfile snippet (RUN block) that installs this agent in the sandbox."""
 
+    def update(self, dockerfile_text: str) -> tuple[str, str | None, str] | None:
+        """Bump this harness's version pin in *dockerfile_text* to the latest.
+
+        Returns ``(new_dockerfile_text, old_version, new_version)`` — where
+        ``old_version`` is ``None`` if the harness was previously unpinned — or
+        ``None`` if this backend has no updatable harness (the default).
+        Backends whose CLI is installed from a package registry override this —
+        e.g. via the helpers in :mod:`seekr_hatchery.utils.npm`.
+        """
+        return None
+
     @staticmethod
     def format_image_reference(path: Path) -> str:
         """How this agent expects an image path in its prompt stream.

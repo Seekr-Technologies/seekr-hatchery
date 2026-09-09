@@ -45,11 +45,21 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from seekr_hatchery.agents.agent_backend import CONTAINER_HOME, AgentBackend, ProxyEndpoint
+from seekr_hatchery.agents.agent_backend import (
+    CONTAINER_HOME,
+    AgentBackend,
+    ProxyEndpoint,
+)
 from seekr_hatchery.locks import hatchery_lock
 from seekr_hatchery.mount import BindMount, Mount, VolumeMount
+from seekr_hatchery.utils import npm
 
 logger = logging.getLogger(__name__)
+
+# npm package for the pi CLI. The install line is emitted unpinned; the concrete
+# version is resolved to the registry's latest when the Dockerfile is generated
+# (and re-pinned by ``hatchery harness update``).
+_NPM_PACKAGE = "@earendil-works/pi-coding-agent"
 
 _OPENAI_CODEX = "openai-codex"
 
@@ -418,4 +428,9 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \\
     && rm -rf /var/lib/apt/lists/*
 USER hatchery
 RUN npm config set prefix '{CONTAINER_HOME}/.npm-global' \\
-    && npm install -g --ignore-scripts @earendil-works/pi-coding-agent"""
+    && npm install -g --ignore-scripts {_NPM_PACKAGE}"""
+
+    def update(self, dockerfile_text: str) -> tuple[str, str | None, str] | None:
+        old_version = npm.current_npm_version(dockerfile_text, _NPM_PACKAGE)
+        version = npm.npm_latest_version(_NPM_PACKAGE)
+        return npm.pin_npm_install(dockerfile_text, _NPM_PACKAGE, version), old_version, version

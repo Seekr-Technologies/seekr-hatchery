@@ -382,6 +382,17 @@ TASK_NAME = TaskNameType()
 # ---------------------------------------------------------------------------
 
 
+# Ordered, git-style groupings for the top-level --help listing. Commands not
+# named here fall into a trailing "Other commands" section, so a newly added
+# command is never silently dropped from help.
+COMMAND_SECTIONS: list[tuple[str, list[str]]] = [
+    ("Start a task", ["new", "chat", "resume"]),
+    ("Manage tasks", ["list", "status", "shell", "exec", "done", "archive", "delete"]),
+    ("Sandbox", ["sandbox"]),
+    ("Maintenance", ["logs", "config", "self"]),
+]
+
+
 class AliasedGroup(click.Group):
     """Click Group subclass that supports short aliases shown in --help."""
 
@@ -406,19 +417,25 @@ class AliasedGroup(click.Group):
         for alias, primary in self._aliases.items():
             primary_to_aliases.setdefault(primary, []).append(alias)
 
-        commands = []
-        for name in self.commands:
+        def row(name: str) -> tuple[str, str]:
             cmd = self.commands[name]
-            if cmd.hidden:
-                continue
             aliases = sorted(primary_to_aliases.get(name, []))
             parts = aliases + [name] if aliases else [name]
-            display = " | ".join(parts)
-            commands.append((display, cmd.get_short_help_str(limit=formatter.width)))
+            return " | ".join(parts), cmd.get_short_help_str(limit=formatter.width)
 
-        if commands:
-            with formatter.section("Commands"):
-                formatter.write_dl(commands)
+        visible = {name for name, cmd in self.commands.items() if not cmd.hidden}
+
+        sections: list[tuple[str, list[str]]] = list(COMMAND_SECTIONS)
+        placed = {name for _, names in sections for name in names}
+        leftover = sorted(visible - placed)
+        if leftover:
+            sections.append(("Other commands", leftover))
+
+        for title, names in sections:
+            rows = [row(name) for name in names if name in visible]
+            if rows:
+                with formatter.section(title):
+                    formatter.write_dl(rows)
 
 
 @click.group(cls=AliasedGroup, context_settings={"help_option_names": ["-h", "--help"]})
@@ -629,6 +646,12 @@ def cmd_new(
     help="Agent to use (auto-detected if not specified)",
 )
 @click.option(
+    "--rebuild-sandbox",
+    "rebuild_sandbox",
+    is_flag=True,
+    help="Rebuild the sandbox image from scratch, ignoring the layer cache",
+)
+@click.option(
     "--commit/--no-commit",
     "commit",
     default=None,
@@ -638,7 +661,7 @@ def cmd_new(
         "Use --no-commit to skip all hatchery commits."
     ),
 )
-def cmd_chat(name: str | None, agent_name: str, commit: bool | None) -> None:
+def cmd_chat(name: str | None, agent_name: str, rebuild_sandbox: bool, commit: bool | None) -> None:
     """Start a free-form chat session in a sandbox."""
     ui.hatchery_header(_version)
     repo, in_repo = git.git_root_or_cwd()
@@ -673,6 +696,7 @@ def cmd_chat(name: str | None, agent_name: str, commit: bool | None) -> None:
         runtime=runtime,
         main_branch=main_branch,
         session_id=meta.session_id or "",
+        no_cache=rebuild_sandbox,
     )
 
 
@@ -806,8 +830,20 @@ def cmd_resume(
     )
 
 
-@cli.command("sandbox")
+@cli.group("sandbox")
+def cmd_sandbox() -> None:
+    """Manage the Docker sandbox."""
+
+
+@cmd_sandbox.command("shell")
 @click.option("--shell", default="/bin/bash", help="Shell to launch (default: /bin/bash)")
+@click.option(
+    "--agent",
+    "agent_name",
+    default=None,
+    type=click.Choice(AGENT_CHOICES, case_sensitive=False),
+    help="Agent to use (auto-detected if not specified)",
+)
 @click.option(
     "--rebuild-sandbox",
     "rebuild_sandbox",
@@ -824,11 +860,11 @@ def cmd_resume(
         "Use --no-commit to skip all hatchery commits."
     ),
 )
-def cmd_sandbox(shell: str, rebuild_sandbox: bool, commit: bool | None) -> None:
-    """Drop into an interactive shell inside the Docker sandbox."""
+def cmd_sandbox_shell(shell: str, agent_name: str, rebuild_sandbox: bool, commit: bool | None) -> None:
+    """Build the sandbox image and drop into an interactive shell."""
     repo, in_repo = git.git_root_or_cwd()
     cfg = user_config.UserConfig.load()
-    backend = cfg.resolve_backend(None)
+    backend = cfg.resolve_backend(agent_name)
     no_commit = repo_config.resolve_no_commit(repo, cfg, commit)
 
     hdir = sessions.prepare_sandbox(repo, in_repo=in_repo, backend=backend, no_commit=no_commit)
@@ -847,6 +883,127 @@ def cmd_sandbox(shell: str, rebuild_sandbox: bool, commit: bool | None) -> None:
         no_cache=rebuild_sandbox,
         hatchery_dir=hdir,
     )
+
+
+def _resolve_harness_root(main_repo: Path, backend: agent.AgentBackend, task_name: str | None) -> Path:
+    """Resolve which checkout's ``.hatchery`` holds the Dockerfile to update.
+
+    With ``--task <name>``: that task's worktree if it carries its own
+    Dockerfile, else *main_repo* (uncommitted / no-worktree setups keep the
+    Dockerfile at the root). Without it: the nearest
+    ``.hatchery/Dockerfile.<agent>`` walking up from the current directory to
+    *main_repo*, so running inside a worktree updates that worktree's copy.
+    """
+    if task_name is not None:
+        worktree = sessions.worktrees_dir(main_repo) / task_name
+        if docker.dockerfile_path(worktree / ".hatchery", backend).exists():
+            return worktree
+        return main_repo
+    cwd = Path.cwd()
+    for d in [cwd, *cwd.parents]:
+        if docker.dockerfile_path(d / ".hatchery", backend).exists():
+            return d
+        if d == main_repo:
+            break
+    return main_repo
+
+
+@cmd_sandbox.group("harness")
+def cmd_harness() -> None:
+    """Manage the agent harness (the coding-agent CLI baked into the sandbox)."""
+
+
+@cmd_harness.command("update")
+@click.option(
+    "--agent",
+    "agent_name",
+    default=None,
+    type=click.Choice(AGENT_CHOICES, case_sensitive=False),
+    help="Agent whose harness to update (auto-detected if not specified)",
+)
+@click.option(
+    "--task",
+    "task_name",
+    default=None,
+    help=(
+        "Update a specific task's Dockerfile: its worktree copy if it has one, "
+        "else the repo root. Default: the nearest Dockerfile from the current "
+        "directory up to the repo root."
+    ),
+)
+@click.option(
+    "--commit/--no-commit",
+    "commit",
+    default=None,
+    help=(
+        "Whether to commit the updated Dockerfile. "
+        "Default: from repo config (.hatchery.yaml) if set, else global config (true)."
+    ),
+)
+def cmd_harness_update(agent_name: str, task_name: str | None, commit: bool | None) -> None:
+    """Update the agent harness to its latest release.
+
+    Bumps the version pin in Dockerfile.<agent>, then rebuilds the sandbox
+    image to verify the new version installs cleanly. If the build fails the
+    pin is reverted; otherwise the change is committed.
+    """
+    main_repo, in_repo = git.git_root_or_cwd()
+    cfg = user_config.UserConfig.load()
+    backend = cfg.resolve_backend(agent_name)
+    kind = backend.kind.lower()
+    repo = _resolve_harness_root(main_repo, backend, task_name)
+    no_commit = repo_config.resolve_no_commit(repo, cfg, commit)
+
+    df = docker.dockerfile_path(repo / ".hatchery", backend)
+    if not df.exists():
+        ui.error(f"No Dockerfile for '{kind}' at {df}.")
+        ui.info(f"  Run `hatchery sandbox shell --agent {kind}` first to create it.")
+        sys.exit(1)
+
+    old_text = df.read_text()
+    result = backend.update(old_text)
+    if result is None:
+        ui.note(
+            f"'{kind}' installs its harness at build time and has no version pin to bump — "
+            "use --rebuild-sandbox to refresh it."
+        )
+        return
+
+    new_text, old_version, version = result
+    if new_text == old_text:
+        ui.success(f"{kind} harness already up to date ({version}).")
+        return
+
+    df.write_text(new_text)
+    ui.info(f"Updating {kind} harness from {old_version or 'unpinned'} → {version}")
+
+    # Verify the bump before keeping it: rebuild the sandbox image so a bad
+    # version (broken install, yanked dep) is caught here rather than on the
+    # user's next launch. A failed build reverts the pin.
+    runtime = docker.detect_runtime()
+    ui.info("Rebuilding sandbox…")
+    built = docker.build_docker_image(
+        repo,
+        repo / ".hatchery",
+        sessions.image_name(repo, "sandbox"),
+        backend,
+        runtime=runtime,
+        no_cache=True,
+        exit_on_error=False,
+    )
+    if not built:
+        df.write_text(old_text)
+        ui.warn(f"Reverted {kind} harness pin — {version} failed to build.")
+        sys.exit(1)
+
+    ui.success("Updated.")
+    if no_commit or not in_repo:
+        return
+    rel = str(df.relative_to(repo))
+    if git.is_ignored(repo, rel):
+        ui.note(f"  Not committing — {rel} is git-ignored in this repo.")
+        return
+    git.add_and_commit(repo, f"chore: update {kind} harness to {version}", paths=[rel])
 
 
 @cli.command("exec")
