@@ -683,6 +683,37 @@ class TestDockerConfigCapAdd:
 
 
 # ---------------------------------------------------------------------------
+# DockerConfig.environment validation
+# ---------------------------------------------------------------------------
+
+
+class TestDockerConfigEnvironment:
+    def test_defaults_empty(self):
+        assert docker.DockerConfig().environment == []
+
+    def test_none_treated_as_empty(self):
+        assert docker.DockerConfig(environment=None).environment == []
+
+    def test_mixed_literal_and_passthrough_entries(self):
+        config = docker.DockerConfig(environment=["VAR_A=x", "VAR_B", "VAR_C="])
+        assert config.environment == ["VAR_A=x", "VAR_B", "VAR_C="]
+
+    def test_empty_name_rejected(self):
+        with pytest.raises(Exception):
+            docker.DockerConfig(environment=["=value"])
+
+    def test_non_string_entry_rejected(self):
+        with pytest.raises(Exception):
+            docker.DockerConfig(environment=[123])
+
+    def test_resolve_environment(self, monkeypatch):
+        monkeypatch.setenv("VAR_B", "from-host")
+        monkeypatch.delenv("VAR_MISSING", raising=False)
+        config = docker.DockerConfig(environment=["VAR_A=x", "VAR_B", "VAR_C=", "VAR_MISSING"])
+        assert docker._resolve_environment(config) == {"VAR_A": "x", "VAR_B": "from-host", "VAR_C": ""}
+
+
+# ---------------------------------------------------------------------------
 # DinD cap_add merging
 # ---------------------------------------------------------------------------
 

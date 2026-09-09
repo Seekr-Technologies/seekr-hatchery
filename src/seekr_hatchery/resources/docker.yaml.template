@@ -87,6 +87,14 @@ follow_symlinks: false
 # cap_add:
 #   - NET_BIND_SERVICE
 
+# environment: extra env vars injected into every sandbox (agent runs and
+# `hatchery shell`). Docker Compose-style list:
+#   "VAR=value"  sets VAR to a literal value.
+#   "VAR"        passes through your host's current $VAR (skipped if unset).
+# environment:
+#   - "MY_FLAG=1"
+#   - "EVAR_PASSTHROUGH"
+
 # kubernetes: give the agent a kubectl command with virtual RBAC filtering.
 #
 # Also uncomment the kubectl section in .hatchery/Dockerfile.
