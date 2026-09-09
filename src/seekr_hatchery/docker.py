@@ -1351,7 +1351,7 @@ def run_session(
     """
     runtime = runtime or DockerRuntime()
     try:
-        mutator = backend.make_header_mutator()
+        endpoints = backend.proxy_endpoints()
     except RuntimeError as e:
         ui.error(str(e))
         sys.exit(1)
@@ -1416,7 +1416,7 @@ def run_session(
     mode_label = "no-worktree mode" if meta.no_worktree else "worktree mode"
     logger.debug(f"Launching {runtime.binary} container for session '{meta.name}' ({mode_label})")
     active_sidecars = [
-        sidecars.ApiProxySidecar(mutator, proxy_token, backend),
+        *(sidecars.ApiProxySidecar(ep, proxy_token, backend) for ep in endpoints),
         sidecars.KubectlSidecar(config.kubernetes, session_dir, kubectl_proxy_token or ""),
     ]
     with sidecars.run_sidecars(active_sidecars) as contrib:
@@ -1479,7 +1479,6 @@ def launch_sandbox_shell(
     sandbox_session_dir = constants.HATCHERY_DIR / "sandbox-sessions" / str(uuid.uuid4())
     sandbox_session_dir.mkdir(parents=True, exist_ok=True)
     active_sidecars = [
-        sidecars.ApiProxySidecar(None, None, backend),
         sidecars.KubectlSidecar(config.kubernetes, sandbox_session_dir, kubectl_proxy_token),
     ]
     try:

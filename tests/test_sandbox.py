@@ -132,8 +132,11 @@ def no_wt_run(
         mutator: Callable[[dict], dict] | None = None,
         proxy_token: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        sidecar = sidecars.ApiProxySidecar(mutator, proxy_token, agent.CODEX)
-        with sidecars.run_sidecars([sidecar]) as contrib:
+        active_sidecars = []
+        if mutator is not None:
+            endpoint = agent.ProxyEndpoint(key="default", header_mutator=mutator, target_host="api.openai.com")
+            active_sidecars.append(sidecars.ApiProxySidecar(endpoint, proxy_token, agent.CODEX))
+        with sidecars.run_sidecars(active_sidecars) as contrib:
             spec = docker.build_spec(
                 image=no_wt_image,
                 mounts=[*mounts, *contrib.mounts],
@@ -414,7 +417,7 @@ class TestContainerProxy:
         Uses a bare subprocess.run (not runtime.run) to test the underlying
         host-gateway networking independently of our mount/env setup.
         """
-        with proxy_mod.api_server(_mutator, "correct-token") as server:
+        with proxy_mod.api_server(_mutator, "correct-token", target_host="api.example.com") as server:
             port = server.port
             # --add-host is what build_spec injects on Linux when proxy_port is set.
             extra_args = ["--add-host=host.docker.internal:host-gateway"] if sys.platform == "linux" else []
