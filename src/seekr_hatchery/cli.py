@@ -160,6 +160,7 @@ def _do_mark_done(name: str, repo: Path, worktree: Path) -> None:
             answer = input("Commit them as a final checkpoint before removing? [Y/n] ").strip().lower()
             commit_changes = answer != "n"
 
+    sessions.update_task_file_status(meta.task_dir, name, "complete")
     sessions.mark_done(meta, commit_changes=commit_changes)
     _cleanup_task(repo, name)
 
@@ -274,10 +275,11 @@ def _post_exit_check(
     ui.warn("  Task is not complete.")
     click.echo()
     ui.info("  w) Wrap up         — relaunch agent to finalize the task file")
+    ui.info("  d) Done            — mark complete now, without relaunching the agent")
     ui.info("  x) Delete          — remove this task permanently")
     ui.info(f"  l) Leave for later — exit now; resume with `hatchery resume {name}`")
     click.echo()
-    choice = input("Choice [w/x/l, Enter = leave for later]: ").strip().lower()
+    choice = input("Choice [w/d/x/l, Enter = leave for later]: ").strip().lower()
     if choice == "w":
         if not meta.session_id:
             ui.error("no session ID found. Cannot relaunch.")
@@ -296,6 +298,8 @@ def _post_exit_check(
             include_repos=include_repos,
             prompt_note=prompt_note,
         )
+    elif choice == "d":
+        _do_mark_done(name, repo, worktree)
     elif choice == "x":
         _do_delete(sessions.load(repo, name))
     else:
