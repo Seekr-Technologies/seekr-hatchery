@@ -265,7 +265,11 @@ class TestRenderRunArgv:
             hatchery_repo="/repo",
             container_name=None,
             agent_cmd=["codex"],
-            extra_env=agent.CODEX.container_env(proxy_token, proxy_port),
+            extra_env=agent.CODEX.container_env(
+                agent.ProxyEndpoint(key="default", header_mutator=lambda h: h, target_host="x"),
+                proxy_token,
+                proxy_port,
+            ),
             needs_host_gateway=True,
             **spec_kwargs,
         )
