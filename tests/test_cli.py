@@ -794,8 +794,8 @@ class TestHarnessUpdate:
         """
         monkeypatch.chdir(tmp_path)
         with (
-            patch("seekr_hatchery.cli.docker.detect_runtime"),
-            patch("seekr_hatchery.cli.docker.build_docker_image", return_value=True),
+            patch("seekr_hatchery.sessions.docker.detect_runtime"),
+            patch("seekr_hatchery.sessions.docker.build_docker_image", return_value=True),
         ):
             yield
 
@@ -811,8 +811,8 @@ class TestHarnessUpdate:
         with (
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
             patch("seekr_hatchery.utils.npm.npm_latest_version", return_value="9.9.9"),
-            patch("seekr_hatchery.cli.repo_config.resolve_no_commit", return_value=False),
-            patch("seekr_hatchery.cli.git.add_and_commit") as mock_commit,
+            patch("seekr_hatchery.sessions.repo_config.resolve_no_commit", return_value=False),
+            patch("seekr_hatchery.sessions.git.add_and_commit") as mock_commit,
         ):
             result = CliRunner().invoke(cli, ["sandbox", "harness", "update", "--agent", "codex"])
 
@@ -827,8 +827,8 @@ class TestHarnessUpdate:
         with (
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
             patch("seekr_hatchery.utils.npm.npm_latest_version", return_value="9.9.9"),
-            patch("seekr_hatchery.cli.repo_config.resolve_no_commit", return_value=False),
-            patch("seekr_hatchery.cli.git.add_and_commit") as mock_commit,
+            patch("seekr_hatchery.sessions.repo_config.resolve_no_commit", return_value=False),
+            patch("seekr_hatchery.sessions.git.add_and_commit") as mock_commit,
         ):
             result = CliRunner().invoke(cli, ["sandbox", "harness", "update", "--agent", "codex"])
 
@@ -850,7 +850,7 @@ class TestHarnessUpdate:
         with (
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
             patch("seekr_hatchery.utils.npm.npm_latest_version", return_value="9.9.9"),
-            patch("seekr_hatchery.cli.git.add_and_commit") as mock_commit,
+            patch("seekr_hatchery.sessions.git.add_and_commit") as mock_commit,
         ):
             result = CliRunner().invoke(cli, ["sandbox", "harness", "update", "--agent", "codex", "--no-commit"])
 
@@ -865,7 +865,7 @@ class TestHarnessUpdate:
         with (
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
             patch("seekr_hatchery.agents.codex.CodexBackend.update", return_value=None),
-            patch("seekr_hatchery.cli.git.add_and_commit") as mock_commit,
+            patch("seekr_hatchery.sessions.git.add_and_commit") as mock_commit,
         ):
             result = CliRunner().invoke(cli, ["sandbox", "harness", "update", "--agent", "codex"])
 
@@ -881,9 +881,9 @@ class TestHarnessUpdate:
         with (
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
             patch("seekr_hatchery.utils.npm.npm_latest_version", return_value="9.9.9"),
-            patch("seekr_hatchery.cli.repo_config.resolve_no_commit", return_value=False),
-            patch("seekr_hatchery.cli.git.is_ignored", return_value=True),
-            patch("seekr_hatchery.cli.git.add_and_commit") as mock_commit,
+            patch("seekr_hatchery.sessions.repo_config.resolve_no_commit", return_value=False),
+            patch("seekr_hatchery.sessions.git.is_ignored", return_value=True),
+            patch("seekr_hatchery.sessions.git.add_and_commit") as mock_commit,
         ):
             result = CliRunner().invoke(cli, ["sandbox", "harness", "update", "--agent", "codex"])
 
@@ -900,9 +900,9 @@ class TestHarnessUpdate:
         with (
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
             patch("seekr_hatchery.utils.npm.npm_latest_version", return_value="9.9.9"),
-            patch("seekr_hatchery.cli.repo_config.resolve_no_commit", return_value=False),
-            patch("seekr_hatchery.cli.docker.build_docker_image", return_value=False),
-            patch("seekr_hatchery.cli.git.add_and_commit") as mock_commit,
+            patch("seekr_hatchery.sessions.repo_config.resolve_no_commit", return_value=False),
+            patch("seekr_hatchery.sessions.docker.build_docker_image", return_value=False),
+            patch("seekr_hatchery.sessions.git.add_and_commit") as mock_commit,
         ):
             result = CliRunner().invoke(cli, ["sandbox", "harness", "update", "--agent", "codex"])
 
@@ -927,7 +927,7 @@ class TestHarnessUpdate:
         with (
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(main_repo, True)),
             patch("seekr_hatchery.utils.npm.npm_latest_version", return_value="9.9.9"),
-            patch("seekr_hatchery.cli.repo_config.resolve_no_commit", return_value=True),
+            patch("seekr_hatchery.sessions.repo_config.resolve_no_commit", return_value=True),
         ):
             result = CliRunner().invoke(cli, ["sandbox", "harness", "update", "--agent", "codex"])
 
@@ -942,11 +942,9 @@ class TestHarnessUpdate:
         with (
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(main_repo, True)),
             patch("seekr_hatchery.utils.npm.npm_latest_version", return_value="9.9.9"),
-            patch("seekr_hatchery.cli.repo_config.resolve_no_commit", return_value=True),
+            patch("seekr_hatchery.sessions.repo_config.resolve_no_commit", return_value=True),
         ):
-            result = CliRunner().invoke(
-                cli, ["sandbox", "harness", "update", "--agent", "codex", "--task", "my-task"]
-            )
+            result = CliRunner().invoke(cli, ["sandbox", "harness", "update", "--agent", "codex", "--task", "my-task"])
 
         assert result.exit_code == 0, result.output
         assert "@openai/codex@9.9.9" in wt_df.read_text()
@@ -959,11 +957,9 @@ class TestHarnessUpdate:
         with (
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(main_repo, True)),
             patch("seekr_hatchery.utils.npm.npm_latest_version", return_value="9.9.9"),
-            patch("seekr_hatchery.cli.repo_config.resolve_no_commit", return_value=True),
+            patch("seekr_hatchery.sessions.repo_config.resolve_no_commit", return_value=True),
         ):
-            result = CliRunner().invoke(
-                cli, ["sandbox", "harness", "update", "--agent", "codex", "--task", "ghost"]
-            )
+            result = CliRunner().invoke(cli, ["sandbox", "harness", "update", "--agent", "codex", "--task", "ghost"])
 
         assert result.exit_code == 0, result.output
         assert "@openai/codex@9.9.9" in root_df.read_text()

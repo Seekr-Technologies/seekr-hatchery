@@ -885,29 +885,6 @@ def cmd_sandbox_shell(shell: str, agent_name: str, rebuild_sandbox: bool, commit
     )
 
 
-def _resolve_harness_root(main_repo: Path, backend: agent.AgentBackend, task_name: str | None) -> Path:
-    """Resolve which checkout's ``.hatchery`` holds the Dockerfile to update.
-
-    With ``--task <name>``: that task's worktree if it carries its own
-    Dockerfile, else *main_repo* (uncommitted / no-worktree setups keep the
-    Dockerfile at the root). Without it: the nearest
-    ``.hatchery/Dockerfile.<agent>`` walking up from the current directory to
-    *main_repo*, so running inside a worktree updates that worktree's copy.
-    """
-    if task_name is not None:
-        worktree = sessions.worktrees_dir(main_repo) / task_name
-        if docker.dockerfile_path(worktree / ".hatchery", backend).exists():
-            return worktree
-        return main_repo
-    cwd = Path.cwd()
-    for d in [cwd, *cwd.parents]:
-        if docker.dockerfile_path(d / ".hatchery", backend).exists():
-            return d
-        if d == main_repo:
-            break
-    return main_repo
-
-
 @cmd_sandbox.group("harness")
 def cmd_harness() -> None:
     """Manage the agent harness (the coding-agent CLI baked into the sandbox)."""
@@ -950,60 +927,7 @@ def cmd_harness_update(agent_name: str, task_name: str | None, commit: bool | No
     main_repo, in_repo = git.git_root_or_cwd()
     cfg = user_config.UserConfig.load()
     backend = cfg.resolve_backend(agent_name)
-    kind = backend.kind.lower()
-    repo = _resolve_harness_root(main_repo, backend, task_name)
-    no_commit = repo_config.resolve_no_commit(repo, cfg, commit)
-
-    df = docker.dockerfile_path(repo / ".hatchery", backend)
-    if not df.exists():
-        ui.error(f"No Dockerfile for '{kind}' at {df}.")
-        ui.info(f"  Run `hatchery sandbox shell --agent {kind}` first to create it.")
-        sys.exit(1)
-
-    old_text = df.read_text()
-    result = backend.update(old_text)
-    if result is None:
-        ui.note(
-            f"'{kind}' installs its harness at build time and has no version pin to bump — "
-            "use --rebuild-sandbox to refresh it."
-        )
-        return
-
-    new_text, old_version, version = result
-    if new_text == old_text:
-        ui.success(f"{kind} harness already up to date ({version}).")
-        return
-
-    df.write_text(new_text)
-    ui.info(f"Updating {kind} harness from {old_version or 'unpinned'} → {version}")
-
-    # Verify the bump before keeping it: rebuild the sandbox image so a bad
-    # version (broken install, yanked dep) is caught here rather than on the
-    # user's next launch. A failed build reverts the pin.
-    runtime = docker.detect_runtime()
-    ui.info("Rebuilding sandbox…")
-    built = docker.build_docker_image(
-        repo,
-        repo / ".hatchery",
-        sessions.image_name(repo, "sandbox"),
-        backend,
-        runtime=runtime,
-        no_cache=True,
-        exit_on_error=False,
-    )
-    if not built:
-        df.write_text(old_text)
-        ui.warn(f"Reverted {kind} harness pin — {version} failed to build.")
-        sys.exit(1)
-
-    ui.success("Updated.")
-    if no_commit or not in_repo:
-        return
-    rel = str(df.relative_to(repo))
-    if git.is_ignored(repo, rel):
-        ui.note(f"  Not committing — {rel} is git-ignored in this repo.")
-        return
-    git.add_and_commit(repo, f"chore: update {kind} harness to {version}", paths=[rel])
+    sessions.update_harness(main_repo, backend, task_name=task_name, commit=commit, cfg=cfg, in_repo=in_repo)
 
 
 @cli.command("exec")
