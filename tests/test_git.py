@@ -389,6 +389,24 @@ class TestIsIgnored:
 
 
 # ---------------------------------------------------------------------------
+# remove_local_git_exclude
+# ---------------------------------------------------------------------------
+
+
+class TestRemoveLocalGitExclude:
+    def test_removes_entry_from_repository_local_exclude_only(self, tmp_path):
+        repo = _git_repo(tmp_path / "repo")
+        exclude = repo / ".git" / "info" / "exclude"
+        exclude.write_text("*.swp\n.hatchery/\nnode_modules/\n")
+        (repo / ".gitignore").write_text(".hatchery/worktrees/\n")
+
+        git.remove_local_git_exclude(repo, ".hatchery/")
+
+        assert exclude.read_text() == "*.swp\nnode_modules/\n"
+        assert (repo / ".gitignore").read_text() == ".hatchery/worktrees/\n"
+
+
+# ---------------------------------------------------------------------------
 # path_has_changes
 # ---------------------------------------------------------------------------
 

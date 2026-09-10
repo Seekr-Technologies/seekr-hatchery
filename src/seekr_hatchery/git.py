@@ -354,6 +354,22 @@ def is_ignored(repo: Path, path: str) -> bool:
     return result.returncode == 0
 
 
+def remove_local_git_exclude(repo: Path, entry: str) -> None:
+    """Remove *entry* from the repository-local ``.git/info/exclude`` file."""
+    main_repo = _resolve_main_repo(repo)
+    exclude_path = main_repo / ".git" / "info" / "exclude"
+    if not exclude_path.exists():
+        return
+
+    lines = exclude_path.read_text().splitlines()
+    retained = [line for line in lines if line.strip() != entry]
+    if len(retained) == len(lines):
+        return
+
+    exclude_path.write_text("\n".join(retained) + ("\n" if retained else ""))
+    logger.debug("Removed %s from repository-local .git/info/exclude", entry)
+
+
 def commit(repo: Path, message: str) -> None:
     """Create a commit in *repo* with *message*."""
     run(["git", "commit", "-m", message], cwd=repo)
