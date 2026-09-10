@@ -63,11 +63,11 @@ This catches unexpected extra output and keeps each test self-contained.
 ```python
 # Bad — two tests, each checking one field of the same call
 def test_default_schema_version(): assert model.schema_version == "1"
-def test_default_agent_is_none():  assert model.default_agent is None
+def test_default_harness_is_none():  assert model.default_harness is None
 
 # Good — one test, full output
 def test_defaults():
-    assert UserConfigModel().model_dump() == {"schema_version": "1", "default_agent": None, "open_editor": False, "auto_commit": True}
+    assert UserConfigModel().model_dump() == {"schema_version": "2", "default_harness": None, "open_editor": False, "auto_commit": True}
 ```
 
 For functions with multiple call variants, write one test *per variant* and

@@ -1,6 +1,6 @@
 """Lifecycle wrapper around the API reverse proxy (see ``.proxy``)."""
 
-import seekr_hatchery.agents as agent
+import seekr_hatchery.harnesses as harness
 from seekr_hatchery.sidecars import base
 from seekr_hatchery.sidecars.api_sidecar import proxy
 
@@ -19,9 +19,9 @@ class ApiProxySidecar(base.SandboxSidecar):
 
     def __init__(
         self,
-        endpoint: agent.ProxyEndpoint,
+        endpoint: harness.ProxyEndpoint,
         proxy_token: str | None,
-        backend: agent.AgentBackend,
+        backend: harness.HarnessBackend,
     ) -> None:
         self._endpoint = endpoint
         self._proxy_token = proxy_token

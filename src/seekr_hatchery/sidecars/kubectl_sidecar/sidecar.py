@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-import seekr_hatchery.agents as agent
+import seekr_hatchery.harnesses as harness
 from seekr_hatchery.models import KubectlConfig
 from seekr_hatchery.mount import BindMount
 from seekr_hatchery.sidecars import base
@@ -47,7 +47,7 @@ class KubectlSidecar(base.SandboxSidecar):
         kubeconfig_path.chmod(0o600)
 
         return base.SidecarContribution(
-            mounts=[BindMount(src=str(kubeconfig_path), dst=f"{agent.CONTAINER_HOME}/.kube/config", mode="RO")],
+            mounts=[BindMount(src=str(kubeconfig_path), dst=f"{harness.CONTAINER_HOME}/.kube/config", mode="RO")],
             needs_host_gateway=True,
         )
 

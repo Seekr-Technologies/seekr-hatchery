@@ -12,7 +12,7 @@ user's terminal and the container's TTY; we scan its stdin stream for
 clipboard image.  If a PNG comes back we save it to a per-task bind-
 mounted directory and swap the keystroke for the agent's preferred
 file reference (set per-backend via
-``AgentBackend.format_image_reference``).  If the clipboard is empty
+``HarnessBackend.format_image_reference``).  If the clipboard is empty
 or text, the byte passes through unchanged so it retains its normal
 terminal meaning (vim visual-block, bash literal-insert, etc.).
 
@@ -211,7 +211,7 @@ class PasteInterceptor:
         self._format_image_reference = format_image_reference
 
     def on_stdin(self, chunk: bytes) -> bytes:
-        """Transform a stdin *chunk* on its way to the agent.
+        """Transform a stdin *chunk* on its way to the harness.
 
         Hot path is the no-trigger branch: plain typing passes through
         without spawning any subprocess, so the per-keystroke overhead
@@ -258,7 +258,7 @@ class PasteInterceptor:
         return bytes(out)
 
     def _inject_image(self, data: bytes) -> bytes:
-        """Save *data* to disk and return bytes to type into the agent."""
+        """Save *data* to disk and return bytes to type into the harness."""
         try:
             path = save_image(data, self._target_dir)
         except OSError as exc:

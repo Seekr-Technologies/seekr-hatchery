@@ -27,7 +27,7 @@ The demo shown in the project README is built from split asciicast v3 files:
 ./docs/resources/render-svg.sh
 
 # Render a specific agent
-./docs/resources/render-svg.sh --agent codex
+./docs/resources/render-svg.sh --harness codex
 ```
 
 This concatenates `demo-common.cast` + `endings/<agent>.cast`, converts v3 → v2 (required by svg-term-cli), renders the SVG, and cleans up. The SVGs are embedded in the project README — commit them after regenerating.
@@ -35,5 +35,5 @@ This concatenates `demo-common.cast` + `endings/<agent>.cast`, converts v3 → v
 ### Adding a new agent
 
 1. Create `endings/<agent>.cast` with the agent's startup screen events (v3 format, relative timestamps, no header)
-2. Run `./docs/resources/render-svg.sh --agent <agent>`
+2. Run `./docs/resources/render-svg.sh --harness <agent>`
 3. Add the new SVG to the README

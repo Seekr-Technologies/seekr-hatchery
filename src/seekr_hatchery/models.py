@@ -18,7 +18,7 @@ from seekr_hatchery.includes import IncludeEntry, load_include_entries
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 SessionStatus = Literal["in-progress", "running", "complete", "archived"]
@@ -45,7 +45,7 @@ class SessionMeta(BaseModel):
     created: str = ""
     completed: str | None = None
     session_id: str | None = None
-    agent: str = "CODEX"
+    harness: str = "CODEX"
 
     no_worktree: bool = False
     no_commit: bool = False

@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pytest
 
-import seekr_hatchery.agents as agent
 import seekr_hatchery.docker as docker
+import seekr_hatchery.harnesses as harness
 import seekr_hatchery.sessions as sessions
 import seekr_hatchery.sidecars as sidecars
 import seekr_hatchery.sidecars.api_sidecar.proxy as proxy_mod
@@ -86,7 +86,7 @@ def no_wt_cwd(tmp_path_factory: pytest.TempPathFactory) -> Path:
     cwd = tmp_path_factory.mktemp("no_wt")
     hatchery_dir = cwd / ".hatchery"
     hatchery_dir.mkdir()
-    (hatchery_dir / "Dockerfile.codex").write_text("FROM alpine\n")
+    (hatchery_dir / "Dockerfile.harness.codex").write_text("FROM alpine\n")
     (hatchery_dir / "docker.yaml").write_text("schema_version: 1\n")
     return cwd
 
@@ -95,7 +95,7 @@ def no_wt_cwd(tmp_path_factory: pytest.TempPathFactory) -> Path:
 def no_wt_image(no_wt_cwd: Path, runtime: docker.ContainerRuntime) -> str:
     """Build the no-worktree sandbox image once; remove it after the module."""
     image = sessions.image_name(no_wt_cwd, "test-no-wt")
-    docker.build_docker_image(no_wt_cwd, no_wt_cwd / ".hatchery", image, agent.CODEX, runtime=runtime)
+    docker.build_docker_image(no_wt_cwd, no_wt_cwd / ".hatchery", image, harness.CODEX, runtime=runtime)
     yield image
     subprocess.run([runtime.binary, "rmi", "-f", image], capture_output=True)
 
@@ -118,13 +118,13 @@ def no_wt_run(
 
     session_dir = sessions.task_session_dir(no_wt_cwd, "test-no-wt")
     session_dir.mkdir(parents=True, exist_ok=True)
-    agent.CODEX.on_new_task(session_dir)
+    harness.CODEX.on_new_task(session_dir)
     container_cwd = str(no_wt_cwd)
-    agent.CODEX.on_before_container_start(session_dir, "test-proxy-token", container_cwd)
+    harness.CODEX.on_before_container_start(session_dir, "test-proxy-token", container_cwd)
     (Path.home() / ".codex").mkdir(parents=True, exist_ok=True)
 
     no_wt_meta = SessionMeta(name="test-no-wt", repo=str(no_wt_cwd), worktree=str(no_wt_cwd), no_worktree=True)
-    mounts = docker.build_mounts(no_wt_meta, agent.CODEX, session_dir, docker.DockerConfig())
+    mounts = docker.build_mounts(no_wt_meta, harness.CODEX, session_dir, docker.DockerConfig())
 
     def run(
         command: list[str],
@@ -134,8 +134,8 @@ def no_wt_run(
     ) -> subprocess.CompletedProcess[str]:
         active_sidecars = []
         if mutator is not None:
-            endpoint = agent.ProxyEndpoint(key="default", header_mutator=mutator, target_host="api.openai.com")
-            active_sidecars.append(sidecars.ApiProxySidecar(endpoint, proxy_token, agent.CODEX))
+            endpoint = harness.ProxyEndpoint(key="default", header_mutator=mutator, target_host="api.openai.com")
+            active_sidecars.append(sidecars.ApiProxySidecar(endpoint, proxy_token, harness.CODEX))
         with sidecars.run_sidecars(active_sidecars) as contrib:
             spec = docker.build_spec(
                 image=no_wt_image,
@@ -168,7 +168,7 @@ def wt_repo(tmp_path_factory: pytest.TempPathFactory) -> Path:
     hatchery_dir = repo / ".hatchery"
     hatchery_dir.mkdir()
     # Use COPY --from to avoid RUN apk add, which calls capset() and fails in DinD.
-    (hatchery_dir / "Dockerfile.codex").write_text(
+    (hatchery_dir / "Dockerfile.harness.codex").write_text(
         "FROM docker.io/alpine/git AS git-src\n"
         "FROM alpine\n"
         "COPY --from=git-src /usr/bin/git /usr/bin/git\n"
@@ -203,7 +203,7 @@ def wt_worktree(wt_repo: Path) -> Path:
 def wt_image(wt_repo: Path, wt_worktree: Path, runtime: docker.ContainerRuntime) -> str:
     """Build the worktree sandbox image (alpine+git) once; remove it after the module."""
     image = sessions.image_name(wt_repo, "test-wt")
-    docker.build_docker_image(wt_repo, wt_worktree / ".hatchery", image, agent.CODEX, runtime=runtime)
+    docker.build_docker_image(wt_repo, wt_worktree / ".hatchery", image, harness.CODEX, runtime=runtime)
     yield image
     subprocess.run([runtime.binary, "rmi", "-f", image], capture_output=True)
 
@@ -231,10 +231,10 @@ def wt_run(
     task_name = "test-wt"
     session_dir = sessions.task_session_dir(wt_repo, task_name)
     session_dir.mkdir(parents=True, exist_ok=True)
-    agent.CODEX.on_new_task(session_dir)
+    harness.CODEX.on_new_task(session_dir)
     container_worktree = str(wt_worktree)
     container_repo = str(wt_repo)
-    agent.CODEX.on_before_container_start(session_dir, "test-proxy-token", container_worktree)
+    harness.CODEX.on_before_container_start(session_dir, "test-proxy-token", container_worktree)
     (Path.home() / ".codex").mkdir(parents=True, exist_ok=True)
 
     # Mirror launch_docker: create sentinel files for any .git-root writes.
@@ -254,7 +254,7 @@ def wt_run(
     wt_meta = SessionMeta(name=task_name, repo=str(wt_repo), worktree=str(wt_worktree), no_worktree=False)
     mounts = docker.build_mounts(
         wt_meta,
-        agent.CODEX,
+        harness.CODEX,
         session_dir,
         docker.DockerConfig(),
         git_sentinel_files=git_sentinels,
@@ -582,14 +582,14 @@ class TestDinD:
         (build_dir / "Dockerfile").write_text(text)
 
         # Verify _dind_dockerfile_ok passes on the generated+uncommented Dockerfile
-        assert docker._dind_dockerfile_ok(build_dir, agent.CODEX) is False, (
-            "_dind_dockerfile_ok should be False — Dockerfile is not at the agent-specific path"
+        assert docker._dind_dockerfile_ok(build_dir, harness.CODEX) is False, (
+            "_dind_dockerfile_ok should be False — Dockerfile is not at the harness-specific path"
         )
-        # Write at the agent-specific path so _dind_dockerfile_ok can find it
+        # Write at the harness-specific path so _dind_dockerfile_ok can find it
         hatchery_dir = build_dir / ".hatchery"
         hatchery_dir.mkdir()
-        (hatchery_dir / f"Dockerfile.{agent.CODEX.kind.lower()}").write_text(text)
-        assert docker._dind_dockerfile_ok(build_dir, agent.CODEX) is True, (
+        (hatchery_dir / f"Dockerfile.{harness.CODEX.kind.lower()}").write_text(text)
+        assert docker._dind_dockerfile_ok(build_dir, harness.CODEX) is True, (
             "_dind_dockerfile_ok should be True on an uncommented DinD Dockerfile"
         )
         image = "hatchery-test:dind"
@@ -880,11 +880,11 @@ class TestCodexConfigPersistence:
         meta = SessionMeta(name="test-no-wt", repo=str(no_wt_cwd), worktree=str(no_wt_cwd), no_worktree=True)
         session_dir = sessions.task_session_dir(no_wt_cwd, "test-no-wt")
         session_dir.mkdir(parents=True, exist_ok=True)
-        cfg = f"{agent.CONTAINER_HOME}/.codex/config.toml"
+        cfg = f"{harness.CONTAINER_HOME}/.codex/config.toml"
 
         mounts = prepare_volume_mounts(
             runtime.binary,
-            agent.CODEX.construct_mounts(session_dir),
+            harness.CODEX.construct_mounts(session_dir),
             meta,
             session_dir,
             "test-proxy-token",

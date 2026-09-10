@@ -19,8 +19,8 @@ import yaml
 from pydantic import BaseModel, ConfigDict, field_validator
 from pydantic import ValidationError as _PydanticValidationError
 
-import seekr_hatchery.agents as agent
 import seekr_hatchery.constants as constants
+import seekr_hatchery.harnesses as harness
 import seekr_hatchery.mount_links as mount_links
 import seekr_hatchery.pty_proxy as pty_proxy
 import seekr_hatchery.sidecars as sidecars
@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 # ── Container runtime abstraction ────────────────────────────────────────────
 #
-# ``ContainerRuntime`` mirrors ``AgentBackend``: a small ABC with one concrete
+# ``ContainerRuntime`` mirrors ``HarnessBackend``: a small ABC with one concrete
 # subclass per engine (Docker, Podman).  Engine divergence that was previously
 # scattered across inline conditionals — userns flags, label
 # disable, OOM hints — now lives on the subclass that owns it.
@@ -86,7 +86,7 @@ class ContainerSpec:
 
 
 class ContainerRuntime(ABC):
-    """Abstract container runtime — mirrors ``AgentBackend``.
+    """Abstract container runtime — mirrors ``HarnessBackend``.
 
     Each concrete subclass owns the engine divergence (binary name, userns
     flags, OOM messaging).  ``render_run_argv(spec)`` turns a
@@ -522,12 +522,23 @@ def parse_docker_include_entry(entry: str | IncludeItem) -> tuple[str, str]:
 # ── Utilities ─────────────────────────────────────────────────────────────────
 
 
-def dockerfile_path(hatchery_dir: Path, backend: agent.AgentBackend) -> Path:
-    """Return the canonical path to this backend's Dockerfile under *hatchery_dir*.
+def dockerfile_path(hatchery_dir: Path, backend: harness.HarnessBackend) -> Path:
+    """Return the canonical path to this harness's Dockerfile under *hatchery_dir*.
 
-    Files are named ``Dockerfile.<agent>`` (e.g. ``Dockerfile.codex``).
+    Files are named ``Dockerfile.harness.<kind>`` (e.g. ``Dockerfile.harness.codex``).
     """
+    return hatchery_dir / f"Dockerfile.harness.{backend.kind.lower()}"
+
+
+def _legacy_dockerfile_path(hatchery_dir: Path, backend: harness.HarnessBackend) -> Path:
+    """Return the pre-harness-name canonical Dockerfile path."""
     return hatchery_dir / f"Dockerfile.{backend.kind.lower()}"
+
+
+def existing_dockerfile_path(hatchery_dir: Path, backend: harness.HarnessBackend) -> Path:
+    """Return the canonical Dockerfile, or the compatible legacy path when present."""
+    canonical = dockerfile_path(hatchery_dir, backend)
+    return canonical if canonical.exists() else _legacy_dockerfile_path(hatchery_dir, backend)
 
 
 def detect_runtime() -> ContainerRuntime:
@@ -564,11 +575,13 @@ def detect_runtime() -> ContainerRuntime:
 
 def ensure_dockerfile(
     hatchery_dir: Path,
-    backend: agent.AgentBackend = agent.CODEX,
+    backend: harness.HarnessBackend = harness.CODEX,
 ) -> bool:
     """Write a starter Dockerfile if none exists. Returns True if created."""
     df = dockerfile_path(hatchery_dir, backend)
     if df.exists():
+        return False
+    if _legacy_dockerfile_path(hatchery_dir, backend).exists():
         return False
     df.parent.mkdir(parents=True, exist_ok=True)
     text = _DOCKERFILE_TEMPLATE.read_text()
@@ -628,13 +641,13 @@ def ensure_docker_config(hatchery_dir: Path) -> bool:
 # ── DinD helpers ──────────────────────────────────────────────────────────────
 
 
-def _dind_dockerfile_ok(hatchery_dir: Path, backend: agent.AgentBackend) -> bool:
+def _dind_dockerfile_ok(hatchery_dir: Path, backend: harness.HarnessBackend) -> bool:
     """Return True if the Dockerfile has an uncommented fuse-overlayfs reference.
 
     fuse-overlayfs is the storage driver required for rootless nested containers
     and is a reliable smoke-test that the DinD section has been uncommented.
     """
-    df = dockerfile_path(hatchery_dir, backend)
+    df = existing_dockerfile_path(hatchery_dir, backend)
     if not df.exists():
         return False
     for line in df.read_text().splitlines():
@@ -811,7 +824,7 @@ def _check_host_path_safe_for_mount(repo: Path) -> None:
     """
     blocklist: tuple[Path, ...] = SYSTEM_MOUNT_BLOCKLIST + (
         Path("/"),
-        Path(agent.CONTAINER_HOME),
+        Path(harness.CONTAINER_HOME),
     )
     repo_resolved = repo.resolve()
     if repo_resolved in blocklist:
@@ -911,7 +924,7 @@ def _git_worktree_mounts(repo: Path, name: str, container_root: str) -> list[Mou
 
 def build_mounts(
     meta: SessionMeta,
-    backend: agent.AgentBackend,
+    backend: harness.HarnessBackend,
     session_dir: Path,
     config: DockerConfig,
     *,
@@ -1076,7 +1089,7 @@ def _default_home_mounts() -> list[Mount]:
     mounts: list[Mount] = []
     gitconfig = Path.home() / ".gitconfig"
     if gitconfig.exists():
-        mounts.append(BindMount(src=str(gitconfig), dst=f"{agent.CONTAINER_HOME}/.gitconfig", mode="RO"))
+        mounts.append(BindMount(src=str(gitconfig), dst=f"{harness.CONTAINER_HOME}/.gitconfig", mode="RO"))
     return mounts
 
 
@@ -1169,11 +1182,11 @@ def build_docker_image(
     repo: Path,
     hatchery_dir: Path,
     image_name: str,
-    backend: agent.AgentBackend,
+    backend: harness.HarnessBackend,
     runtime: ContainerRuntime | None = None,
     no_cache: bool = False,
 ) -> None:
-    """Build the sandbox image from the hatchery_dir's Dockerfile.<agent>.
+    """Build the sandbox image from the hatchery_dir's harness Dockerfile.
 
     Using the hatchery_dir copy means Dockerfile changes made as part of a task
     are isolated to that task's image and merge into main with the task.
@@ -1182,7 +1195,7 @@ def build_docker_image(
     """
     runtime = runtime or DockerRuntime()
     image = image_name
-    worktree_dockerfile = dockerfile_path(hatchery_dir, backend)
+    worktree_dockerfile = existing_dockerfile_path(hatchery_dir, backend)
     # Use a temporary empty directory as the build context — NOT the repo root.
     # The generated Dockerfile has no COPY/ADD from context (only multi-stage
     # COPY --from=), so an empty context is correct and avoids tar-ing the
@@ -1335,7 +1348,7 @@ def _exec_agent(cmd: list[str], paste_interceptor: clipboard_image.PasteIntercep
 
 
 def _make_paste_interceptor(
-    backend: agent.AgentBackend,
+    backend: harness.HarnessBackend,
     session_dir: Path,
     config: DockerConfig,
 ) -> clipboard_image.PasteInterceptor | None:
@@ -1350,7 +1363,7 @@ def _make_paste_interceptor(
 
 def run_session(
     meta: SessionMeta,
-    backend: agent.AgentBackend,
+    backend: harness.HarnessBackend,
     agent_cmd: list[str],
     config: DockerConfig,
     *,
@@ -1475,7 +1488,7 @@ def run_session(
 
 def launch_sandbox_shell(
     repo: Path,
-    backend: agent.AgentBackend,
+    backend: harness.HarnessBackend,
     config: DockerConfig,
     runtime: ContainerRuntime,
     image_name: str,
@@ -1551,7 +1564,7 @@ def exec_task_shell(container_name: str, runtime: ContainerRuntime, shell: str =
 
 
 def resolve_runtime(
-    hatchery_dir: Path, no_docker: bool, backend: agent.AgentBackend = agent.CODEX
+    hatchery_dir: Path, no_docker: bool, backend: harness.HarnessBackend = harness.CODEX
 ) -> ContainerRuntime | None:
     """Return the runtime to use for this session, or None to run natively.
 
@@ -1565,13 +1578,14 @@ def resolve_runtime(
     (no-worktree), or the out-of-tree store (no-commit mode). Use
     ``SessionMeta.hatchery_dir`` to get the right one.
 
-    Checks for the agent-specific Dockerfile (e.g. ``Dockerfile.codex``).
+    Checks for the harness-specific Dockerfile (e.g. ``Dockerfile.harness.codex``),
+    while accepting the legacy ``Dockerfile.codex`` name for existing sessions.
     """
     if no_docker:
         logger.debug("--no-docker set, running natively")
         return None
-    agent_df = dockerfile_path(hatchery_dir, backend)
-    if not agent_df.exists():
+    harness_df = existing_dockerfile_path(hatchery_dir, backend)
+    if not harness_df.exists():
         ui.error(
             f"No Dockerfile found for '{backend.kind.lower()}' in {hatchery_dir}.\n"
             "A Dockerfile is required for sandbox mode. "

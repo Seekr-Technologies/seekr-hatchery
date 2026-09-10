@@ -16,9 +16,9 @@ Why a tagged union (and why Pydantic):
   tools narrow the variant; Pydantic's discriminator handles
   round-trips when a Mount comes from YAML.
 
-Mounts are agent-neutral (both ``agents/*`` and ``docker.py`` traffic
+Mounts are agent-neutral (both ``harnesses/*`` and ``docker.py`` traffic
 in them), so they live at the top of the package, not inside
-``agents/``.
+``harnesses/``.
 """
 
 import shlex

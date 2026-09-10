@@ -48,8 +48,8 @@ Requires Python 3.12+ and at least one agent:
 # Start a new task
 hatchery new add-auth
 
-# Start a new task using OpenAI Codex
-hatchery new add-auth --agent codex
+# Start a new task using the OpenAI Codex harness
+hatchery new add-auth --harness codex
 
 # Resume an interrupted session
 hatchery resume add-auth
@@ -98,9 +98,9 @@ All `new` / `resume` commands accept:
 - `--from <ref>` — fork from a specific branch or commit (default: `HEAD`)
 - `--editor / --no-editor` — force editor or prompt mode for the task objective. By default, hatchery prompts in the terminal; set `open_editor: true` in `~/.hatchery/config.yaml` to default to `$EDITOR`. If the editor is opened and the file is unchanged on close, the task is cancelled.
 - `--commit / --no-commit` — control whether hatchery auto-commits its scaffolding (task file, Docker configuration). Default: from a repo-local `.hatchery.yaml` (`auto_commit: true/false`) if present at the repo root, else the global config (`auto_commit: true`). Use `--no-commit` to keep all hatchery files out of the tracked repo — task records and Docker files stay at `<repo>/.hatchery/` but are hidden from git via `.git/info/exclude` instead of being committed. Set `auto_commit: false` in `~/.hatchery/config.yaml` to make no-commit the default everywhere, or in a repo's `.hatchery.yaml` to make it the default for just that repo.
-- `--agent [codex]` — choose the AI agent (auto-detected from installed agents)
+- `--harness [codex]` — choose the coding harness (auto-detected from installed harnesses). `--agent` remains a deprecated alias and emits a warning.
 
-The chosen agent is stored in task metadata and re-used automatically on `resume`.
+The chosen harness is stored in task metadata and re-used automatically on `resume`.
 
 ## Docker sandbox
 
@@ -314,7 +314,7 @@ Then output `"$top\n$hatchery_line\n$bottom"` when `$hatchery_line` is non-empty
                            #   (never committed, never edits the tracked .gitignore)
 
 ~/.hatchery/
-  config.yaml              # user config (default_agent, open_editor, auto_commit)
+  config.yaml              # user config (default_harness, open_editor, auto_commit)
   meta.json                # DB schema version
   hatchery.log             # always-on rotating log file (5 MB × 3 backups)
   tasks/                   # all per-task state, namespaced by repository

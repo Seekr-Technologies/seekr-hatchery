@@ -1,33 +1,33 @@
 #!/usr/bin/env bash
-# Render per-agent demo SVGs from the split cast files.
+# Render per-harness demo SVGs from the split cast files.
 #
 # Usage:
-#   ./render-svg.sh                  # render all agents
-#   ./render-svg.sh --agent codex    # render only Codex
+#   ./render-svg.sh                  # render all harnesses
+#   ./render-svg.sh --harness codex  # render only Codex
 #
-# Each agent's SVG is produced by concatenating demo-common.cast (the shared
-# prefix) with endings/<agent>.cast, converting v3→v2, and rendering via
-# svg-term-cli. Output: demo-<agent>.svg in this directory.
+# Each harness's SVG is produced by concatenating demo-common.cast (the shared
+# prefix) with endings/<harness>.cast, converting v3→v2, and rendering via
+# svg-term-cli. Output: demo-<harness>.svg in this directory.
 set -euo pipefail
 cd "$(dirname "$0")"
 
-AGENTS=(codex)
+HARNESSES=(codex)
 
-# Parse --agent flag
-if [[ "${1:-}" == "--agent" ]]; then
-    AGENTS=("${2:?missing agent name after --agent}")
+# Parse --harness flag
+if [[ "${1:-}" == "--harness" ]]; then
+    HARNESSES=("${2:?missing harness name after --harness}")
     shift 2
 fi
 
-for agent in "${AGENTS[@]}"; do
-    ending="endings/${agent}.cast"
+for harness_name in "${HARNESSES[@]}"; do
+    ending="endings/${harness_name}.cast"
     if [[ ! -f "$ending" ]]; then
         echo "Error: $ending not found" >&2
         exit 1
     fi
 
-    # Concatenate common prefix + agent-specific ending
-    combined="demo-${agent}-combined.cast"
+    # Concatenate common prefix + harness-specific ending
+    combined="demo-${harness_name}-combined.cast"
     cat demo-common.cast "$ending" > "$combined"
 
     # Convert v3 → v2 (svg-term-cli only supports v2)
@@ -55,10 +55,10 @@ for line in lines[1:]:
     ev[0] = round(t, 6)
     out.append(json.dumps(ev))
 print('\n'.join(out))
-" > "demo-${agent}-v2.cast"
+" > "demo-${harness_name}-v2.cast"
 
-    npx svg-term-cli --in "demo-${agent}-v2.cast" --out "demo-${agent}.svg" --window
-    rm "demo-${agent}-combined.cast" "demo-${agent}-v2.cast"
+    npx svg-term-cli --in "demo-${harness_name}-v2.cast" --out "demo-${harness_name}.svg" --window
+    rm "demo-${harness_name}-combined.cast" "demo-${harness_name}-v2.cast"
 
-    echo "Generated demo-${agent}.svg"
+    echo "Generated demo-${harness_name}.svg"
 done

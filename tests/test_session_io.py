@@ -11,10 +11,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
-import seekr_hatchery.agents as agent
-import seekr_hatchery.agents.pi as pi_backend
 import seekr_hatchery.constants as constants
 import seekr_hatchery.git as git
+import seekr_hatchery.harnesses as harness
+import seekr_hatchery.harnesses.pi as pi_backend
 import seekr_hatchery.sessions as sessions
 import seekr_hatchery.utils as utils
 from seekr_hatchery.includes import IncludeEntry, IncludeItem
@@ -296,7 +296,7 @@ class TestMigrateDb:
     def test_v1_relocates_no_commit_store_into_repo(self, fake_hatchery_dir: Path, tmp_path: Path) -> None:
         """v1→v2: repos/<id>/ files move into <repo>/.hatchery/, exclude is set, store is removed."""
         meta_path = fake_hatchery_dir / "meta.json"
-        meta_path.write_text(json.dumps({"schema_version": 1}))
+        meta_path.write_text(json.dumps({"schema_version": 2}))
 
         repo = tmp_path / "repo"
         (repo / ".git").mkdir(parents=True)
@@ -304,14 +304,14 @@ class TestMigrateDb:
         store = fake_hatchery_dir / "repos" / "myrepo-abcd1234"
         (store / "tasks" / "2026-01-01-t").mkdir(parents=True)
         (store / "tasks" / "2026-01-01-t" / "task.md").write_text("# task\n")
-        (store / "Dockerfile.codex").write_text("FROM scratch\n")
+        (store / "Dockerfile.harness.codex").write_text("FROM scratch\n")
         (store / "docker.yaml").write_text("include: []\n")
         (store / "repo.json").write_text(json.dumps({"path": str(repo), "name": "repo"}))
 
         sessions.migrate_db()
 
         assert (repo / ".hatchery" / "tasks" / "2026-01-01-t" / "task.md").read_text() == "# task\n"
-        assert (repo / ".hatchery" / "Dockerfile.codex").exists()
+        assert (repo / ".hatchery" / "Dockerfile.harness.codex").exists()
         assert (repo / ".hatchery" / "docker.yaml").exists()
         assert not store.exists()
         exclude = (repo / ".git" / "info" / "exclude").read_text()
@@ -323,31 +323,31 @@ class TestMigrateDb:
     ) -> None:
         """A store file colliding with an existing <repo>/.hatchery/ entry is preserved, not lost."""
         meta_path = fake_hatchery_dir / "meta.json"
-        meta_path.write_text(json.dumps({"schema_version": 1}))
+        meta_path.write_text(json.dumps({"schema_version": 2}))
 
         repo = tmp_path / "repo"
         (repo / ".git").mkdir(parents=True)
         (repo / ".hatchery").mkdir(parents=True)
-        (repo / ".hatchery" / "Dockerfile.codex").write_text("FROM existing\n")
+        (repo / ".hatchery" / "Dockerfile.harness.codex").write_text("FROM existing\n")
 
         store = fake_hatchery_dir / "repos" / "myrepo-abcd1234"
         store.mkdir(parents=True)
-        (store / "Dockerfile.codex").write_text("FROM store\n")
+        (store / "Dockerfile.harness.codex").write_text("FROM store\n")
         (store / "repo.json").write_text(json.dumps({"path": str(repo), "name": "repo"}))
 
         sessions.migrate_db()
 
         # The pre-existing file at the destination is untouched.
-        assert (repo / ".hatchery" / "Dockerfile.codex").read_text() == "FROM existing\n"
+        assert (repo / ".hatchery" / "Dockerfile.harness.codex").read_text() == "FROM existing\n"
         # The store's colliding copy is preserved alongside it, not deleted.
-        assert (repo / ".hatchery" / "Dockerfile.codex.migrated-backup").read_text() == "FROM store\n"
+        assert (repo / ".hatchery" / "Dockerfile.harness.codex.migrated-backup").read_text() == "FROM store\n"
         # The store itself is still fully cleaned up.
         assert not store.exists()
 
     def test_v1_leaves_store_when_repo_path_gone(self, fake_hatchery_dir: Path, tmp_path: Path) -> None:
         """A store whose recorded repo path no longer exists is left in place."""
         meta_path = fake_hatchery_dir / "meta.json"
-        meta_path.write_text(json.dumps({"schema_version": 1}))
+        meta_path.write_text(json.dumps({"schema_version": 2}))
 
         store = fake_hatchery_dir / "repos" / "gone-abcd1234"
         store.mkdir(parents=True)
@@ -487,10 +487,14 @@ class TestSessionMetaRoundTrip:
             "status": "in-progress",
             "created": "2026-01-15T10:00:00",
             "session_id": "abc",
+            "agent": "PI",
             "schema_version": 1,
         }
-        sessions.save_task(dict(legacy))  # raw dict write, no validation
-        sessions.load(Path(legacy["repo"]), legacy["name"])  # shouldn't raise
+        path = sessions.task_db_path(Path(legacy["repo"]), legacy["name"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(legacy))
+        loaded = sessions.load(Path(legacy["repo"]), legacy["name"])
+        assert loaded.harness == "PI"
 
     def test_chat_type_round_trips(self, fake_tasks_db):
         meta = sessions.SessionMeta(
@@ -513,7 +517,7 @@ class TestSessionMetaRoundTrip:
             "repo": "/r",
             "worktree": "/r/w",
             "statuz": "in-progress",  # typo'd field
-            "schema_version": 1,
+            "schema_version": 2,
         }
         sessions.save_task(dict(bad))
         with pytest.raises(ValidationError):
@@ -523,7 +527,7 @@ class TestSessionMetaRoundTrip:
         """``name`` / ``repo`` / ``worktree`` have no defaults — omitting any
         of them at validation time raises ValidationError."""
         for missing in ("name", "repo", "worktree"):
-            fields = {"name": "x", "repo": "/r", "worktree": "/r/w", "schema_version": 1}
+            fields = {"name": "x", "repo": "/r", "worktree": "/r/w", "schema_version": 2}
             del fields[missing]
             # Write directly to disk; save_task itself requires name+repo to
             # compute the path, so we can't go through it here.
@@ -539,7 +543,7 @@ class TestSessionMetaRoundTrip:
             "repo": "/r",
             "worktree": "/r/w",
             "status": "bogus",  # not a valid SessionStatus literal
-            "schema_version": 1,
+            "schema_version": 2,
         }
         sessions.save_task(dict(bad))
         with pytest.raises(ValidationError):
@@ -551,7 +555,7 @@ class TestSessionMetaRoundTrip:
             "repo": "/r",
             "worktree": "/r/w",
             "type": "zombie",  # not a valid SessionType literal
-            "schema_version": 1,
+            "schema_version": 2,
         }
         sessions.save_task(dict(bad))
         with pytest.raises(ValidationError):
@@ -585,7 +589,7 @@ class TestSessionMetaRoundTrip:
             "repo": "/r",
             "worktree": "/r/w",
             "include": ["/path/a", "/path/b"],
-            "schema_version": 1,
+            "schema_version": 2,
         }
         sessions.save_task(dict(meta_dict))
         loaded = sessions.load(Path("/r"), "inc")
@@ -667,7 +671,7 @@ class TestSessionCreateTask:
             name="my-task",
             repo=git_repo,
             type="task",
-            backend=agent.CODEX,
+            backend=harness.CODEX,
             objective="Test objective",
         )
         expected_wt = git_repo / ".hatchery" / "worktrees" / "my-task"
@@ -683,7 +687,7 @@ class TestSessionCreateTask:
             name="t",
             repo=git_repo,
             type="task",
-            backend=agent.CODEX,
+            backend=harness.CODEX,
             objective="The task is to do X.",
         )
         task_file = sessions.find_task_file(git_repo / ".hatchery" / "worktrees" / "t" / ".hatchery" / "tasks", "t")
@@ -695,7 +699,7 @@ class TestSessionCreateTask:
             name="t",
             repo=git_repo,
             type="task",
-            backend=agent.CODEX,
+            backend=harness.CODEX,
             no_worktree=True,
             objective="x",
         )
@@ -709,7 +713,7 @@ class TestSessionCreateTask:
             name="t",
             repo=git_repo,
             type="task",
-            backend=agent.CODEX,
+            backend=harness.CODEX,
             branch="custom-branch",
             objective="x",
         )
@@ -727,7 +731,7 @@ class TestSessionCreateTask:
             name="t",
             repo=git_repo,
             type="task",
-            backend=agent.CODEX,
+            backend=harness.CODEX,
             branch="existing-branch",
             objective="x",
         )
@@ -742,7 +746,7 @@ class TestSessionCreateTask:
             name="t",
             repo=git_repo,
             type="task",
-            backend=agent.CODEX,
+            backend=harness.CODEX,
             no_worktree=True,
             branch="ignored-branch",
             objective="x",
@@ -752,9 +756,9 @@ class TestSessionCreateTask:
         assert _git(git_repo, "rev-parse", "--verify", "ignored-branch", check=False).returncode != 0
 
     def test_in_progress_collision_exits(self, git_repo, fake_tasks_db, no_input):
-        sessions.create(name="t", repo=git_repo, type="task", backend=agent.CODEX, objective="x")
+        sessions.create(name="t", repo=git_repo, type="task", backend=harness.CODEX, objective="x")
         with pytest.raises(SystemExit):
-            sessions.create(name="t", repo=git_repo, type="task", backend=agent.CODEX, objective="x")
+            sessions.create(name="t", repo=git_repo, type="task", backend=harness.CODEX, objective="x")
 
     def test_includes_passed_through_to_meta(self, git_repo, fake_tasks_db, no_input, tmp_path):
         ref = tmp_path / "external"
@@ -764,16 +768,16 @@ class TestSessionCreateTask:
             name="t",
             repo=git_repo,
             type="task",
-            backend=agent.CODEX,
+            backend=harness.CODEX,
             include_entries=entries,
             objective="x",
         )
         assert any(e["mode"] == "ro" and Path(e["path"]) == ref for e in meta.include)
 
     def test_dockerfile_is_committed(self, git_repo, fake_tasks_db, no_input):
-        sessions.create(name="t", repo=git_repo, type="task", backend=agent.CODEX, objective="x")
+        sessions.create(name="t", repo=git_repo, type="task", backend=harness.CODEX, objective="x")
         worktree = git_repo / ".hatchery" / "worktrees" / "t"
-        assert (worktree / ".hatchery" / "Dockerfile.codex").exists()
+        assert (worktree / ".hatchery" / "Dockerfile.harness.codex").exists()
         log = _git(worktree, "log", "--oneline").stdout
         assert "hatchery Docker configuration" in log
 
@@ -782,7 +786,7 @@ class TestSessionCreateTask:
             name="t",
             repo=git_repo,
             type="task",
-            backend=agent.CODEX,
+            backend=harness.CODEX,
             no_commit=True,
             objective="x",
         )
@@ -799,7 +803,7 @@ class TestSessionCreateTask:
         monkeypatch.setattr(sessions.docker, "ensure_docker_config", MagicMock(return_value=False))
         spy = MagicMock()
         monkeypatch.setattr(sessions, "_commit_docker_files", spy)
-        sessions.create(name="t", repo=git_repo, type="task", backend=agent.CODEX, objective="x")
+        sessions.create(name="t", repo=git_repo, type="task", backend=harness.CODEX, objective="x")
         assert not spy.called
 
     def test_keyboard_interrupt_rolls_back_worktree_and_branch(self, git_repo, fake_tasks_db, no_input, monkeypatch):
@@ -810,7 +814,7 @@ class TestSessionCreateTask:
         # ensure_dockerfile runs after create_worktree, inside create()'s try.
         monkeypatch.setattr(sessions.docker, "ensure_dockerfile", MagicMock(side_effect=KeyboardInterrupt))
         with pytest.raises(KeyboardInterrupt):
-            sessions.create(name="t", repo=git_repo, type="task", backend=agent.CODEX, objective="x")
+            sessions.create(name="t", repo=git_repo, type="task", backend=harness.CODEX, objective="x")
         assert not (git_repo / ".hatchery" / "worktrees" / "t").exists()
         assert _git(git_repo, "rev-parse", "--verify", "hatchery/t", check=False).returncode != 0
 
@@ -819,7 +823,7 @@ class TestSessionCreateChat:
     """sessions.create(type='chat') — no worktree, no task file."""
 
     def test_chat_skips_worktree_and_task_file(self, git_repo, fake_tasks_db, no_input):
-        meta = sessions.create(name="chat-1", repo=git_repo, type="chat", backend=agent.CODEX)
+        meta = sessions.create(name="chat-1", repo=git_repo, type="chat", backend=harness.CODEX)
         assert meta.is_chat
         assert meta.no_worktree is True
         assert not (git_repo / ".hatchery" / "worktrees" / "chat-1").exists()
@@ -828,7 +832,7 @@ class TestSessionCreateChat:
 
     def test_chat_no_commit_in_repo_excludes_hatchery_dir(self, git_repo, fake_tasks_db, no_input):
         """no-commit chat sessions still hide .hatchery/ via .git/info/exclude."""
-        sessions.create(name="chat-1", repo=git_repo, type="chat", backend=agent.CODEX, no_commit=True, in_repo=True)
+        sessions.create(name="chat-1", repo=git_repo, type="chat", backend=harness.CODEX, no_commit=True, in_repo=True)
         exclude = (git_repo / ".git" / "info" / "exclude").read_text()
         assert ".hatchery/" in exclude
 
@@ -854,7 +858,7 @@ class TestPrepareSandbox:
         (repo / ".git").mkdir(parents=True)
         mdf, mdc, mcommit = self._patch_docker(monkeypatch, df_created=True, dc_created=True)
 
-        hdir = sessions.prepare_sandbox(repo, in_repo=True, backend=agent.CODEX, no_commit=True)
+        hdir = sessions.prepare_sandbox(repo, in_repo=True, backend=harness.CODEX, no_commit=True)
 
         assert hdir == repo / ".hatchery"
         assert mdf.call_args[0][0] == repo / ".hatchery"
@@ -868,7 +872,7 @@ class TestPrepareSandbox:
         (repo / ".hatchery").mkdir(parents=True)
         mdf, mdc, mcommit = self._patch_docker(monkeypatch, df_created=True, dc_created=False)
 
-        hdir = sessions.prepare_sandbox(repo, in_repo=True, backend=agent.CODEX, no_commit=False)
+        hdir = sessions.prepare_sandbox(repo, in_repo=True, backend=harness.CODEX, no_commit=False)
 
         assert hdir == repo / ".hatchery"
         assert mdf.call_args[0][0] == repo / ".hatchery"
@@ -879,7 +883,7 @@ class TestPrepareSandbox:
         (repo / ".hatchery").mkdir(parents=True)
         _, _, mcommit = self._patch_docker(monkeypatch, df_created=False, dc_created=False)
 
-        sessions.prepare_sandbox(repo, in_repo=True, backend=agent.CODEX, no_commit=False)
+        sessions.prepare_sandbox(repo, in_repo=True, backend=harness.CODEX, no_commit=False)
 
         assert not mcommit.called
 
@@ -888,7 +892,7 @@ class TestPrepareSandbox:
         (repo / ".hatchery").mkdir(parents=True)
         _, _, mcommit = self._patch_docker(monkeypatch, df_created=True, dc_created=True)
 
-        sessions.prepare_sandbox(repo, in_repo=False, backend=agent.CODEX, no_commit=False)
+        sessions.prepare_sandbox(repo, in_repo=False, backend=harness.CODEX, no_commit=False)
 
         assert not mcommit.called
 
@@ -1374,7 +1378,7 @@ class TestSessionLaunchBackgroundThreads:
 
 class TestSessionMarkDone:
     def test_removes_worktree_and_sets_complete(self, git_repo, fake_tasks_db, no_input):
-        meta = sessions.create(name="t", repo=git_repo, type="task", backend=agent.CODEX, objective="x")
+        meta = sessions.create(name="t", repo=git_repo, type="task", backend=harness.CODEX, objective="x")
         worktree = meta.worktree_path
 
         sessions.mark_done(meta, commit_changes=False)
@@ -1385,7 +1389,7 @@ class TestSessionMarkDone:
         assert loaded.completed
 
     def test_commit_changes_creates_final_checkpoint(self, git_repo, fake_tasks_db, no_input):
-        meta = sessions.create(name="t", repo=git_repo, type="task", backend=agent.CODEX, objective="x")
+        meta = sessions.create(name="t", repo=git_repo, type="task", backend=harness.CODEX, objective="x")
         (meta.worktree_path / "new.txt").write_text("work in progress\n")
 
         sessions.mark_done(meta, commit_changes=True)
@@ -1393,7 +1397,7 @@ class TestSessionMarkDone:
         assert "final checkpoint" in log
 
     def test_no_worktree_chat_just_updates_status(self, git_repo, fake_tasks_db, no_input):
-        meta = sessions.create(name="chat-1", repo=git_repo, type="chat", backend=agent.CODEX)
+        meta = sessions.create(name="chat-1", repo=git_repo, type="chat", backend=harness.CODEX)
         sessions.mark_done(meta)
         loaded = sessions.load(git_repo, "chat-1")
         assert loaded.status == "complete"
@@ -1401,7 +1405,7 @@ class TestSessionMarkDone:
 
 class TestSessionArchive:
     def test_archive_keeps_branch_and_sets_archived(self, git_repo, fake_tasks_db, no_input):
-        meta = sessions.create(name="t", repo=git_repo, type="task", backend=agent.CODEX, objective="x")
+        meta = sessions.create(name="t", repo=git_repo, type="task", backend=harness.CODEX, objective="x")
         worktree = meta.worktree_path
         sessions.archive(meta)
         assert not worktree.exists()
@@ -1409,14 +1413,14 @@ class TestSessionArchive:
         assert sessions.load(git_repo, "t").status == "archived"
 
     def test_archive_chat_is_a_noop_on_worktree(self, git_repo, fake_tasks_db, no_input):
-        meta = sessions.create(name="chat-1", repo=git_repo, type="chat", backend=agent.CODEX)
+        meta = sessions.create(name="chat-1", repo=git_repo, type="chat", backend=harness.CODEX)
         sessions.archive(meta)
         assert sessions.load(git_repo, "chat-1").status == "archived"
 
 
 class TestSessionDelete:
     def test_removes_worktree_branch_and_meta(self, git_repo, fake_tasks_db, no_input):
-        meta = sessions.create(name="t", repo=git_repo, type="task", backend=agent.CODEX, objective="x")
+        meta = sessions.create(name="t", repo=git_repo, type="task", backend=harness.CODEX, objective="x")
         worktree = meta.worktree_path
         assert worktree.exists()
         assert sessions.task_db_path(git_repo, "t").exists()
@@ -1427,7 +1431,7 @@ class TestSessionDelete:
         assert not sessions.task_db_path(git_repo, "t").exists()
 
     def test_delete_chat_removes_only_meta(self, git_repo, fake_tasks_db, no_input):
-        meta = sessions.create(name="chat-1", repo=git_repo, type="chat", backend=agent.CODEX)
+        meta = sessions.create(name="chat-1", repo=git_repo, type="chat", backend=harness.CODEX)
         sessions.delete(meta)
         assert not sessions.task_db_path(git_repo, "chat-1").exists()
 
@@ -1451,7 +1455,7 @@ class TestSessionCancelledRollback:
                 name="t",
                 repo=git_repo,
                 type="task",
-                backend=agent.CODEX,
+                backend=harness.CODEX,
                 use_editor=True,
             )
 
@@ -1474,7 +1478,7 @@ class TestSessionCancelledRollback:
                 name="t",
                 repo=git_repo,
                 type="task",
-                backend=agent.CODEX,
+                backend=harness.CODEX,
                 use_editor=True,
                 include_entries=[IncludeEntry(path=repo_b, mode="worktree")],
             )
@@ -1572,7 +1576,7 @@ class TestMergeIncludeUpdates:
             name="t",
             repo=git_repo,
             type="task",
-            backend=agent.CODEX,
+            backend=harness.CODEX,
             objective="x",
             include_entries=[entry],
         )
@@ -1702,7 +1706,7 @@ class TestGetOrCreateProxyToken:
         assert payload["https://api.openai.com/auth"]["chatgpt_account_id"] == "hatchery"
 
     def test_matches_pi_backends_own_jwt_extraction(self, fake_repo):
-        # Ties the minted shape to the exact extraction agents/pi.py mirrors
+        # Ties the minted shape to the exact extraction harnesses/pi.py mirrors
         # from pi-ai's extractAccountId().
         token = sessions.get_or_create_proxy_token(fake_repo, "my-task")
         assert pi_backend._chatgpt_account_id(token) == "hatchery"
@@ -1845,7 +1849,7 @@ class TestCreateNoCommit:
             name="t",
             repo=git_repo,
             type="task",
-            backend=agent.CODEX,
+            backend=harness.CODEX,
             no_commit=True,
             objective="do stuff",
         )
@@ -1869,7 +1873,7 @@ class TestCreateNoCommit:
             name="t",
             repo=git_repo,
             type="task",
-            backend=agent.CODEX,
+            backend=harness.CODEX,
             no_commit=True,
             objective="x",
         )
@@ -1889,7 +1893,7 @@ class TestCreateNoCommit:
             name="t",
             repo=git_repo,
             type="task",
-            backend=agent.CODEX,
+            backend=harness.CODEX,
             no_commit=True,
             objective="x",
         )
@@ -1901,14 +1905,14 @@ class TestCreateNoCommit:
             name="t",
             repo=git_repo,
             type="task",
-            backend=agent.CODEX,
+            backend=harness.CODEX,
             no_commit=True,
             objective="x",
         )
         hdir = meta.hatchery_dir
-        assert (hdir / "Dockerfile.codex").exists()
+        assert (hdir / "Dockerfile.harness.codex").exists()
         assert (hdir / "docker.yaml").exists()
-        wt_df = meta.worktree_path / ".hatchery" / "Dockerfile.codex"
+        wt_df = meta.worktree_path / ".hatchery" / "Dockerfile.harness.codex"
         assert not wt_df.exists()
 
     def test_git_exclude_used(self, git_repo, fake_tasks_db, no_input, monkeypatch):
@@ -1921,7 +1925,7 @@ class TestCreateNoCommit:
             name="t",
             repo=git_repo,
             type="task",
-            backend=agent.CODEX,
+            backend=harness.CODEX,
             no_commit=True,
             objective="x",
         )
@@ -1937,7 +1941,7 @@ class TestRecordSurvivesDone:
             name="t",
             repo=git_repo,
             type="task",
-            backend=agent.CODEX,
+            backend=harness.CODEX,
             no_commit=True,
             objective="x",
         )
@@ -2014,7 +2018,7 @@ class TestCreateNoCommitNotInRepo:
             name="t",
             repo=repo,
             type="task",
-            backend=agent.CODEX,
+            backend=harness.CODEX,
             no_commit=True,
             no_worktree=True,
             in_repo=False,
@@ -2022,5 +2026,5 @@ class TestCreateNoCommitNotInRepo:
         )
         hdir = meta.hatchery_dir
         assert hdir == repo / ".hatchery"
-        assert (hdir / "Dockerfile.codex").exists()
+        assert (hdir / "Dockerfile.harness.codex").exists()
         assert (hdir / "docker.yaml").exists()
