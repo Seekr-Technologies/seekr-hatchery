@@ -6,9 +6,9 @@ from unittest.mock import patch
 
 import pytest
 
-import seekr_hatchery.agents as agent
 import seekr_hatchery.constants as constants
 import seekr_hatchery.docker as docker
+import seekr_hatchery.harnesses as harness
 import seekr_hatchery.sessions as sessions
 import seekr_hatchery.utils as utils
 from seekr_hatchery.models import SessionMeta
@@ -320,7 +320,7 @@ class TestDockerImageName:
 class TestDockerfilePath:
     def test_returns_agent_specific_path(self):
         repo = Path("/some/repo")
-        assert docker.dockerfile_path(repo, agent.CODEX) == Path("/some/repo/Dockerfile.codex")
+        assert docker.dockerfile_path(repo, harness.CODEX) == Path("/some/repo/Dockerfile.harness.codex")
 
 
 # ---------------------------------------------------------------------------

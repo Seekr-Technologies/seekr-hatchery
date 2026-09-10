@@ -7,9 +7,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import seekr_hatchery.agents as agent
 import seekr_hatchery.constants as constants
 import seekr_hatchery.docker as docker
+import seekr_hatchery.harnesses as harness
 import seekr_hatchery.mount as mount
 import seekr_hatchery.mount_links as mount_links
 from seekr_hatchery.models import SessionMeta
@@ -169,7 +169,7 @@ class TestResolveRuntime:
         repo.mkdir()
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        (worktree / "Dockerfile.codex").write_text("FROM debian\n")
+        (worktree / "Dockerfile.harness.codex").write_text("FROM debian\n")
         monkeypatch.setattr(docker, "detect_runtime", lambda: docker.PodmanRuntime())
         result = docker.resolve_runtime(worktree, no_docker=False)
         assert isinstance(result, docker.PodmanRuntime)
@@ -179,7 +179,7 @@ class TestResolveRuntime:
         repo.mkdir()
         worktree = tmp_path / "worktree"
         worktree.mkdir()
-        (worktree / "Dockerfile.codex").write_text("FROM debian\n")
+        (worktree / "Dockerfile.harness.codex").write_text("FROM debian\n")
         monkeypatch.setattr(docker, "detect_runtime", lambda: docker.DockerRuntime())
         result = docker.resolve_runtime(worktree, no_docker=False)
         assert isinstance(result, docker.DockerRuntime)
@@ -222,9 +222,11 @@ class TestResolveRuntime:
     def test_agent_specific_dockerfile_detected(self, tmp_path, monkeypatch):
         worktree = tmp_path / "worktree"
         (worktree / ".hatchery").mkdir(parents=True)
-        docker.dockerfile_path(worktree, agent.CODEX).write_text("FROM debian\n")
+        docker.dockerfile_path(worktree, harness.CODEX).write_text("FROM debian\n")
         monkeypatch.setattr(docker, "detect_runtime", lambda: docker.DockerRuntime())
-        assert isinstance(docker.resolve_runtime(worktree, no_docker=False, backend=agent.CODEX), docker.DockerRuntime)
+        assert isinstance(
+            docker.resolve_runtime(worktree, no_docker=False, backend=harness.CODEX), docker.DockerRuntime
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -265,8 +267,8 @@ class TestRenderRunArgv:
             hatchery_repo="/repo",
             container_name=None,
             agent_cmd=["codex"],
-            extra_env=agent.CODEX.container_env(
-                agent.ProxyEndpoint(key="default", header_mutator=lambda h: h, target_host="x"),
+            extra_env=harness.CODEX.container_env(
+                harness.ProxyEndpoint(key="default", header_mutator=lambda h: h, target_host="x"),
                 proxy_token,
                 proxy_port,
             ),
@@ -801,7 +803,7 @@ class TestBuildDockerImage:
         hatchery_dir = worktree / ".hatchery"
         hatchery_dir.mkdir(parents=True)
 
-        docker.dockerfile_path(worktree, agent.CODEX).write_text("FROM debian\n")
+        docker.dockerfile_path(worktree, harness.CODEX).write_text("FROM debian\n")
 
         captured: list[list[str]] = []
         captured_kwargs: list[dict] = []
@@ -820,7 +822,7 @@ class TestBuildDockerImage:
             # _stream_build is used in non-debug mode; stub it out
             monkeypatch.setattr(docker, "_stream_build", lambda cmd, cwd: (0, []))
 
-        docker.build_docker_image(repo, worktree, "test-task", agent.CODEX, runtime=docker.PodmanRuntime())
+        docker.build_docker_image(repo, worktree, "test-task", harness.CODEX, runtime=docker.PodmanRuntime())
         return captured[0], captured_kwargs[0]
 
     def test_build_context_is_not_repo_root(self, monkeypatch, tmp_path):
@@ -1216,7 +1218,7 @@ class TestDefaultHomeMounts:
         monkeypatch.setattr(docker.Path, "home", lambda: home)
 
         assert docker._default_home_mounts() == [
-            mount.BindMount(src=str(home / ".gitconfig"), dst=f"{agent.CONTAINER_HOME}/.gitconfig", mode="RO"),
+            mount.BindMount(src=str(home / ".gitconfig"), dst=f"{harness.CONTAINER_HOME}/.gitconfig", mode="RO"),
         ]
 
 
@@ -1376,19 +1378,19 @@ class TestEnsureDockerfileGenerate:
 
         monkeypatch.setattr("builtins.input", lambda _: "n")
 
-        created = docker.ensure_dockerfile(target, agent.CODEX)
+        created = docker.ensure_dockerfile(target, harness.CODEX)
 
         assert created is True
-        assert (target / "Dockerfile.codex").exists()
+        assert (target / "Dockerfile.harness.codex").exists()
 
     def test_returns_false_when_already_exists(self, tmp_path, monkeypatch):
         target = tmp_path / "target"
         target.mkdir()
-        (target / "Dockerfile.codex").write_text("FROM debian\n")
+        (target / "Dockerfile.harness.codex").write_text("FROM debian\n")
 
         monkeypatch.setattr("builtins.input", lambda _: "n")
 
-        created = docker.ensure_dockerfile(target, agent.CODEX)
+        created = docker.ensure_dockerfile(target, harness.CODEX)
         assert created is False
 
 

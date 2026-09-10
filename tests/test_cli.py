@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import click
+import pytest
 import yaml
 from click.testing import CliRunner
 
@@ -14,6 +16,7 @@ import seekr_hatchery.sessions as sessions
 import seekr_hatchery.utils as utils
 from seekr_hatchery.cli import (
     TaskNameType,
+    _resolve_harness_option,
     cli,
 )
 from seekr_hatchery.includes import IncludeEntry
@@ -21,7 +24,7 @@ from seekr_hatchery.sessions import _WRAP_UP_PROMPT, next_chat_name
 
 
 def _launch_meta(
-    name="t", repo="/repo", worktree="/worktree", branch="b", is_chat=False, no_worktree=False, agent_kind="CODEX"
+    name="t", repo="/repo", worktree="/worktree", branch="b", is_chat=False, no_worktree=False, harness_kind="CODEX"
 ):
     """Build a SessionMeta for sessions.launch hook/chat/status tests."""
     return sessions.SessionMeta(
@@ -31,7 +34,7 @@ def _launch_meta(
         branch=branch,
         type="chat" if is_chat else "task",
         no_worktree=no_worktree,
-        agent=agent_kind,
+        harness=harness_kind,
     )
 
 
@@ -200,7 +203,7 @@ def _new_env(
     written to the redirected home is actually read (see TestAutoCommitResolution).
     """
     cfg = MagicMock()
-    cfg.resolve_backend.return_value = MagicMock(name="backend")
+    cfg.resolve_harness.return_value = MagicMock(name="backend")
     cfg.open_editor = open_editor
     cfg.auto_commit = auto_commit
     with ExitStack() as stack:
@@ -330,7 +333,7 @@ class TestCmdConfigEdit:
         runner = CliRunner()
 
         def fake_editor(path):
-            path.write_text("schema_version: '1'\ndefault_agent: CODEX\nopen_editor: true\n")
+            path.write_text("schema_version: '1'\ndefault_harness: CODEX\nopen_editor: true\n")
 
         with patch("seekr_hatchery.cli.open_for_editing", side_effect=fake_editor):
             result = runner.invoke(cli, ["config", "edit"])
@@ -344,7 +347,7 @@ class TestCmdConfigEdit:
         config_path = home / ".hatchery" / "config.yaml"
         # Write a v0 config (missing schema_version and open_editor)
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        original = "default_agent: CODEX\n"
+        original = "default_harness: CODEX\n"
         config_path.write_text(original)
 
         def fake_editor(path):
@@ -514,7 +517,7 @@ class TestCliResume:
         wt.mkdir()
         meta = _resume_meta(wt)
         (wt / ".hatchery").mkdir()
-        (wt / ".hatchery" / "Dockerfile.codex").write_text("FROM scratch\n")
+        (wt / ".hatchery" / "Dockerfile.harness.codex").write_text("FROM scratch\n")
 
         with (
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
@@ -1467,11 +1470,26 @@ class TestChat:
         assert result.exit_code == 0
         assert "chat" in result.output
 
-    def test_chat_help_shows_agent_option(self):
+    def test_chat_help_shows_harness_and_deprecated_agent_options(self):
         runner = CliRunner()
         result = runner.invoke(cli, ["chat", "--help"])
         assert result.exit_code == 0
+        assert "--harness" in result.output
         assert "--agent" in result.output
+        assert "Deprecated alias for --harness" in result.output
+
+
+class TestHarnessOption:
+    def test_prefers_harness_option(self):
+        assert _resolve_harness_option("pi", None) == "pi"
+
+    def test_agent_alias_warns_and_returns_its_value(self, capsys):
+        assert _resolve_harness_option(None, "codex") == "codex"
+        assert capsys.readouterr().out == "--agent is deprecated; use --harness instead.\n"
+
+    def test_rejects_both_options(self):
+        with pytest.raises(click.UsageError, match="either --harness or its deprecated alias --agent"):
+            _resolve_harness_option("pi", "codex")
 
     def test_chat_help_shows_name_argument(self):
         runner = CliRunner()
@@ -3011,7 +3029,7 @@ class TestLaunchFinalizeInclude:
                     worktree=str(worktree),
                     branch="hatchery/my-task",
                     no_worktree=True,
-                    agent_kind=spy_backend.kind,
+                    harness_kind=spy_backend.kind,
                 ),
                 kind="finalize",
                 backend=spy_backend,
@@ -3055,7 +3073,7 @@ class TestLaunchFinalizeInclude:
                     repo=str(repo),
                     worktree=str(worktree),
                     branch="hatchery/my-task",
-                    agent_kind=spy_backend.kind,
+                    harness_kind=spy_backend.kind,
                 ),
                 kind="finalize",
                 backend=spy_backend,

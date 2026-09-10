@@ -10,13 +10,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import seekr_hatchery.agents as agent
-import seekr_hatchery.agents.codex as codex_backend
+import seekr_hatchery.harnesses as harness
+import seekr_hatchery.harnesses.codex as codex_backend
 import seekr_hatchery.mount as mount
 from seekr_hatchery.models import SessionMeta
 
 # codex's container_env ignores its endpoint (single upstream); tests pass this.
-_EP = agent.ProxyEndpoint(key="default", header_mutator=lambda h: h, target_host="x")
+_EP = harness.ProxyEndpoint(key="default", header_mutator=lambda h: h, target_host="x")
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -25,9 +25,9 @@ _EP = agent.ProxyEndpoint(key="default", header_mutator=lambda h: h, target_host
 
 class TestCodexBackendConstants:
     def test_constants(self):
-        assert agent.CODEX.kind == "CODEX"
-        assert agent.CODEX.binary == "codex"
-        assert agent.CODEX.supports_sessions is True
+        assert harness.CODEX.kind == "CODEX"
+        assert harness.CODEX.binary == "codex"
+        assert harness.CODEX.supports_sessions is True
 
 
 # ---------------------------------------------------------------------------
@@ -38,13 +38,13 @@ class TestCodexBackendConstants:
 class TestBuildNewCommand:
     def test_combines_prompts_native(self):
         # Non-docker: direct codex invocation
-        cmd = agent.CODEX.build_new_command("sid", "sys", "initial")
+        cmd = harness.CODEX.build_new_command("sid", "sys", "initial")
         assert cmd == ["codex", "--dangerously-bypass-approvals-and-sandbox", "sys\n\ninitial"]
 
     def test_docker_uses_proxy_wrapper(self):
         # Docker: sh -c wrapper injects openai_base_url via --config so the proxy
         # is used (codex ignores the OPENAI_BASE_URL env var directly).
-        cmd = agent.CODEX.build_new_command("sid", "sys", "initial", docker=True)
+        cmd = harness.CODEX.build_new_command("sid", "sys", "initial", docker=True)
         assert cmd[0] == "sh"
         assert cmd[1] == "-c"
         # Wrapper script must inject openai_base_url and call codex
@@ -55,14 +55,14 @@ class TestBuildNewCommand:
         assert cmd[-1] == "sys\n\ninitial"
 
     def test_workdir_has_no_effect(self):
-        cmd1 = agent.CODEX.build_new_command("sid", "sys", "initial", docker=True)
-        cmd2 = agent.CODEX.build_new_command("sid", "sys", "initial", docker=True, workdir="/w")
+        cmd1 = harness.CODEX.build_new_command("sid", "sys", "initial", docker=True)
+        cmd2 = harness.CODEX.build_new_command("sid", "sys", "initial", docker=True, workdir="/w")
         assert cmd1 == cmd2
 
     def test_docker_disables_update_check(self):
         # The interactive "Update available" prompt would otherwise block
         # resume launches while codex waits for the user to press enter.
-        cmd = agent.CODEX.build_new_command("sid", "sys", "initial", docker=True)
+        cmd = harness.CODEX.build_new_command("sid", "sys", "initial", docker=True)
         assert "check_for_update_on_startup=false" in cmd[2]
 
 
@@ -73,22 +73,22 @@ class TestBuildNewCommand:
 
 class TestBuildResumeCommand:
     def test_native_with_session_id_resumes(self):
-        cmd = agent.CODEX.build_resume_command("sid-123", "sys", "ctx")
+        cmd = harness.CODEX.build_resume_command("sid-123", "sys", "ctx")
         assert cmd == ["codex", "--dangerously-bypass-approvals-and-sandbox", "resume", "sid-123"]
 
     def test_native_without_session_id_falls_back_to_fresh_prompt(self):
         # Native + no sid is the defensive path (cli.py bails first).
-        cmd = agent.CODEX.build_resume_command("", "sys", "ctx")
+        cmd = harness.CODEX.build_resume_command("", "sys", "ctx")
         assert cmd == ["codex", "--dangerously-bypass-approvals-and-sandbox", "sys\n\nctx"]
 
     def test_docker_with_session_id_resumes(self):
-        cmd = agent.CODEX.build_resume_command("sid-123", "sys", "ctx", docker=True)
+        cmd = harness.CODEX.build_resume_command("sid-123", "sys", "ctx", docker=True)
         assert cmd[0] == "sh"
         assert "openai_base_url" in cmd[2]
         assert cmd[-2:] == ["resume", "sid-123"]
 
     def test_docker_without_session_id_uses_last(self):
-        cmd = agent.CODEX.build_resume_command("", "sys", "ctx", docker=True)
+        cmd = harness.CODEX.build_resume_command("", "sys", "ctx", docker=True)
         assert cmd[0] == "sh"
         assert cmd[-2:] == ["resume", "--last"]
 
@@ -100,7 +100,7 @@ class TestBuildResumeCommand:
 
 class TestBuildFinalizeCommand:
     def test_native_with_session_id_execs_resume(self):
-        cmd = agent.CODEX.build_finalize_command("sid-123", "sys", "wrap up")
+        cmd = harness.CODEX.build_finalize_command("sid-123", "sys", "wrap up")
         assert cmd == [
             "codex",
             "--dangerously-bypass-approvals-and-sandbox",
@@ -111,17 +111,17 @@ class TestBuildFinalizeCommand:
         ]
 
     def test_native_without_session_id_execs_fresh(self):
-        cmd = agent.CODEX.build_finalize_command("", "sys", "wrap up")
+        cmd = harness.CODEX.build_finalize_command("", "sys", "wrap up")
         assert cmd == ["codex", "--dangerously-bypass-approvals-and-sandbox", "exec", "wrap up"]
 
     def test_docker_with_session_id_execs_resume(self):
-        cmd = agent.CODEX.build_finalize_command("sid-123", "sys", "wrap up", docker=True)
+        cmd = harness.CODEX.build_finalize_command("sid-123", "sys", "wrap up", docker=True)
         assert cmd[0] == "sh"
         assert "openai_base_url" in cmd[2]
         assert cmd[-4:] == ["exec", "resume", "sid-123", "wrap up"]
 
     def test_docker_without_session_id_uses_last(self):
-        cmd = agent.CODEX.build_finalize_command("", "sys", "wrap up", docker=True)
+        cmd = harness.CODEX.build_finalize_command("", "sys", "wrap up", docker=True)
         assert cmd[0] == "sh"
         assert cmd[-4:] == ["exec", "resume", "--last", "wrap up"]
 
@@ -134,7 +134,7 @@ class TestBuildFinalizeCommand:
 class TestProxyEndpoints:
     def test_apikey_mode(self, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-        (endpoint,) = agent.CODEX.proxy_endpoints()
+        (endpoint,) = harness.CODEX.proxy_endpoints()
         assert endpoint.key == "default"
         assert endpoint.target_host == "api.openai.com"
         assert endpoint.path_prefix == ""
@@ -145,13 +145,13 @@ class TestProxyEndpoints:
         (home / ".codex" / "auth.json").write_text(
             json.dumps({"OPENAI_API_KEY": None, "tokens": {"access_token": "oauth-tok", "refresh_token": "r"}})
         )
-        (endpoint,) = agent.CODEX.proxy_endpoints()
+        (endpoint,) = harness.CODEX.proxy_endpoints()
         assert endpoint.target_host == "chatgpt.com"
         assert endpoint.path_prefix == "/backend-api/codex"
 
     def test_injects_bearer(self, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test-123")
-        (endpoint,) = agent.CODEX.proxy_endpoints()
+        (endpoint,) = harness.CODEX.proxy_endpoints()
         result = endpoint.header_mutator({})
         assert result.get("Authorization") == "Bearer sk-test-123"
         assert "x-api-key" not in {k.lower() for k in result}
@@ -159,11 +159,11 @@ class TestProxyEndpoints:
     def test_raises_when_no_credentials(self, monkeypatch):
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         with pytest.raises(RuntimeError, match="no API token found"):
-            agent.CODEX.proxy_endpoints()
+            harness.CODEX.proxy_endpoints()
 
     def test_strips_inbound_auth_headers(self, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "real-key")
-        (endpoint,) = agent.CODEX.proxy_endpoints()
+        (endpoint,) = harness.CODEX.proxy_endpoints()
         result = endpoint.header_mutator(
             {"x-api-key": "proxy-tok", "authorization": "Bearer proxy-tok", "content-type": "application/json"}
         )
@@ -183,7 +183,7 @@ class TestProxyEndpoints:
 class TestContainerEnv:
     def test_apikey_mode(self, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-        assert agent.CODEX.container_env(_EP, "tok", 9999) == {
+        assert harness.CODEX.container_env(_EP, "tok", 9999) == {
             "OPENAI_API_KEY": "tok",
             "OPENAI_BASE_URL": "http://host.docker.internal:9999/v1",
         }
@@ -194,7 +194,7 @@ class TestContainerEnv:
         (home / ".codex" / "auth.json").write_text(
             json.dumps({"OPENAI_API_KEY": None, "tokens": {"access_token": "oauth-tok", "refresh_token": "r"}})
         )
-        assert agent.CODEX.container_env(_EP, "tok", 9999) == {
+        assert harness.CODEX.container_env(_EP, "tok", 9999) == {
             "OPENAI_API_KEY": "tok",
             "OPENAI_BASE_URL": "http://host.docker.internal:9999",
         }
@@ -208,13 +208,13 @@ class TestContainerEnv:
 class TestDetectAuthSource:
     def test_env_var_returns_api_key(self, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-        assert agent.CodexBackend._detect_auth_source() == "API_KEY"
+        assert harness.CodexBackend._detect_auth_source() == "API_KEY"
 
     def test_auth_json_api_key_returns_api_key(self, home, monkeypatch):
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         (home / ".codex").mkdir()
         (home / ".codex" / "auth.json").write_text(json.dumps({"OPENAI_API_KEY": "sk-file", "tokens": None}))
-        assert agent.CodexBackend._detect_auth_source() == "API_KEY"
+        assert harness.CodexBackend._detect_auth_source() == "API_KEY"
 
     def test_auth_json_oauth_returns_oauth(self, home, monkeypatch):
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -222,11 +222,11 @@ class TestDetectAuthSource:
         (home / ".codex" / "auth.json").write_text(
             json.dumps({"OPENAI_API_KEY": None, "tokens": {"access_token": "oauth-tok", "refresh_token": "r"}})
         )
-        assert agent.CodexBackend._detect_auth_source() == "OAUTH"
+        assert harness.CodexBackend._detect_auth_source() == "OAUTH"
 
     def test_no_credentials_returns_none(self, monkeypatch):
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        assert agent.CodexBackend._detect_auth_source() is None
+        assert harness.CodexBackend._detect_auth_source() is None
 
     def test_env_var_takes_priority_over_oauth(self, home, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
@@ -234,7 +234,7 @@ class TestDetectAuthSource:
         (home / ".codex" / "auth.json").write_text(
             json.dumps({"OPENAI_API_KEY": None, "tokens": {"access_token": "oauth-tok", "refresh_token": "r"}})
         )
-        assert agent.CodexBackend._detect_auth_source() == "API_KEY"
+        assert harness.CodexBackend._detect_auth_source() == "API_KEY"
 
     def test_chatgpt_auth_mode_ignores_env_var(self, home, monkeypatch):
         # auth_mode="chatgpt" means the user explicitly logged in via OAuth —
@@ -244,7 +244,7 @@ class TestDetectAuthSource:
         (home / ".codex" / "auth.json").write_text(
             json.dumps({"auth_mode": "chatgpt", "OPENAI_API_KEY": None, "tokens": {"access_token": "oauth-tok"}})
         )
-        assert agent.CodexBackend._detect_auth_source() == "OAUTH"
+        assert harness.CodexBackend._detect_auth_source() == "OAUTH"
 
     def test_oauth_auth_mode_ignores_env_var(self, home, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "sk-stale")
@@ -252,7 +252,7 @@ class TestDetectAuthSource:
         (home / ".codex" / "auth.json").write_text(
             json.dumps({"auth_mode": "oauth", "OPENAI_API_KEY": None, "tokens": {"access_token": "oauth-tok"}})
         )
-        assert agent.CodexBackend._detect_auth_source() == "OAUTH"
+        assert harness.CodexBackend._detect_auth_source() == "OAUTH"
 
     def test_chatgpt_auth_mode_no_tokens_returns_none(self, home, monkeypatch):
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -260,7 +260,7 @@ class TestDetectAuthSource:
         (home / ".codex" / "auth.json").write_text(
             json.dumps({"auth_mode": "chatgpt", "OPENAI_API_KEY": None, "tokens": None})
         )
-        assert agent.CodexBackend._detect_auth_source() is None
+        assert harness.CodexBackend._detect_auth_source() is None
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +271,7 @@ class TestDetectAuthSource:
 class TestOnNewTask:
     def test_is_noop(self, tmp_path):
         session_dir = tmp_path / "session"
-        agent.CODEX.on_new_task(session_dir)  # should not raise or create files
+        harness.CODEX.on_new_task(session_dir)  # should not raise or create files
         assert not session_dir.exists()
 
 
@@ -288,14 +288,14 @@ class TestOnBeforeContainerStart:
     def test_is_noop(self, home, tmp_path):
         session_dir = tmp_path / "session"
         session_dir.mkdir()
-        agent.CODEX.on_before_container_start(session_dir, "proxy-tok", "/workdir")
+        harness.CODEX.on_before_container_start(session_dir, "proxy-tok", "/workdir")
         assert list(session_dir.iterdir()) == []
 
     def test_is_noop_with_custom_provider(self, home, tmp_path):
         _make_custom_provider_config(home)
         session_dir = tmp_path / "session"
         session_dir.mkdir()
-        agent.CODEX.on_before_container_start(session_dir, "proxy-tok", "/workdir")
+        harness.CODEX.on_before_container_start(session_dir, "proxy-tok", "/workdir")
         assert list(session_dir.iterdir()) == []
 
 
@@ -312,16 +312,16 @@ class TestConstructMounts:
     def test_volume_always_present(self, home, tmp_path):
         """The ~/.codex/ seeded volume is always returned — independent
         of host file existence."""
-        mounts = agent.CODEX.construct_mounts(tmp_path)
+        mounts = harness.CODEX.construct_mounts(tmp_path)
         by_dst = _kinds_by_dst(mounts)
-        v = by_dst[f"{agent.CONTAINER_HOME}/.codex"]
+        v = by_dst[f"{harness.CONTAINER_HOME}/.codex"]
         assert isinstance(v, mount.VolumeMount)
         assert v.name == "codex-dir"
         assert v.is_file is False
-        assert v.seed is agent.CodexBackend._seed_codex_dir
+        assert v.seed is harness.CodexBackend._seed_codex_dir
 
     def test_no_binds_when_host_missing(self, home, tmp_path):
-        mounts = agent.CODEX.construct_mounts(tmp_path)
+        mounts = harness.CODEX.construct_mounts(tmp_path)
         assert all(isinstance(m, mount.VolumeMount) for m in mounts)
 
     def test_user_config_paths_bind_rw_when_present(self, home, tmp_path):
@@ -337,10 +337,10 @@ class TestConstructMounts:
         (home / ".codex" / "AGENTS.md").write_text("# global\n")
         for name in ("memories", "skills", "prompts"):
             (home / ".codex" / name).mkdir()
-        mounts = agent.CODEX.construct_mounts(tmp_path)
+        mounts = harness.CODEX.construct_mounts(tmp_path)
         by_dst = _kinds_by_dst(mounts)
         for name in ("AGENTS.md", "memories", "skills", "prompts"):
-            m = by_dst[f"{agent.CONTAINER_HOME}/.codex/{name}"]
+            m = by_dst[f"{harness.CONTAINER_HOME}/.codex/{name}"]
             assert isinstance(m, mount.BindMount)
             assert m.mode == "RW"
             assert m.src == home / ".codex" / name
@@ -354,18 +354,18 @@ class TestConstructMounts:
         (home / ".codex").mkdir()
         (home / ".codex" / "config.toml").write_text("")
         (home / ".codex" / "models_cache.json").write_text("{}")
-        mounts = agent.CODEX.construct_mounts(tmp_path)
+        mounts = harness.CODEX.construct_mounts(tmp_path)
         by_dst = _kinds_by_dst(mounts)
         for name in ("config.toml", "models_cache.json"):
-            assert f"{agent.CONTAINER_HOME}/.codex/{name}" not in by_dst
+            assert f"{harness.CONTAINER_HOME}/.codex/{name}" not in by_dst
 
     def test_model_catalog_binds_ro_when_present(self, home, tmp_path):
         """Read-only in codex (it is the target of model_catalog_json),
         so no rename ever lands on it."""
         (home / ".codex").mkdir()
         (home / ".codex" / "model-catalog.json").write_text("{}")
-        mounts = agent.CODEX.construct_mounts(tmp_path)
-        m = _kinds_by_dst(mounts)[f"{agent.CONTAINER_HOME}/.codex/model-catalog.json"]
+        mounts = harness.CODEX.construct_mounts(tmp_path)
+        m = _kinds_by_dst(mounts)[f"{harness.CONTAINER_HOME}/.codex/model-catalog.json"]
         assert isinstance(m, mount.BindMount)
         assert m.mode == "RO"
         assert m.src == home / ".codex" / "model-catalog.json"
@@ -385,16 +385,16 @@ class TestSeedCodexDir:
         )
 
     def test_returns_auth_json_and_config_toml(self, home):
-        out = agent.CodexBackend._seed_codex_dir(self._ctx())
+        out = harness.CodexBackend._seed_codex_dir(self._ctx())
         assert set(out.keys()) == {"auth.json", "config.toml"}
 
     def test_seeded_config_is_valid_toml_and_trusts_workdir(self, home):
-        out = agent.CodexBackend._seed_codex_dir(self._ctx())
+        out = harness.CodexBackend._seed_codex_dir(self._ctx())
         data = tomllib.loads(out["config.toml"].decode())
         assert data["projects"]["/workspace"]["trust_level"] == "trusted"
 
     def test_auth_json_uses_proxy_token(self, home):
-        out = agent.CodexBackend._seed_codex_dir(self._ctx(token="my-proxy-123"))
+        out = harness.CodexBackend._seed_codex_dir(self._ctx(token="my-proxy-123"))
         data = json.loads(out["auth.json"])
         assert data == {"auth_mode": "apikey", "OPENAI_API_KEY": "my-proxy-123", "tokens": None}
 
@@ -414,7 +414,7 @@ class TestSeedCodexDir:
                 }
             )
         )
-        out = agent.CodexBackend._seed_codex_dir(self._ctx(token="proxy-tok"))
+        out = harness.CodexBackend._seed_codex_dir(self._ctx(token="proxy-tok"))
         data = json.loads(out["auth.json"])
         assert data["auth_mode"] == "apikey"
         assert data["OPENAI_API_KEY"] == "proxy-tok"
@@ -428,7 +428,7 @@ class TestSeedCodexDir:
 
 class TestOnBeforeLaunch:
     def test_is_noop(self, tmp_path):
-        agent.CODEX.on_before_launch(tmp_path)  # should not raise
+        harness.CODEX.on_before_launch(tmp_path)  # should not raise
 
 
 # ---------------------------------------------------------------------------
@@ -438,7 +438,7 @@ class TestOnBeforeLaunch:
 
 class TestDockerfileInstall:
     def test_dockerfile_install(self):
-        snippet = agent.CODEX.dockerfile_install
+        snippet = harness.CODEX.dockerfile_install
         assert "npm" in snippet
         assert "@openai/codex" in snippet
 
@@ -451,7 +451,7 @@ class TestDockerfileInstall:
 class TestFormatImageReference:
     def test_returns_raw_absolute_path(self):
         # Codex's TUI composer accepts a bare absolute path — no markup needed.
-        assert agent.CODEX.format_image_reference(Path("/tmp/clip.png")) == "/tmp/clip.png"
+        assert harness.CODEX.format_image_reference(Path("/tmp/clip.png")) == "/tmp/clip.png"
 
 
 # ---------------------------------------------------------------------------
@@ -489,11 +489,11 @@ experimental_bearer_token = "{bearer}"
 
 class TestReadCustomProvider:
     def test_none_when_no_config(self, home):
-        assert agent.CodexBackend._read_custom_provider() is None
+        assert harness.CodexBackend._read_custom_provider() is None
 
     def test_returns_tuple_when_active_provider_has_bearer(self, home):
         _make_custom_provider_config(home)
-        assert agent.CodexBackend._read_custom_provider() == (
+        assert harness.CodexBackend._read_custom_provider() == (
             "dev-adapter",
             "https://adapter.example.com/v1",
             "real-bearer-1234",
@@ -507,7 +507,7 @@ class TestReadCustomProvider:
 base_url = "https://api.openai.com/v1"
 """
         )
-        assert agent.CodexBackend._read_custom_provider() is None
+        assert harness.CodexBackend._read_custom_provider() is None
 
     @pytest.mark.parametrize("bad_name", ["dev adapter", 'dev"adapter', "dev$adapter", ""])
     def test_invalid_provider_name_rejected(self, home, bad_name):
@@ -519,7 +519,7 @@ base_url = "https://api.openai.com/v1"
             )
         else:
             _make_custom_provider_config(home, provider=bad_name)
-        assert agent.CodexBackend._read_custom_provider() is None
+        assert harness.CodexBackend._read_custom_provider() is None
 
     @pytest.mark.parametrize(
         "bad_path",
@@ -535,7 +535,7 @@ base_url = "https://api.openai.com/v1"
         break the _DOCKER_WRAPPER shell quoting is treated as
         not-configured (same as a malformed provider name)."""
         _make_custom_provider_config(home, base_url=f"https://adapter.example.com{bad_path}")
-        assert agent.CodexBackend._read_custom_provider() is None
+        assert harness.CodexBackend._read_custom_provider() is None
 
     def test_non_utf8_config_does_not_crash(self, home):
         """A non-UTF-8 byte in the host config.toml must not raise an
@@ -545,7 +545,7 @@ base_url = "https://api.openai.com/v1"
         # 0xFF is invalid as a stand-alone byte in UTF-8.
         (home / ".codex" / "config.toml").write_bytes(b'model_provider = "openai"\n# \xff invalid utf-8\n')
         # Must return None, not propagate UnicodeDecodeError.
-        assert agent.CodexBackend._read_custom_provider() is None
+        assert harness.CodexBackend._read_custom_provider() is None
 
 
 class TestCustomProviderProxyEndpoints:
@@ -557,14 +557,14 @@ class TestCustomProviderProxyEndpoints:
         TLS validation uses the OS trust store (see proxy.api_server),
         so no CA-bundle kwarg is needed here."""
         _make_custom_provider_config(home)
-        (endpoint,) = agent.CODEX.proxy_endpoints()
+        (endpoint,) = harness.CODEX.proxy_endpoints()
         assert endpoint.target_host == "adapter.example.com"
 
     def test_http_base_url_works(self, home):
         """Plain-HTTP providers don't need TLS validation either way —
         same code path, no extra config."""
         _make_custom_provider_config(home, base_url="http://localhost:8000/v1")
-        (endpoint,) = agent.CODEX.proxy_endpoints()
+        (endpoint,) = harness.CODEX.proxy_endpoints()
         assert endpoint.target_host == "localhost:8000"
 
     def test_custom_provider_wins_over_oauth(self, home):
@@ -575,20 +575,20 @@ class TestCustomProviderProxyEndpoints:
         (home / ".codex" / "auth.json").write_text(
             json.dumps({"auth_mode": "chatgpt", "tokens": {"access_token": "oauth-tok"}})
         )
-        (endpoint,) = agent.CODEX.proxy_endpoints()
+        (endpoint,) = harness.CODEX.proxy_endpoints()
         assert endpoint.target_host == "adapter.example.com"
 
     def test_injects_bearer_from_config(self, home, monkeypatch):
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         _make_custom_provider_config(home, bearer="real-bearer-1234")
-        (endpoint,) = agent.CODEX.proxy_endpoints()
+        (endpoint,) = harness.CODEX.proxy_endpoints()
         result = endpoint.header_mutator({})
         assert result.get("Authorization") == "Bearer real-bearer-1234"
 
     def test_strips_inbound_auth_headers(self, home, monkeypatch):
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         _make_custom_provider_config(home, bearer="real-bearer-1234")
-        (endpoint,) = agent.CODEX.proxy_endpoints()
+        (endpoint,) = harness.CODEX.proxy_endpoints()
         result = endpoint.header_mutator(
             {"x-api-key": "proxy-tok", "authorization": "Bearer proxy-tok", "content-type": "application/json"}
         )
@@ -602,7 +602,7 @@ class TestCustomProviderProxyEndpoints:
     def test_refresh_kwarg_is_noop(self, home, monkeypatch):
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         _make_custom_provider_config(home, bearer="real-bearer-1234")
-        (endpoint,) = agent.CODEX.proxy_endpoints()
+        (endpoint,) = harness.CODEX.proxy_endpoints()
         # refresh=True must not raise (no kubectl, no internal lookup)
         assert endpoint.header_mutator({}, refresh=True).get("Authorization") == "Bearer real-bearer-1234"
 
@@ -610,7 +610,7 @@ class TestCustomProviderProxyEndpoints:
 class TestCustomProviderContainerEnv:
     def test_returns_expected_env(self, home):
         _make_custom_provider_config(home)
-        env = agent.CODEX.container_env(_EP, "proxy-tok", 9999)
+        env = harness.CODEX.container_env(_EP, "proxy-tok", 9999)
         assert env == {
             "OPENAI_API_KEY": "proxy-tok",
             "OPENAI_BASE_URL": "http://host.docker.internal:9999/v1",
@@ -619,13 +619,13 @@ class TestCustomProviderContainerEnv:
 
     def test_empty_path_when_base_url_has_no_path(self, home):
         _make_custom_provider_config(home, base_url="https://adapter.example.com")
-        env = agent.CODEX.container_env(_EP, "proxy-tok", 9999)
+        env = harness.CODEX.container_env(_EP, "proxy-tok", 9999)
         assert env["OPENAI_BASE_URL"] == "http://host.docker.internal:9999"
 
 
 class TestCustomProviderDockerWrapper:
     def test_wrapper_contains_both_branches(self):
-        wrapper = agent.CodexBackend._DOCKER_WRAPPER
+        wrapper = harness.CodexBackend._DOCKER_WRAPPER
         # Custom-provider branch
         assert "HATCHERY_CODEX_PROVIDER" in wrapper
         assert "model_providers.${HATCHERY_CODEX_PROVIDER}.base_url" in wrapper
@@ -636,7 +636,7 @@ class TestCustomProviderDockerWrapper:
     def test_pins_model_provider(self):
         """Provider selection must not depend on what codex later
         rewrites into its own copy of config.toml."""
-        assert 'model_provider=\\"${HATCHERY_CODEX_PROVIDER}\\"' in agent.CodexBackend._DOCKER_WRAPPER
+        assert 'model_provider=\\"${HATCHERY_CODEX_PROVIDER}\\"' in harness.CodexBackend._DOCKER_WRAPPER
 
 
 class TestCustomProviderConstructMounts:
@@ -644,7 +644,7 @@ class TestCustomProviderConstructMounts:
         _make_custom_provider_config(home)
         # Host config.toml exists (written by _make_custom_provider_config), so the
         # non-custom-provider path would have bind-mounted it RW.
-        mounts = agent.CODEX.construct_mounts(tmp_path)
+        mounts = harness.CODEX.construct_mounts(tmp_path)
         bind_srcs = {str(m.src) for m in mounts if isinstance(m, mount.BindMount) and m.mode == "RW"}
         # No RW bind from the host config.toml — it contains the real bearer.
         assert str(home / ".codex" / "config.toml") not in bind_srcs
@@ -653,17 +653,17 @@ class TestCustomProviderConstructMounts:
         """The container-side config is seeded into the volume, never
         mounted — a mount point cannot receive codex's atomic rename."""
         _make_custom_provider_config(home)
-        mounts = agent.CODEX.construct_mounts(tmp_path)
-        assert not [m for m in mounts if m.dst == f"{agent.CONTAINER_HOME}/.codex/config.toml"]
+        mounts = harness.CODEX.construct_mounts(tmp_path)
+        assert not [m for m in mounts if m.dst == f"{harness.CONTAINER_HOME}/.codex/config.toml"]
 
     def test_includes_catalog_when_present(self, home, tmp_path):
         _make_custom_provider_config(home)
         (home / ".codex" / "model-catalog.json").write_text('{"models": []}')
-        mounts = agent.CODEX.construct_mounts(tmp_path)
+        mounts = harness.CODEX.construct_mounts(tmp_path)
         catalog = [
             m
             for m in mounts
-            if isinstance(m, mount.BindMount) and m.dst == f"{agent.CONTAINER_HOME}/.codex/model-catalog.json"
+            if isinstance(m, mount.BindMount) and m.dst == f"{harness.CONTAINER_HOME}/.codex/model-catalog.json"
         ]
         assert len(catalog) == 1
         assert catalog[0].mode == "RO"
@@ -675,13 +675,13 @@ class TestCustomProviderConstructMounts:
 
 
 def _render(workdir="/workdir", token="proxy-tok"):
-    return tomllib.loads(agent.CodexBackend._render_container_config(token, workdir))
+    return tomllib.loads(harness.CodexBackend._render_container_config(token, workdir))
 
 
 class TestRenderContainerConfigCustomProvider:
     def test_scrubs_real_bearer_and_base_url(self, home):
         _make_custom_provider_config(home, bearer="real-bearer-NEVER-IN-CONTAINER")
-        raw = agent.CodexBackend._render_container_config("proxy-tok-XYZ", "/workdir")
+        raw = harness.CodexBackend._render_container_config("proxy-tok-XYZ", "/workdir")
         # Critical: the real bearer must NEVER appear in the file.
         assert "real-bearer-NEVER-IN-CONTAINER" not in raw
         assert "adapter.example.com" not in raw
@@ -706,7 +706,7 @@ class TestRenderContainerConfigCustomProvider:
             f.write('\n[model_providers.other]\nbase_url = "https://other.example.com/v1"\n')
             f.write('experimental_bearer_token = "other-real-bearer"\n')
         codex_backend._host_config_data.cache_clear()
-        raw = agent.CodexBackend._render_container_config("proxy-tok", "/workdir")
+        raw = harness.CodexBackend._render_container_config("proxy-tok", "/workdir")
         assert "other-real-bearer" not in raw
         assert "other.example.com" not in raw
 
@@ -715,7 +715,7 @@ class TestRenderContainerConfigCustomProvider:
         assert "model_catalog_json" not in _render()
 
         (home / ".codex" / "model-catalog.json").write_text('{"models": []}')
-        assert _render()["model_catalog_json"] == f"{agent.CONTAINER_HOME}/.codex/model-catalog.json"
+        assert _render()["model_catalog_json"] == f"{harness.CONTAINER_HOME}/.codex/model-catalog.json"
 
     def test_host_catalog_path_is_dropped_when_file_missing(self, home):
         """A host path that doesn't exist in the container would only
@@ -802,7 +802,7 @@ class TestRenderContainerConfigPurity:
         """``_host_config_data`` is process-cached and shared with
         ``_read_custom_provider`` / ``container_env``."""
         _make_custom_provider_config(home, bearer="real-bearer-1234")
-        agent.CodexBackend._render_container_config("proxy-tok", "/workdir")
+        harness.CodexBackend._render_container_config("proxy-tok", "/workdir")
         cached = codex_backend._host_config_data()
         assert cached["model_providers"]["dev-adapter"]["experimental_bearer_token"] == "real-bearer-1234"
         assert cached["model_providers"]["dev-adapter"]["base_url"] == "https://adapter.example.com/v1"
@@ -820,7 +820,7 @@ def _meta(**overrides) -> SessionMeta:
         name=overrides.pop("name", "t"),
         repo=overrides.pop("repo", "/repo"),
         worktree=overrides.pop("worktree", "/wt"),
-        agent="CODEX",
+        harness="CODEX",
         **overrides,
     )
 
@@ -1027,7 +1027,7 @@ class TestProbeSessionIdDocker:
 class TestBackgroundThreads:
     def test_returns_poller_when_no_session_id(self):
         stop = threading.Event()
-        workers = agent.CODEX.background_threads(
+        workers = harness.CODEX.background_threads(
             _meta(), docker=False, runtime=None, launch_start=time.time(), stop=stop
         )
         assert len(workers) == 1
@@ -1037,7 +1037,7 @@ class TestBackgroundThreads:
         # Poller runs unconditionally — on resume, codex may write a new
         # rollout for the resumed thread and we need to capture it.
         stop = threading.Event()
-        workers = agent.CODEX.background_threads(
+        workers = harness.CODEX.background_threads(
             _meta(session_id="019f1e3e-d5ff-7ce0-801b-28a905c7d3ed"),
             docker=False,
             runtime=None,
@@ -1047,7 +1047,7 @@ class TestBackgroundThreads:
         assert len(workers) == 1
 
     def test_session_id_pre_generated_flag(self):
-        assert agent.CODEX.session_id_pre_generated is False
+        assert harness.CODEX.session_id_pre_generated is False
 
     def test_poller_persists_on_capture(self, fake_tasks_db, tmp_path):
         # Write a valid meta so sessions.save() works.
@@ -1066,7 +1066,7 @@ class TestBackgroundThreads:
 
         stop = threading.Event()
         with patch.object(codex_backend, "_probe_session_id", side_effect=fake_probe):
-            workers = agent.CODEX.background_threads(
+            workers = harness.CODEX.background_threads(
                 meta, docker=False, runtime=None, launch_start=time.time(), stop=stop
             )
             assert len(workers) == 1
@@ -1085,7 +1085,7 @@ class TestBackgroundThreads:
         meta = _meta()
         stop = threading.Event()
         with patch.object(codex_backend, "_probe_session_id", return_value=None):
-            workers = agent.CODEX.background_threads(
+            workers = harness.CODEX.background_threads(
                 meta, docker=False, runtime=None, launch_start=time.time(), stop=stop
             )
             t = threading.Thread(target=workers[0])
@@ -1113,7 +1113,7 @@ class TestBackgroundThreads:
 
         stop = threading.Event()
         with patch.object(codex_backend, "_probe_session_id", side_effect=fake_probe):
-            workers = agent.CODEX.background_threads(
+            workers = harness.CODEX.background_threads(
                 meta, docker=False, runtime=None, launch_start=time.time(), stop=stop
             )
             t = threading.Thread(target=workers[0])

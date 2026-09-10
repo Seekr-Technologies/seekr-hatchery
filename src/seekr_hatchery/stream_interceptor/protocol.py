@@ -20,7 +20,7 @@ class StreamInterceptor(Protocol):
     """
 
     def on_stdin(self, chunk: bytes) -> bytes:  # user → agent
-        """Transform a stdin chunk on its way to the agent."""
+        """Transform a stdin chunk on its way to the harness."""
         return chunk
 
     def on_stdout(self, chunk: bytes) -> bytes:  # agent → user

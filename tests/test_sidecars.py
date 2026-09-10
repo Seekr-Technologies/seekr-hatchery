@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from seekr_hatchery.agents import CONTAINER_HOME, ProxyEndpoint
+from seekr_hatchery.harnesses import CONTAINER_HOME, ProxyEndpoint
 from seekr_hatchery.models import KubectlConfig
 from seekr_hatchery.mount import BindMount
 from seekr_hatchery.sidecars import base

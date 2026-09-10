@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from seekr_hatchery.agents.agent_backend import CONTAINER_HOME, AgentBackend, ProxyEndpoint
+from seekr_hatchery.harnesses.harness_backend import CONTAINER_HOME, HarnessBackend, ProxyEndpoint
 from seekr_hatchery.locks import hatchery_lock
 from seekr_hatchery.mount import BindMount, Mount, VolumeMount
 
@@ -220,7 +220,7 @@ def _build_injection_mutator(
     return _mutate
 
 
-class PiBackend(AgentBackend):
+class PiBackend(HarnessBackend):
     kind = "PI"
     binary = "pi"
     supports_sessions = True

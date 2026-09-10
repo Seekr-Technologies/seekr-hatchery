@@ -17,9 +17,9 @@ from typing import Literal
 import click
 from click.shell_completion import CompletionItem
 
-import seekr_hatchery.agents as agent
 import seekr_hatchery.docker as docker
 import seekr_hatchery.git as git
+import seekr_hatchery.harnesses as harness
 import seekr_hatchery.logging_ as logging_
 import seekr_hatchery.repo_config as repo_config
 import seekr_hatchery.seeded_volumes as seeded_volumes
@@ -33,8 +33,8 @@ from seekr_hatchery.utils import open_for_editing
 
 logger = logging.getLogger(__name__)
 
-# Valid agent choices derived from the single source of truth in agents/__init__.py
-AGENT_CHOICES: list[str] = [b.kind.lower() for b in agent.ALL_BACKENDS]
+# Valid harness choices derived from the single source of truth in harnesses/__init__.py
+HARNESS_CHOICES: list[str] = [b.kind.lower() for b in harness.ALL_BACKENDS]
 
 try:
     _version = importlib.metadata.version("seekr-hatchery")
@@ -199,7 +199,7 @@ def _launch(
     meta: sessions.SessionMeta,
     *,
     kind: Literal["new", "resume", "finalize"],
-    backend: agent.AgentBackend,
+    backend: harness.HarnessBackend,
     runtime: docker.ContainerRuntime | None,
     main_branch: str,
     session_id: str,
@@ -282,7 +282,7 @@ def _post_exit_check(
         if not meta.session_id:
             ui.error("no session ID found. Cannot relaunch.")
             return
-        backend = agent.from_kind(meta.agent)
+        backend = harness.from_kind(meta.harness)
         runtime = docker.resolve_runtime(meta.hatchery_dir, no_docker=not sandbox, backend=backend)
         main_branch = git.get_default_branch(repo)
         include_repos = load_include_entries({"include": meta.include})
@@ -447,6 +447,16 @@ def cli(log_level: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_harness_option(harness_name: str | None, deprecated_agent_name: str | None) -> str | None:
+    """Return the canonical harness option, warning for the deprecated alias."""
+    if deprecated_agent_name is None:
+        return harness_name
+    if harness_name is not None:
+        raise click.UsageError("Use either --harness or its deprecated alias --agent, not both.")
+    ui.warn("--agent is deprecated; use --harness instead.")
+    return deprecated_agent_name
+
+
 @cli.command("new")
 @click.argument("name")
 @click.option(
@@ -475,11 +485,18 @@ def cli(log_level: str) -> None:
 )
 @click.option("--editor/--no-editor", default=None, help="Open $EDITOR for the task file (default: from config)")
 @click.option(
-    "--agent",
-    "agent_name",
+    "--harness",
+    "harness_name",
     default=None,
-    type=click.Choice(AGENT_CHOICES, case_sensitive=False),
-    help="Agent to use (auto-detected if not specified)",
+    type=click.Choice(HARNESS_CHOICES, case_sensitive=False),
+    help="Harness to use (auto-detected if not specified)",
+)
+@click.option(
+    "--agent",
+    "deprecated_agent_name",
+    default=None,
+    type=click.Choice(HARNESS_CHOICES, case_sensitive=False),
+    help="Deprecated alias for --harness",
 )
 @click.option(
     "--rebuild-sandbox",
@@ -541,7 +558,8 @@ def cmd_new(
     no_docker: bool,
     no_worktree: bool,
     editor: bool | None,
-    agent_name: str,
+    harness_name: str | None,
+    deprecated_agent_name: str | None,
     rebuild_sandbox: bool,
     include: tuple[Path, ...],
     include_rw: tuple[Path, ...],
@@ -556,7 +574,7 @@ def cmd_new(
         ui.note("not in a git repository — running without worktree isolation.")
 
     cfg = user_config.UserConfig.load()
-    backend = cfg.resolve_backend(agent_name)
+    backend = cfg.resolve_harness(_resolve_harness_option(harness_name, deprecated_agent_name))
     use_editor = editor if editor is not None else cfg.open_editor
     no_commit = repo_config.resolve_no_commit(repo, cfg, commit)
 
@@ -622,11 +640,18 @@ def cmd_new(
 @cli.command("chat")
 @click.argument("name", required=False, default=None, type=TASK_NAME)
 @click.option(
-    "--agent",
-    "agent_name",
+    "--harness",
+    "harness_name",
     default=None,
-    type=click.Choice(AGENT_CHOICES, case_sensitive=False),
-    help="Agent to use (auto-detected if not specified)",
+    type=click.Choice(HARNESS_CHOICES, case_sensitive=False),
+    help="Harness to use (auto-detected if not specified)",
+)
+@click.option(
+    "--agent",
+    "deprecated_agent_name",
+    default=None,
+    type=click.Choice(HARNESS_CHOICES, case_sensitive=False),
+    help="Deprecated alias for --harness",
 )
 @click.option(
     "--commit/--no-commit",
@@ -638,7 +663,9 @@ def cmd_new(
         "Use --no-commit to skip all hatchery commits."
     ),
 )
-def cmd_chat(name: str | None, agent_name: str, commit: bool | None) -> None:
+def cmd_chat(
+    name: str | None, harness_name: str | None, deprecated_agent_name: str | None, commit: bool | None
+) -> None:
     """Start a free-form chat session in a sandbox."""
     ui.hatchery_header(_version)
     repo, in_repo = git.git_root_or_cwd()
@@ -646,7 +673,7 @@ def cmd_chat(name: str | None, agent_name: str, commit: bool | None) -> None:
         ui.note("not in a git repository — running without worktree isolation.")
 
     cfg = user_config.UserConfig.load()
-    backend = cfg.resolve_backend(agent_name)
+    backend = cfg.resolve_harness(_resolve_harness_option(harness_name, deprecated_agent_name))
     no_commit = repo_config.resolve_no_commit(repo, cfg, commit)
 
     name = sessions.next_chat_name(repo) if name is None else utils.to_name(name)
@@ -756,7 +783,7 @@ def cmd_resume(
     meta = sessions.load(repo, name)
     repo = meta.repo_path
 
-    backend = agent.from_kind(meta.agent)
+    backend = harness.from_kind(meta.harness)
 
     # Capture pre-recovery status: restore_worktree_if_needed() flips it to
     # "in-progress" in-place when it recreates the worktree, which would
@@ -828,7 +855,7 @@ def cmd_sandbox(shell: str, rebuild_sandbox: bool, commit: bool | None) -> None:
     """Drop into an interactive shell inside the Docker sandbox."""
     repo, in_repo = git.git_root_or_cwd()
     cfg = user_config.UserConfig.load()
-    backend = cfg.resolve_backend(None)
+    backend = cfg.resolve_harness(None)
     no_commit = repo_config.resolve_no_commit(repo, cfg, commit)
 
     hdir = sessions.prepare_sandbox(repo, in_repo=in_repo, backend=backend, no_commit=no_commit)
@@ -939,7 +966,7 @@ def cmd_status(name: str) -> None:
     click.echo(click.style("Name:     ", bold=True) + meta.name)
     click.echo(click.style("Type:     ", bold=True) + meta.type)
     click.echo(click.style("Status:   ", bold=True) + meta.status)
-    click.echo(click.style("Agent:    ", bold=True) + meta.agent.lower())
+    click.echo(click.style("Harness:  ", bold=True) + meta.harness.lower())
     click.echo(click.style("Branch:   ", bold=True) + meta.branch)
     click.echo(click.style("Worktree: ", bold=True) + meta.worktree)
     click.echo(click.style("Created:  ", bold=True) + (meta.created or "unknown")[:16])

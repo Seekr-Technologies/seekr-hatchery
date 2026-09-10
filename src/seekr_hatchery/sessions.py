@@ -34,8 +34,8 @@ from seekr_hatchery.models import SCHEMA_VERSION, SessionMeta
 from seekr_hatchery.utils import open_for_editing, repo_id, run, to_name
 
 if TYPE_CHECKING:
-    from seekr_hatchery.agents.agent_backend import AgentBackend
     from seekr_hatchery.docker import ContainerRuntime
+    from seekr_hatchery.harnesses.harness_backend import HarnessBackend
 
 logger = logging.getLogger(__name__)
 
@@ -299,7 +299,7 @@ def session_prompt(meta: SessionMeta, extra_note: str = "") -> str:
     explaining the situation so the agent can recover rather than crashing.
 
     *extra_note* is prepended verbatim when non-empty — used to surface other
-    degraded-state notes (e.g. "branch was recreated") to the agent.
+    degraded-state notes (e.g. "branch was recreated") to the harness.
     """
     tasks_dir = meta.task_dir
     task_path = find_task_file(tasks_dir, meta.name)
@@ -510,6 +510,12 @@ def _migrate(meta: dict) -> dict:
         meta["schema_version"] = 1
         v = 1
 
+    # v1 -> v2: agent selection is now called a harness.
+    if v == 1:
+        if "agent" in meta:
+            meta["harness"] = meta.pop("agent")
+        meta["schema_version"] = 2
+
     return meta
 
 
@@ -574,7 +580,7 @@ def _mint_proxy_token() -> str:
     client-side if the string isn't a well-formed 3-segment JWT. Shaping the
     token this way lets that check pass; the embedded account id is a dummy
     ("hatchery") that gets overwritten host-side by the real OAuth token's
-    claim once the request reaches the proxy (see agents/pi.py's
+    claim once the request reaches the proxy (see harnesses/pi.py's
     ``_chatgpt_account_id``/header mutator). The third segment — a
     uuid4 hex, not a real signature — carries the actual entropy and is
     what the proxy's exact-string token check validates against.
@@ -664,7 +670,7 @@ def _resolve_recreate_base(repo: Path, branch: str) -> tuple[str, bool, bool]:
     Returns ``(base_ref, branch_was_missing, remote_check_failed)``.
     ``branch_was_missing`` is True iff neither (1) nor (2) applied — i.e. we
     couldn't find prior work for *branch* anywhere and the caller should
-    warn the agent. ``remote_check_failed`` is True iff we fell through to a
+    warn the harness. ``remote_check_failed`` is True iff we fell through to a
     fallback tier *and* couldn't actually verify absence on origin because
     ``fetch_remote`` failed (network/auth issue) — in that case "missing on
     origin" is unconfirmed, not established, and the caller should warn
@@ -773,7 +779,7 @@ def restore_worktree_if_needed(
 
 def restore_dockerfile_if_needed(
     meta: SessionMeta,
-    backend: "AgentBackend",
+    backend: "HarnessBackend",
     *,
     no_docker: bool,
 ) -> None:
@@ -789,8 +795,8 @@ def restore_dockerfile_if_needed(
     if no_docker:
         return
     hdir = meta.hatchery_dir
-    agent_df = docker.dockerfile_path(hdir, backend)
-    if agent_df.exists():
+    harness_df = docker.existing_dockerfile_path(hdir, backend)
+    if harness_df.exists():
         return
     if meta.no_commit:
         ui.note("Dockerfile missing — restoring.")
@@ -993,7 +999,7 @@ def _check_not_in_progress(repo: Path, name: str, *, label: str = "session") -> 
         sys.exit(1)
 
 
-def _commit_docker_files(backend: "AgentBackend", worktree: Path) -> None:
+def _commit_docker_files(backend: "HarnessBackend", worktree: Path) -> None:
     """Stage and commit any newly created Docker scaffolding files."""
     ui.info("  Committing...")
     hdir = worktree / ".hatchery"
@@ -1121,7 +1127,7 @@ def create(
     name: str,
     repo: Path,
     type: Literal["task", "chat"],
-    backend: "AgentBackend",
+    backend: "HarnessBackend",
     base: str | None = None,
     branch: str | None = None,
     no_worktree: bool = False,
@@ -1297,7 +1303,7 @@ def create(
         session_id=session_id,
         no_worktree=no_worktree,
         no_commit=no_commit,
-        agent=backend.kind,
+        harness=backend.kind,
         include=serialize_include_entries(include_entries),
     )
     # save_task (dict path) preserves the on-disk shape callers compared
@@ -1312,7 +1318,7 @@ def prepare_sandbox(
     repo: Path,
     *,
     in_repo: bool,
-    backend: "AgentBackend",
+    backend: "HarnessBackend",
     no_commit: bool,
 ) -> Path:
     """Set up the hatchery dir + Docker scaffolding for a ``sandbox`` shell.
@@ -1343,7 +1349,7 @@ def launch(
     meta: SessionMeta,
     *,
     kind: Literal["new", "resume", "finalize"],
-    backend: "AgentBackend",
+    backend: "HarnessBackend",
     runtime: "ContainerRuntime | None",
     main_branch: str,
     session_id: str,
@@ -1366,7 +1372,7 @@ def launch(
     reviving completed or archived tasks is a supported flow (cmd_resume
     handles both, sometimes tasks get marked complete by accident). The
     caller is responsible for the launchable-state decision; launch()
-    just runs the agent.
+    just runs the harness.
     """
     include_repos = include_repos or []
     is_chat = meta.is_chat

@@ -1,4 +1,4 @@
-"""AgentBackend abstract base class."""
+"""HarnessBackend abstract base class."""
 
 import threading
 from abc import ABC, abstractmethod
@@ -19,7 +19,7 @@ CONTAINER_HOME = "/home/hatchery"
 
 @dataclass(frozen=True)
 class ProxyEndpoint:
-    """One provider's reverse proxy, as returned by ``AgentBackend.proxy_endpoints()``.
+    """One provider's reverse proxy, as returned by ``HarnessBackend.proxy_endpoints()``.
 
     Attributes:
       key:
@@ -64,7 +64,7 @@ class ProxyEndpoint:
     container_oauth: bool = False
 
 
-class AgentBackend(ABC):
+class HarnessBackend(ABC):
     """Abstract base class for AI coding agent backends.
 
     Each concrete backend encodes the full set of capabilities and conventions
@@ -212,7 +212,7 @@ class AgentBackend(ABC):
 
         *session_dir* is ``sessions.task_session_dir(repo, name)`` — the per-task
         directory under ``~/.hatchery/tasks/``.  The backend may create or copy
-        files here (e.g. agent-specific configuration).
+        files here (e.g. harness-specific configuration).
 
         Not called on resume or finalize.
         """
@@ -223,7 +223,7 @@ class AgentBackend(ABC):
         """Hook called before every agent launch — new, resume, native or Docker.
 
         *worktree* is the on-disk worktree path (or repo root in no-worktree
-        mode).  The backend may write agent-specific files here.
+        mode).  The backend may write harness-specific files here.
 
         Not called before finalize.
         """

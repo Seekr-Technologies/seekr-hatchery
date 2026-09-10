@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-import seekr_hatchery.agents as agent
-import seekr_hatchery.agents.codex as codex_backend
 import seekr_hatchery.constants as constants
+import seekr_hatchery.harnesses as harness
+import seekr_hatchery.harnesses.codex as codex_backend
 import seekr_hatchery.mount as mount
 import seekr_hatchery.sessions as sessions
 import seekr_hatchery.user_config as user_config
@@ -18,8 +18,8 @@ import seekr_hatchery.utils as utils
 # ---------------------------------------------------------------------------
 
 
-class SpyBackend(agent.AgentBackend):
-    """Test double for AgentBackend.
+class SpyBackend(harness.HarnessBackend):
+    """Test double for HarnessBackend.
 
     Implements all abstract methods as no-ops and records every call in
     ``self.calls`` as ``(method_name, *positional_args_and_kwargs_values)``.
@@ -79,15 +79,15 @@ class SpyBackend(agent.AgentBackend):
     def construct_mounts(self, session_dir: Path | None) -> list[mount.Mount]:
         return []
 
-    def proxy_endpoints(self) -> list[agent.ProxyEndpoint]:
+    def proxy_endpoints(self) -> list[harness.ProxyEndpoint]:
         def _mutate(headers, *, refresh: bool = False):
             out = {k: v for k, v in headers.items() if k.lower() not in ("x-api-key", "authorization")}
             out["x-api-key"] = "spy-key"
             return out
 
-        return [agent.ProxyEndpoint(key="default", header_mutator=_mutate, target_host="api.spy.example")]
+        return [harness.ProxyEndpoint(key="default", header_mutator=_mutate, target_host="api.spy.example")]
 
-    def container_env(self, endpoint: agent.ProxyEndpoint, proxy_token: str, proxy_port: int) -> dict[str, str]:
+    def container_env(self, endpoint: harness.ProxyEndpoint, proxy_token: str, proxy_port: int) -> dict[str, str]:
         return {}
 
     # ── Lifecycle hooks ───────────────────────────────────────────────────
@@ -188,7 +188,7 @@ def sample_meta(fake_tasks_db: Path) -> dict:
         "status": "in-progress",
         "created": "2026-01-15T10:00:00",
         "session_id": "abc-123",
-        "schema_version": 1,
+        "schema_version": 2,
     }
     # Write to the unified dir path matching repo="/some/repo"
     task_dir = fake_tasks_db / utils.repo_id(Path("/some/repo")) / "my-task"

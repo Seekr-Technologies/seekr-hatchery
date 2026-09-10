@@ -2,7 +2,7 @@
 
 Callers interact exclusively with :class:`UserConfig`.  Construct one via
 :meth:`UserConfig.load`, which reads and migrates the on-disk file.  Mutating
-methods (e.g. :meth:`set_default_agent`) change in-memory state only;
+methods (e.g. :meth:`set_default_harness`) change in-memory state only;
 call :meth:`save` explicitly to persist.
 
 Pass an explicit *path* to :meth:`UserConfig.load` for test isolation —
@@ -21,7 +21,7 @@ from typing import ClassVar, Literal
 import yaml
 from pydantic import BaseModel, ValidationError
 
-import seekr_hatchery.agents as agent
+import seekr_hatchery.harnesses as harness
 import seekr_hatchery.schema_migration as schema_migration
 import seekr_hatchery.ui as ui
 
@@ -34,8 +34,8 @@ logger = logging.getLogger(__name__)
 
 
 class UserConfigModel(BaseModel):
-    schema_version: Literal["1"] = "1"
-    default_agent: str | None = None
+    schema_version: Literal["2"] = "2"
+    default_harness: str | None = None
     open_editor: bool = False
     auto_commit: bool = True
 
@@ -47,7 +47,12 @@ class UserConfigModel(BaseModel):
 
 def _migrate(data: dict) -> dict:
     """Bring a raw config dict up to the current schema version in place."""
-    return schema_migration.stamp_v1(data)
+    data = schema_migration.stamp_v1(data)
+    if data["schema_version"] == "1":
+        if "default_agent" in data:
+            data["default_harness"] = data.pop("default_agent")
+        data["schema_version"] = "2"
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +90,7 @@ def validate_config_file(path: Path) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def _detect_installed(backends: list[agent.AgentBackend]) -> list[agent.AgentBackend]:
+def _detect_installed(backends: list[harness.HarnessBackend]) -> list[harness.HarnessBackend]:
     """Return backends whose binary is present on $PATH."""
     return [b for b in backends if shutil.which(b.binary)]
 
@@ -162,12 +167,12 @@ class UserConfig:
         return self._model.schema_version
 
     @property
-    def default_agent(self) -> str | None:
-        return self._model.default_agent
+    def default_harness(self) -> str | None:
+        return self._model.default_harness
 
-    def set_default_agent(self, value: str) -> None:
-        """Set the default agent in memory.  Call :meth:`save` to persist."""
-        self._model = self._model.model_copy(update={"default_agent": value})
+    def set_default_harness(self, value: str) -> None:
+        """Set the default harness in memory.  Call :meth:`save` to persist."""
+        self._model = self._model.model_copy(update={"default_harness": value})
 
     @property
     def open_editor(self) -> bool:
@@ -187,45 +192,45 @@ class UserConfig:
 
     # ── Domain methods ────────────────────────────────────────────────────────
 
-    def resolve_backend(self, agent_name: str | None) -> agent.AgentBackend:
-        """Resolve which agent backend to use for a new task.
+    def resolve_harness(self, harness_name: str | None) -> harness.HarnessBackend:
+        """Resolve which harness backend to use for a new task.
 
         Resolution order
         ----------------
-        1. *agent_name* given (``--agent`` flag) → use it, no detection.
+        1. *harness_name* given (``--harness`` flag) → use it, no detection.
         2. Exactly one binary on ``$PATH`` → use it silently.
-        3. Zero binaries on ``$PATH`` → fall back to :data:`agent.CODEX` silently
+        3. Zero binaries on ``$PATH`` → fall back to :data:`harness.CODEX` silently
            (Docker-only workflow where the agent runs inside the container).
         4. Multiple binaries on ``$PATH``, saved default → use saved default.
         5. Multiple binaries on ``$PATH``, no saved default → prompt and save.
         """
-        if agent_name is not None:
-            return agent.from_kind(agent_name)
+        if harness_name is not None:
+            return harness.from_kind(harness_name)
 
-        detected = _detect_installed(agent.ALL_BACKENDS)
+        detected = _detect_installed(harness.ALL_BACKENDS)
 
         if len(detected) == 1:
             return detected[0]
 
         if len(detected) == 0:
-            logger.debug("No agent binary found on $PATH — defaulting to codex (Docker workflow)")
-            return agent.CODEX
+            logger.debug("No harness binary found on $PATH — defaulting to codex (Docker workflow)")
+            return harness.CODEX
 
         # Multiple detected — check saved default first.
-        if self._model.default_agent is not None:
+        if self._model.default_harness is not None:
             try:
-                return agent.from_kind(self._model.default_agent)
+                return harness.from_kind(self._model.default_harness)
             except ValueError:
                 logger.warning(
-                    "Saved default_agent %r is no longer valid — re-prompting",
-                    self._model.default_agent,
+                    "Saved default_harness %r is no longer valid — re-prompting",
+                    self._model.default_harness,
                 )
 
-        return self._prompt_and_save(detected)
+        return self._prompt_harness_and_save(detected)
 
-    def _prompt_and_save(self, detected: list[agent.AgentBackend]) -> agent.AgentBackend:
-        """Interactively prompt the user to choose a default agent, then save."""
-        ui.info("Multiple AI coding agents detected. Choose your default:")
+    def _prompt_harness_and_save(self, detected: list[harness.HarnessBackend]) -> harness.HarnessBackend:
+        """Interactively prompt the user to choose a default harness, then save."""
+        ui.info("Multiple AI coding harnesses detected. Choose your default:")
         for i, b in enumerate(detected, 1):
             ui.info(f"  {i}. {b.binary}")
         while True:
@@ -240,8 +245,8 @@ class UserConfig:
                     break
             ui.warn(f"Please enter a number between 1 and {len(detected)}.")
 
-        self.set_default_agent(chosen.kind)
+        self.set_default_harness(chosen.kind)
         self.save()
-        ui.success(f"Default agent set to '{chosen.binary}'.")
+        ui.success(f"Default harness set to '{chosen.binary}'.")
         ui.info("To change it, edit ~/.hatchery/config.yaml directly.")
         return chosen

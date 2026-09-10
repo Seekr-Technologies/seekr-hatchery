@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 
 import tomli_w
 
-from seekr_hatchery.agents.agent_backend import CONTAINER_HOME, AgentBackend, ProxyEndpoint
+from seekr_hatchery.harnesses.harness_backend import CONTAINER_HOME, HarnessBackend, ProxyEndpoint
 from seekr_hatchery.locks import hatchery_lock
 from seekr_hatchery.mount import BindMount, Mount, SeedContext, VolumeMount
 
@@ -242,7 +242,7 @@ def _make_session_id_poller(
     return _poll
 
 
-class CodexBackend(AgentBackend):
+class CodexBackend(HarnessBackend):
     kind = "CODEX"
     binary = "codex"
     supports_sessions = True
@@ -271,7 +271,7 @@ class CodexBackend(AgentBackend):
     # ``check_for_update_on_startup=false`` suppresses the interactive
     # "Update available" prompt that otherwise blocks resume launches
     # while codex waits for the user to press enter. The Codex image is
-    # rebuilt by hatchery, not upgraded interactively by the agent.
+    # rebuilt by hatchery, not upgraded interactively by the harness.
     _DOCKER_WRAPPER: str = (
         'if [ -n "${HATCHERY_CODEX_PROVIDER:-}" ]; then '
         "exec codex "

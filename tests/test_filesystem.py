@@ -7,10 +7,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
-import seekr_hatchery.agents as agent
 import seekr_hatchery.constants as constants
 import seekr_hatchery.docker as docker
 import seekr_hatchery.git as git
+import seekr_hatchery.harnesses as harness
 import seekr_hatchery.mount as mount
 import seekr_hatchery.sessions as sessions
 
@@ -480,30 +480,40 @@ class TestEnsureDockerfile:
     def _prep(self, repo: Path) -> None:
         (repo / ".hatchery").mkdir(exist_ok=True)
 
-    def test_creates_agent_specific_dockerfile(self, fake_repo, monkeypatch):
+    def test_creates_harness_specific_dockerfile(self, fake_repo, monkeypatch):
         self._prep(fake_repo)
         monkeypatch.setattr("builtins.input", lambda _: "n")
-        docker.ensure_dockerfile(fake_repo, agent.CODEX)
-        assert docker.dockerfile_path(fake_repo, agent.CODEX).exists()
+        docker.ensure_dockerfile(fake_repo, harness.CODEX)
+        assert docker.dockerfile_path(fake_repo, harness.CODEX).exists()
 
     def test_returns_true_when_created(self, fake_repo, monkeypatch):
         self._prep(fake_repo)
         monkeypatch.setattr("builtins.input", lambda _: "n")
-        assert docker.ensure_dockerfile(fake_repo, agent.CODEX) is True
+        assert docker.ensure_dockerfile(fake_repo, harness.CODEX) is True
 
     def test_returns_false_when_already_exists(self, fake_repo, monkeypatch):
         self._prep(fake_repo)
-        docker.dockerfile_path(fake_repo, agent.CODEX).write_text("FROM debian\n")
+        docker.dockerfile_path(fake_repo, harness.CODEX).write_text("FROM debian\n")
         monkeypatch.setattr("builtins.input", lambda _: "n")
-        assert docker.ensure_dockerfile(fake_repo, agent.CODEX) is False
+        assert docker.ensure_dockerfile(fake_repo, harness.CODEX) is False
+
+    def test_preserves_legacy_agent_named_dockerfile(self, fake_repo, monkeypatch):
+        self._prep(fake_repo)
+        legacy = fake_repo / "Dockerfile.codex"
+        legacy.write_text("existing content")
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+
+        assert docker.ensure_dockerfile(fake_repo, harness.CODEX) is False
+        assert legacy.read_text() == "existing content"
+        assert not docker.dockerfile_path(fake_repo, harness.CODEX).exists()
 
     def test_skips_if_already_exists(self, fake_repo, monkeypatch):
         self._prep(fake_repo)
-        df = docker.dockerfile_path(fake_repo, agent.CODEX)
+        df = docker.dockerfile_path(fake_repo, harness.CODEX)
         df.write_text("existing content")
         monkeypatch.setattr("builtins.input", lambda _: "n")
         with patch("seekr_hatchery.docker.open_for_editing") as mock_edit:
-            docker.ensure_dockerfile(fake_repo, agent.CODEX)
+            docker.ensure_dockerfile(fake_repo, harness.CODEX)
         assert df.read_text() == "existing content"
         mock_edit.assert_not_called()
 
@@ -540,8 +550,8 @@ class TestEnsureDockerfile:
         DinD lines in commented-out form."""
         self._prep(fake_repo)
         monkeypatch.setattr("builtins.input", lambda _: "n")
-        docker.ensure_dockerfile(fake_repo, agent.CODEX)
-        content = docker.dockerfile_path(fake_repo, agent.CODEX).read_text()
+        docker.ensure_dockerfile(fake_repo, harness.CODEX)
+        content = docker.dockerfile_path(fake_repo, harness.CODEX).read_text()
         assert "{{AGENT_INSTALL}}" not in content
         assert "{{DIND}}" not in content
         assert "# USER root" in content
@@ -627,21 +637,21 @@ class TestDindDockerfileOk:
         """Default ensure_dockerfile() generates DinD commented out → False."""
         self._prep(fake_repo)
         monkeypatch.setattr("builtins.input", lambda _: "n")
-        docker.ensure_dockerfile(fake_repo, agent.CODEX)
-        assert docker._dind_dockerfile_ok(fake_repo, agent.CODEX) is False
+        docker.ensure_dockerfile(fake_repo, harness.CODEX)
+        assert docker._dind_dockerfile_ok(fake_repo, harness.CODEX) is False
 
     def test_uncommented_section_returns_true(self, fake_repo, monkeypatch):
         """Generate Dockerfile, then uncomment DinD lines → True."""
         self._prep(fake_repo)
         monkeypatch.setattr("builtins.input", lambda _: "n")
-        docker.ensure_dockerfile(fake_repo, agent.CODEX)
-        df = docker.dockerfile_path(fake_repo, agent.CODEX)
+        docker.ensure_dockerfile(fake_repo, harness.CODEX)
+        df = docker.dockerfile_path(fake_repo, harness.CODEX)
         text = df.read_text()
         # Replace commented DinD block with the uncommented production constant
         text = text.replace(docker._comment_out(docker.DIND_DOCKERFILE_LINES), docker.DIND_DOCKERFILE_LINES)
         df.write_text(text)
-        assert docker._dind_dockerfile_ok(fake_repo, agent.CODEX) is True
+        assert docker._dind_dockerfile_ok(fake_repo, harness.CODEX) is True
 
     def test_missing_dockerfile_returns_false(self, fake_repo):
         """No Dockerfile on disk → False."""
-        assert docker._dind_dockerfile_ok(fake_repo, agent.CODEX) is False
+        assert docker._dind_dockerfile_ok(fake_repo, harness.CODEX) is False

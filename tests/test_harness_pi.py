@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-import seekr_hatchery.agents as agent
-import seekr_hatchery.agents.pi as pi_backend
+import seekr_hatchery.harnesses as harness
+import seekr_hatchery.harnesses.pi as pi_backend
 import seekr_hatchery.mount as mount
 
 # ---------------------------------------------------------------------------
@@ -53,8 +53,8 @@ def _fake_jwt(payload: dict) -> str:
     return f"{b64({'alg': 'none'})}.{b64(payload)}.sig"
 
 
-def _ep(key: str, *, oauth: bool = False) -> agent.ProxyEndpoint:
-    return agent.ProxyEndpoint(key=key, header_mutator=lambda h: h, target_host="x", container_oauth=oauth)
+def _ep(key: str, *, oauth: bool = False) -> harness.ProxyEndpoint:
+    return harness.ProxyEndpoint(key=key, header_mutator=lambda h: h, target_host="x", container_oauth=oauth)
 
 
 # ---------------------------------------------------------------------------
@@ -64,10 +64,10 @@ def _ep(key: str, *, oauth: bool = False) -> agent.ProxyEndpoint:
 
 class TestPiBackendConstants:
     def test_constants(self):
-        assert agent.PI.kind == "PI"
-        assert agent.PI.binary == "pi"
-        assert agent.PI.supports_sessions is True
-        assert agent.PI.session_id_pre_generated is True
+        assert harness.PI.kind == "PI"
+        assert harness.PI.binary == "pi"
+        assert harness.PI.supports_sessions is True
+        assert harness.PI.session_id_pre_generated is True
 
 
 # ---------------------------------------------------------------------------
@@ -77,11 +77,11 @@ class TestPiBackendConstants:
 
 class TestBuildNewCommand:
     def test_native(self):
-        cmd = agent.PI.build_new_command("sid", "sys", "initial")
+        cmd = harness.PI.build_new_command("sid", "sys", "initial")
         assert cmd == ["pi", "--session-id", "sid", "--append-system-prompt", "sys", "initial"]
 
     def test_docker(self):
-        cmd = agent.PI.build_new_command("sid", "sys", "initial", docker=True)
+        cmd = harness.PI.build_new_command("sid", "sys", "initial", docker=True)
         assert cmd == [
             "sh",
             "-c",
@@ -97,11 +97,11 @@ class TestBuildNewCommand:
 
 class TestBuildResumeCommand:
     def test_native(self):
-        cmd = agent.PI.build_resume_command("sid", "sys")
+        cmd = harness.PI.build_resume_command("sid", "sys")
         assert cmd == ["pi", "--session-id", "sid", "--append-system-prompt", "sys"]
 
     def test_docker(self):
-        cmd = agent.PI.build_resume_command("sid", "sys", docker=True)
+        cmd = harness.PI.build_resume_command("sid", "sys", docker=True)
         assert cmd == [
             "sh",
             "-c",
@@ -116,7 +116,7 @@ class TestBuildResumeCommand:
 
 class TestBuildFinalizeCommand:
     def test_native(self):
-        cmd = agent.PI.build_finalize_command("sid", "sys", "wrap up")
+        cmd = harness.PI.build_finalize_command("sid", "sys", "wrap up")
         assert cmd == [
             "pi",
             "--print",
@@ -128,7 +128,7 @@ class TestBuildFinalizeCommand:
         ]
 
     def test_docker(self):
-        cmd = agent.PI.build_finalize_command("sid", "sys", "wrap up", docker=True)
+        cmd = harness.PI.build_finalize_command("sid", "sys", "wrap up", docker=True)
         assert cmd == [
             "sh",
             "-c",
@@ -196,18 +196,18 @@ class TestProxyEndpoints:
         _write_store(home, _STORE)
         _stub_checks(monkeypatch, {})
         with pytest.raises(RuntimeError, match="no pi provider credentials resolved"):
-            agent.PI.proxy_endpoints()
+            harness.PI.proxy_endpoints()
 
     def test_discovers_only_configured_store_providers(self, home, monkeypatch):
         _write_store(home, _STORE)
         _stub_checks(monkeypatch, {"acme": ("api_key", "sk-acme"), "huggingface": ("api_key", "sk-hf")})
-        endpoints = {e.key: e for e in agent.PI.proxy_endpoints()}
+        endpoints = {e.key: e for e in harness.PI.proxy_endpoints()}
         assert set(endpoints) == {"acme", "huggingface"}
 
     def test_target_host_derived_from_store_base_url(self, home, monkeypatch):
         _write_store(home, _STORE)
         _stub_checks(monkeypatch, {"openai": ("api_key", "sk-openai"), "huggingface": ("api_key", "sk-hf")})
-        endpoints = {e.key: e for e in agent.PI.proxy_endpoints()}
+        endpoints = {e.key: e for e in harness.PI.proxy_endpoints()}
         assert endpoints["openai"].target_host == "api.openai.com"
         assert endpoints["huggingface"].target_host == "router.huggingface.co"
         assert endpoints["openai"].path_prefix == ""
@@ -217,7 +217,7 @@ class TestProxyEndpoints:
         # store; from there it is discovered and routed with no special-casing.
         _write_store(home, {**_STORE, "openai-codex": ("openai-codex-responses", "https://chatgpt.com/backend-api")})
         _stub_checks(monkeypatch, {"openai-codex": ("oauth", _fake_jwt({"sub": "u"}))})
-        (endpoint,) = agent.PI.proxy_endpoints()
+        (endpoint,) = harness.PI.proxy_endpoints()
         assert endpoint.key == "openai-codex"
         assert endpoint.target_host == "chatgpt.com"
 
@@ -227,7 +227,7 @@ class TestProxyEndpoints:
         _write_store(home, _STORE)  # no openai-codex
         _stub_checks(monkeypatch, {"openai-codex": ("oauth", _fake_jwt({"sub": "u"}))})
         with pytest.raises(RuntimeError, match="no pi provider credentials resolved"):
-            agent.PI.proxy_endpoints()
+            harness.PI.proxy_endpoints()
 
     def test_container_oauth_tracks_resolved_auth_type(self, home, monkeypatch):
         _write_store(home, _STORE)
@@ -235,7 +235,7 @@ class TestProxyEndpoints:
             monkeypatch,
             {"acme": ("oauth", "oauth-acme"), "huggingface": ("api_key", "sk-hf")},
         )
-        endpoints = {e.key: e for e in agent.PI.proxy_endpoints()}
+        endpoints = {e.key: e for e in harness.PI.proxy_endpoints()}
         assert endpoints["acme"].container_oauth is True
         assert endpoints["huggingface"].container_oauth is False
 
@@ -248,7 +248,7 @@ class TestProxyEndpoints:
 def _mutator_for(home, monkeypatch, provider_id, auth_type, credential):
     _write_store(home, _STORE)
     _stub_checks(monkeypatch, {provider_id: (auth_type, credential)})
-    endpoints = {e.key: e for e in agent.PI.proxy_endpoints()}
+    endpoints = {e.key: e for e in harness.PI.proxy_endpoints()}
     return endpoints[provider_id].header_mutator
 
 
@@ -309,7 +309,7 @@ class TestOpenAiCodexSentinel:
     def _codex_endpoint(self, home, monkeypatch, token):
         _write_store(home, {"openai-codex": ("openai-codex-responses", "https://chatgpt.com/backend-api")})
         _stub_checks(monkeypatch, {"openai-codex": ("oauth", token)})
-        (endpoint,) = agent.PI.proxy_endpoints()
+        (endpoint,) = harness.PI.proxy_endpoints()
         return endpoint
 
     def test_container_token_embeds_real_account_id(self, home, monkeypatch):
@@ -330,7 +330,7 @@ class TestOpenAiCodexSentinel:
     def test_store_provider_has_no_container_token(self, home, monkeypatch):
         _write_store(home, _STORE)
         _stub_checks(monkeypatch, {"acme": ("api_key", "sk-acme")})
-        (endpoint,) = agent.PI.proxy_endpoints()
+        (endpoint,) = harness.PI.proxy_endpoints()
         assert endpoint.container_token is None
 
 
@@ -350,7 +350,7 @@ class TestRefresh:
 
         monkeypatch.setattr(pi_backend, "_run_pi_auth_check", fake)
         _write_store(home, _STORE)
-        (endpoint,) = agent.PI.proxy_endpoints()
+        (endpoint,) = harness.PI.proxy_endpoints()
         assert endpoint.key == "acme"
         inbound = {"authorization": "Bearer proxy-tok"}
         assert endpoint.header_mutator(inbound)["authorization"] == "Bearer stale"
@@ -365,7 +365,7 @@ class TestRefresh:
 class TestContainerEnv:
     def test_no_base_path(self, home):
         _write_store(home, _STORE)
-        assert agent.PI.container_env(_ep("acme"), "proxy-tok", 9999) == {
+        assert harness.PI.container_env(_ep("acme"), "proxy-tok", 9999) == {
             "HATCHERY_PI_ACME_ID": "acme",
             "HATCHERY_PI_ACME_BASEURL": "http://host.docker.internal:9999",
             "HATCHERY_PI_ACME_KEY": "proxy-tok",
@@ -374,7 +374,7 @@ class TestContainerEnv:
 
     def test_openai_carries_base_path(self, home):
         _write_store(home, _STORE)
-        assert agent.PI.container_env(_ep("openai"), "proxy-tok", 9999) == {
+        assert harness.PI.container_env(_ep("openai"), "proxy-tok", 9999) == {
             "HATCHERY_PI_OPENAI_ID": "openai",
             "HATCHERY_PI_OPENAI_BASEURL": "http://host.docker.internal:9999/v1",
             "HATCHERY_PI_OPENAI_KEY": "proxy-tok",
@@ -383,7 +383,7 @@ class TestContainerEnv:
 
     def test_openai_codex_is_oauth_shaped_with_store_base_path(self, home):
         _write_store(home, {"openai-codex": ("openai-codex-responses", "https://chatgpt.com/backend-api")})
-        assert agent.PI.container_env(_ep("openai-codex", oauth=True), "proxy-tok", 9999) == {
+        assert harness.PI.container_env(_ep("openai-codex", oauth=True), "proxy-tok", 9999) == {
             "HATCHERY_PI_OPENAI_CODEX_ID": "openai-codex",
             "HATCHERY_PI_OPENAI_CODEX_BASEURL": "http://host.docker.internal:9999/backend-api",
             "HATCHERY_PI_OPENAI_CODEX_KEY": "proxy-tok",
@@ -395,7 +395,7 @@ class TestContainerEnv:
         # provider — the shape tracks the endpoint's resolved auth, not a
         # hard-coded provider list.
         _write_store(home, _STORE)
-        env = agent.PI.container_env(_ep("acme", oauth=True), "proxy-tok", 9999)
+        env = harness.PI.container_env(_ep("acme", oauth=True), "proxy-tok", 9999)
         assert env["HATCHERY_PI_ACME_SHAPE"] == "oauth"
 
 
@@ -408,11 +408,11 @@ class TestConstructMounts:
     def test_returns_only_volume_when_no_host_config(self, tmp_path):
         # autouse ``home`` fixture points Path.home() at an empty temp dir,
         # so neither settings.json nor models-store.json exists.
-        mounts = agent.PI.construct_mounts(tmp_path)
+        mounts = harness.PI.construct_mounts(tmp_path)
         assert len(mounts) == 1
         (m,) = mounts
         assert isinstance(m, mount.VolumeMount)
-        assert m.dst == f"{agent.CONTAINER_HOME}/.pi/agent"
+        assert m.dst == f"{harness.CONTAINER_HOME}/.pi/agent"
         assert m.seed is None
 
     def test_layers_host_config_binds_over_volume(self, home, tmp_path):
@@ -423,23 +423,23 @@ class TestConstructMounts:
         node_modules = agent_dir / "npm" / "node_modules"
         node_modules.mkdir(parents=True)
 
-        vol, settings, store, nm = agent.PI.construct_mounts(tmp_path)
+        vol, settings, store, nm = harness.PI.construct_mounts(tmp_path)
 
         assert isinstance(vol, mount.VolumeMount)
-        assert vol.dst == f"{agent.CONTAINER_HOME}/.pi/agent"
+        assert vol.dst == f"{harness.CONTAINER_HOME}/.pi/agent"
         assert (settings.src, settings.dst, settings.mode) == (
             agent_dir / "settings.json",
-            f"{agent.CONTAINER_HOME}/.pi/agent/settings.json",
+            f"{harness.CONTAINER_HOME}/.pi/agent/settings.json",
             "RW",
         )
         assert (store.src, store.dst, store.mode) == (
             agent_dir / "models-store.json",
-            f"{agent.CONTAINER_HOME}/.pi/agent/models-store.json",
+            f"{harness.CONTAINER_HOME}/.pi/agent/models-store.json",
             "RO",
         )
         assert (nm.src, nm.dst, nm.mode) == (
             node_modules,
-            f"{agent.CONTAINER_HOME}/.pi/agent/npm/node_modules",
+            f"{harness.CONTAINER_HOME}/.pi/agent/npm/node_modules",
             "RO",
         )
 
@@ -449,7 +449,7 @@ class TestConstructMounts:
         for name in ("auth.json", "settings.json", "models-store.json"):
             (agent_dir / name).write_text("{}")
 
-        mounts = agent.PI.construct_mounts(tmp_path)
+        mounts = harness.PI.construct_mounts(tmp_path)
 
         assert not any(isinstance(m, mount.BindMount) and Path(m.src).name == "auth.json" for m in mounts)
 
@@ -462,16 +462,16 @@ class TestConstructMounts:
 class TestLifecycleHooksAreNoops:
     def test_on_new_task(self, tmp_path):
         session_dir = tmp_path / "session"
-        agent.PI.on_new_task(session_dir)
+        harness.PI.on_new_task(session_dir)
         assert not session_dir.exists()
 
     def test_on_before_launch(self, tmp_path):
-        agent.PI.on_before_launch(tmp_path)  # should not raise
+        harness.PI.on_before_launch(tmp_path)  # should not raise
 
     def test_on_before_container_start(self, tmp_path):
         session_dir = tmp_path / "session"
         session_dir.mkdir()
-        agent.PI.on_before_container_start(session_dir, "proxy-tok", "/workdir")
+        harness.PI.on_before_container_start(session_dir, "proxy-tok", "/workdir")
         assert list(session_dir.iterdir()) == []
 
 
@@ -555,11 +555,11 @@ class TestDockerWrapperSecurity:
 
 class TestDockerfileInstall:
     def test_installs_node_and_pi(self):
-        install = agent.PI.dockerfile_install
+        install = harness.PI.dockerfile_install
         assert "nodesource" in install.lower()
         assert "@earendil-works/pi-coding-agent" in install
 
     def test_installs_search_tools_to_avoid_runtime_download(self):
-        install = agent.PI.dockerfile_install
+        install = harness.PI.dockerfile_install
         assert "ripgrep" in install
         assert "fd-find" in install
