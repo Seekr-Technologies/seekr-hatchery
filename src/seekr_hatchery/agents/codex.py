@@ -17,15 +17,25 @@ from urllib.parse import urlsplit
 
 import tomli_w
 
-from seekr_hatchery.agents.agent_backend import CONTAINER_HOME, AgentBackend, ProxyEndpoint
+from seekr_hatchery.agents.agent_backend import (
+    CONTAINER_HOME,
+    AgentBackend,
+    ProxyEndpoint,
+)
 from seekr_hatchery.locks import hatchery_lock
 from seekr_hatchery.mount import BindMount, Mount, SeedContext, VolumeMount
+from seekr_hatchery.utils import npm
 
 if TYPE_CHECKING:
     from seekr_hatchery.docker import ContainerRuntime
     from seekr_hatchery.models import SessionMeta
 
 logger = logging.getLogger(__name__)
+
+# npm package for the Codex CLI. The install line is emitted unpinned; the
+# concrete version is resolved to the registry's latest when the Dockerfile is
+# generated (and re-pinned by ``hatchery harness update``).
+_NPM_PACKAGE: str = "@openai/codex"
 
 # Provider names appear in shell ``--config model_providers.<name>.*`` flags.
 # Restrict to a safe character class so an attacker who controls the host
@@ -843,4 +853,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm \\
     && rm -rf /var/lib/apt/lists/*
 USER hatchery
 RUN npm config set prefix '{CONTAINER_HOME}/.npm-global' \\
-    && npm install -g @openai/codex"""
+    && npm install -g {_NPM_PACKAGE}"""
+
+    def update(self, dockerfile_text: str) -> tuple[str, str | None, str] | None:
+        old_version = npm.current_npm_version(dockerfile_text, _NPM_PACKAGE)
+        version = npm.npm_latest_version(_NPM_PACKAGE)
+        return npm.pin_npm_install(dockerfile_text, _NPM_PACKAGE, version), old_version, version

@@ -480,6 +480,11 @@ class TestEnsureDockerfile:
     def _prep(self, repo: Path) -> None:
         (repo / ".hatchery").mkdir(exist_ok=True)
 
+    @pytest.fixture(autouse=True)
+    def _stub_npm(self, monkeypatch):
+        """Keep generation offline: resolve every harness to a canned version."""
+        monkeypatch.setattr("seekr_hatchery.utils.npm.npm_latest_version", lambda _pkg: "1.2.3")
+
     def test_creates_agent_specific_dockerfile(self, fake_repo, monkeypatch):
         self._prep(fake_repo)
         monkeypatch.setattr("builtins.input", lambda _: "n")
@@ -546,6 +551,26 @@ class TestEnsureDockerfile:
         assert "{{DIND}}" not in content
         assert "# USER root" in content
         assert "fuse-overlayfs" in content
+
+    def test_pins_harness_to_latest_at_generation(self, fake_repo, monkeypatch):
+        self._prep(fake_repo)
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+        docker.ensure_dockerfile(fake_repo, agent.CODEX)
+        content = docker.dockerfile_path(fake_repo, agent.CODEX).read_text()
+        assert "@openai/codex@1.2.3" in content
+
+    def test_leaves_harness_unpinned_when_lookup_fails(self, fake_repo, monkeypatch):
+        self._prep(fake_repo)
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+
+        def boom(_pkg):
+            raise OSError("offline")
+
+        monkeypatch.setattr("seekr_hatchery.utils.npm.npm_latest_version", boom)
+        docker.ensure_dockerfile(fake_repo, agent.CODEX)
+        content = docker.dockerfile_path(fake_repo, agent.CODEX).read_text()
+        assert "@openai/codex@" not in content
+        assert "@openai/codex" in content
 
 
 class TestEnsureDockerConfig:

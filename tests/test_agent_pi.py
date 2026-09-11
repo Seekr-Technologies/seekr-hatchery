@@ -4,6 +4,7 @@ import base64
 import json
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -563,3 +564,19 @@ class TestDockerfileInstall:
         install = agent.PI.dockerfile_install
         assert "ripgrep" in install
         assert "fd-find" in install
+
+    def test_dockerfile_install_is_unpinned(self):
+        # The version is resolved to latest at Dockerfile-generation time, not
+        # baked into the snippet — so the package appears without an @version.
+        assert "@earendil-works/pi-coding-agent@" not in agent.PI.dockerfile_install
+        assert "@earendil-works/pi-coding-agent" in agent.PI.dockerfile_install
+
+
+class TestUpdate:
+    def test_bumps_pin_to_latest(self):
+        text = "RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.1.0"
+        with patch.object(pi_backend.npm, "npm_latest_version", return_value="9.9.9"):
+            new_text, old_version, version = agent.PI.update(text)
+        assert old_version == "0.1.0"
+        assert version == "9.9.9"
+        assert new_text == "RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@9.9.9"

@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import yaml
 from click.testing import CliRunner
 
@@ -85,15 +86,24 @@ class TestHelp:
             "st | status",
         }
 
-        commands = result.output.split("Commands:\n")[-1]
-        commands = commands.split("\n")
-        # Each line may show "alias | command  help text"; collect all pipe-separated names.
+        # Help is now rendered as git-style grouped sections. Collect command
+        # rows only while inside a known command section, so option lines and
+        # wrapped help-text continuations don't leak in.
+        section_titles = {"Start a task", "Manage tasks", "Sandbox", "Maintenance", "Other commands"}
         actual_commands: set[str] = set()
-        for line in commands:
-            if not line:
+        in_section = False
+        for line in result.output.split("\n"):
+            stripped = line.rstrip()
+            if stripped.endswith(":") and stripped[:-1] in section_titles:
+                in_section = True
                 continue
-            name_part = line.split("  ")[1]  # strip help text
-            actual_commands.update({name_part})
+            if not stripped:
+                in_section = False
+                continue
+            # Command rows start at column 2 and carry a name; wrapped help
+            # continuations are indented deeper, so require the name column.
+            if in_section and line.startswith("  ") and not line.startswith("     "):
+                actual_commands.add(line.strip().split("  ")[0])
 
         assert expected_commands == actual_commands
 
@@ -678,7 +688,7 @@ class TestSandbox:
             p_feat,
             patch("seekr_hatchery.cli.docker.launch_sandbox_shell") as mock_launch,
         ):
-            result = runner.invoke(cli, ["sandbox"])
+            result = runner.invoke(cli, ["sandbox", "shell"])
 
         assert result.exit_code == 0, result.output
         assert mock_prep.called
@@ -686,6 +696,41 @@ class TestSandbox:
         assert mock_launch.call_args[1]["shell"] == "/bin/bash"  # default shell
         # The hatchery dir returned by prepare_sandbox is threaded to launch.
         assert mock_launch.call_args[1]["hatchery_dir"] == hdir
+
+    def test_sandbox_agent_flag_selects_backend(self, tmp_path):
+        repo = tmp_path / "repo"
+        p_root, p_prep, p_rt, p_cfg, p_feat = self._patches(repo, tmp_path / "hdir")
+        runner = CliRunner()
+        with (
+            p_root,
+            p_prep as mock_prep,
+            p_rt,
+            p_cfg,
+            p_feat,
+            patch("seekr_hatchery.cli.docker.launch_sandbox_shell") as mock_launch,
+        ):
+            result = runner.invoke(cli, ["sandbox", "shell", "--agent", "pi"])
+
+        assert result.exit_code == 0, result.output
+        assert mock_prep.call_args[1]["backend"].kind == "PI"
+        assert mock_launch.call_args[0][1].kind == "PI"  # backend threaded to launch
+
+    def test_sandbox_rebuild_threads_no_cache(self, tmp_path):
+        repo = tmp_path / "repo"
+        p_root, p_prep, p_rt, p_cfg, p_feat = self._patches(repo, tmp_path / "hdir")
+        runner = CliRunner()
+        with (
+            p_root,
+            p_prep,
+            p_rt,
+            p_cfg,
+            p_feat,
+            patch("seekr_hatchery.cli.docker.launch_sandbox_shell") as mock_launch,
+        ):
+            result = runner.invoke(cli, ["sandbox", "shell", "--rebuild-sandbox"])
+
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args[1]["no_cache"] is True
 
     def test_sandbox_custom_shell(self, tmp_path):
         repo = tmp_path / "repo"
@@ -699,7 +744,7 @@ class TestSandbox:
             p_feat,
             patch("seekr_hatchery.cli.docker.launch_sandbox_shell") as mock_launch,
         ):
-            result = runner.invoke(cli, ["sandbox", "--shell", "/bin/sh"])
+            result = runner.invoke(cli, ["sandbox", "shell", "--shell", "/bin/sh"])
 
         assert result.exit_code == 0, result.output
         assert mock_launch.call_args[1]["shell"] == "/bin/sh"
@@ -710,7 +755,7 @@ class TestSandbox:
         p_root, p_prep, p_rt, p_cfg, p_feat = self._patches(repo, tmp_path / "hdir")
         runner = CliRunner()
         with p_root, p_prep as mock_prep, p_rt, p_cfg, p_feat, patch("seekr_hatchery.cli.docker.launch_sandbox_shell"):
-            result = runner.invoke(cli, ["sandbox", "--no-commit"])
+            result = runner.invoke(cli, ["sandbox", "shell", "--no-commit"])
 
         assert result.exit_code == 0, result.output
         assert mock_prep.call_args[1]["no_commit"] is True
@@ -723,10 +768,201 @@ class TestSandbox:
         p_root, p_prep, p_rt, p_cfg, p_feat = self._patches(repo, tmp_path / "hdir")
         runner = CliRunner()
         with p_root, p_prep as mock_prep, p_rt, p_cfg, p_feat, patch("seekr_hatchery.cli.docker.launch_sandbox_shell"):
-            result = runner.invoke(cli, ["sandbox"])
+            result = runner.invoke(cli, ["sandbox", "shell"])
 
         assert result.exit_code == 0, result.output
         assert mock_prep.call_args[1]["no_commit"] is True
+
+
+# ---------------------------------------------------------------------------
+# cmd_harness_update()
+# ---------------------------------------------------------------------------
+
+
+class TestHarnessUpdate:
+    """`harness update` rewrites the harness pin in Dockerfile.<agent> via the
+    backend's update() seam, then rebuilds to verify. The version fetch and the
+    rebuild are stubbed so no network or Docker daemon is hit."""
+
+    @pytest.fixture(autouse=True)
+    def _stub_build(self, tmp_path, monkeypatch):
+        """Default the verify-rebuild to success; failure tests override it.
+
+        Also chdir to a neutral dir so the default resolution's walk-up finds no
+        Dockerfile and falls back to the patched repo root — tests that exercise
+        the walk-up chdir into a worktree themselves.
+        """
+        monkeypatch.chdir(tmp_path)
+        with (
+            patch("seekr_hatchery.sessions.docker.detect_runtime"),
+            patch("seekr_hatchery.sessions.docker.build_docker_image", return_value=True),
+        ):
+            yield
+
+    def _repo_with_dockerfile(self, tmp_path, pin):
+        repo = tmp_path / "repo"
+        (repo / ".hatchery").mkdir(parents=True)
+        df = repo / ".hatchery" / "Dockerfile.codex"
+        df.write_text(f"USER hatchery\nRUN npm install -g @openai/codex@{pin}\n")
+        return repo, df
+
+    def test_bumps_pin_and_commits(self, tmp_path):
+        repo, df = self._repo_with_dockerfile(tmp_path, "0.1.0")
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
+            patch("seekr_hatchery.utils.npm.npm_latest_version", return_value="9.9.9"),
+            patch("seekr_hatchery.sessions.repo_config.resolve_no_commit", return_value=False),
+            patch("seekr_hatchery.sessions.git.add_and_commit") as mock_commit,
+        ):
+            result = CliRunner().invoke(cli, ["sandbox", "harness", "update", "--agent", "codex"])
+
+        assert result.exit_code == 0, result.output
+        assert "npm install -g @openai/codex@9.9.9\n" in df.read_text()
+        assert "from 0.1.0 → 9.9.9" in result.output
+        assert mock_commit.call_args[0][1] == "chore: update codex harness to 9.9.9"
+
+    def test_already_up_to_date_does_not_write_or_commit(self, tmp_path):
+        repo, df = self._repo_with_dockerfile(tmp_path, "9.9.9")
+        before = df.read_text()
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
+            patch("seekr_hatchery.utils.npm.npm_latest_version", return_value="9.9.9"),
+            patch("seekr_hatchery.sessions.repo_config.resolve_no_commit", return_value=False),
+            patch("seekr_hatchery.sessions.git.add_and_commit") as mock_commit,
+        ):
+            result = CliRunner().invoke(cli, ["sandbox", "harness", "update", "--agent", "codex"])
+
+        assert result.exit_code == 0, result.output
+        assert "already up to date" in result.output
+        assert df.read_text() == before
+        assert not mock_commit.called
+
+    def test_no_dockerfile_errors(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        with patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)):
+            result = CliRunner().invoke(cli, ["sandbox", "harness", "update", "--agent", "codex"])
+        assert result.exit_code == 1
+        assert "No Dockerfile" in result.output
+
+    def test_no_commit_flag_skips_commit(self, tmp_path):
+        repo, df = self._repo_with_dockerfile(tmp_path, "0.1.0")
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
+            patch("seekr_hatchery.utils.npm.npm_latest_version", return_value="9.9.9"),
+            patch("seekr_hatchery.sessions.git.add_and_commit") as mock_commit,
+        ):
+            result = CliRunner().invoke(cli, ["sandbox", "harness", "update", "--agent", "codex", "--no-commit"])
+
+        assert result.exit_code == 0, result.output
+        assert "npm install -g @openai/codex@9.9.9\n" in df.read_text()
+        assert not mock_commit.called
+
+    def test_backend_without_pin_reports_and_skips(self, tmp_path):
+        """A backend whose update() returns None (e.g. claude) is a no-op with a note."""
+        repo, df = self._repo_with_dockerfile(tmp_path, "0.1.0")
+        before = df.read_text()
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
+            patch("seekr_hatchery.agents.codex.CodexBackend.update", return_value=None),
+            patch("seekr_hatchery.sessions.git.add_and_commit") as mock_commit,
+        ):
+            result = CliRunner().invoke(cli, ["sandbox", "harness", "update", "--agent", "codex"])
+
+        assert result.exit_code == 0, result.output
+        assert "no version pin" in result.output
+        assert df.read_text() == before
+        assert not mock_commit.called
+
+    def test_gitignored_dockerfile_writes_but_skips_commit(self, tmp_path):
+        """No-commit / dogfood setups gitignore .hatchery — upgrade must still
+        bump the pin without crashing on `git add` of an ignored path."""
+        repo, df = self._repo_with_dockerfile(tmp_path, "0.1.0")
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
+            patch("seekr_hatchery.utils.npm.npm_latest_version", return_value="9.9.9"),
+            patch("seekr_hatchery.sessions.repo_config.resolve_no_commit", return_value=False),
+            patch("seekr_hatchery.sessions.git.is_ignored", return_value=True),
+            patch("seekr_hatchery.sessions.git.add_and_commit") as mock_commit,
+        ):
+            result = CliRunner().invoke(cli, ["sandbox", "harness", "update", "--agent", "codex"])
+
+        assert result.exit_code == 0, result.output
+        assert "npm install -g @openai/codex@9.9.9\n" in df.read_text()
+        assert not mock_commit.called
+        assert "Not committing" in result.output
+
+    def test_failed_build_reverts_pin_and_skips_commit(self, tmp_path):
+        """If the bumped image fails to build, the pin is restored and nothing
+        is committed, so the sandbox is never left pinned to a broken version."""
+        repo, df = self._repo_with_dockerfile(tmp_path, "0.1.0")
+        before = df.read_text()
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
+            patch("seekr_hatchery.utils.npm.npm_latest_version", return_value="9.9.9"),
+            patch("seekr_hatchery.sessions.repo_config.resolve_no_commit", return_value=False),
+            patch("seekr_hatchery.sessions.docker.build_docker_image", return_value=False),
+            patch("seekr_hatchery.sessions.git.add_and_commit") as mock_commit,
+        ):
+            result = CliRunner().invoke(cli, ["sandbox", "harness", "update", "--agent", "codex"])
+
+        assert result.exit_code == 1
+        assert df.read_text() == before
+        assert not mock_commit.called
+        assert "Reverted" in result.output
+
+    def _worktree_with_dockerfile(self, main_repo, name, pin):
+        wt = main_repo / ".hatchery" / "worktrees" / name
+        (wt / ".hatchery").mkdir(parents=True)
+        df = wt / ".hatchery" / "Dockerfile.codex"
+        df.write_text(f"USER hatchery\nRUN npm install -g @openai/codex@{pin}\n")
+        return wt, df
+
+    def test_run_inside_worktree_updates_that_worktree(self, tmp_path, monkeypatch):
+        """The default walk-up finds the worktree's own Dockerfile, not the
+        root's, when invoked from inside the worktree."""
+        main_repo, root_df = self._repo_with_dockerfile(tmp_path, "0.1.0")
+        wt, wt_df = self._worktree_with_dockerfile(main_repo, "my-task", "0.1.0")
+        monkeypatch.chdir(wt)
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(main_repo, True)),
+            patch("seekr_hatchery.utils.npm.npm_latest_version", return_value="9.9.9"),
+            patch("seekr_hatchery.sessions.repo_config.resolve_no_commit", return_value=True),
+        ):
+            result = CliRunner().invoke(cli, ["sandbox", "harness", "update", "--agent", "codex"])
+
+        assert result.exit_code == 0, result.output
+        assert "@openai/codex@9.9.9" in wt_df.read_text()
+        assert "@openai/codex@0.1.0" in root_df.read_text()
+
+    def test_task_flag_targets_worktree_dockerfile(self, tmp_path):
+        """--task <name> updates the named task's worktree copy."""
+        main_repo, root_df = self._repo_with_dockerfile(tmp_path, "0.1.0")
+        wt, wt_df = self._worktree_with_dockerfile(main_repo, "my-task", "0.1.0")
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(main_repo, True)),
+            patch("seekr_hatchery.utils.npm.npm_latest_version", return_value="9.9.9"),
+            patch("seekr_hatchery.sessions.repo_config.resolve_no_commit", return_value=True),
+        ):
+            result = CliRunner().invoke(cli, ["sandbox", "harness", "update", "--agent", "codex", "--task", "my-task"])
+
+        assert result.exit_code == 0, result.output
+        assert "@openai/codex@9.9.9" in wt_df.read_text()
+        assert "@openai/codex@0.1.0" in root_df.read_text()
+
+    def test_task_flag_falls_back_to_root_when_no_worktree(self, tmp_path):
+        """--task with no matching worktree updates the repo-root Dockerfile
+        (uncommitted / no-worktree setups keep it there)."""
+        main_repo, root_df = self._repo_with_dockerfile(tmp_path, "0.1.0")
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(main_repo, True)),
+            patch("seekr_hatchery.utils.npm.npm_latest_version", return_value="9.9.9"),
+            patch("seekr_hatchery.sessions.repo_config.resolve_no_commit", return_value=True),
+        ):
+            result = CliRunner().invoke(cli, ["sandbox", "harness", "update", "--agent", "codex", "--task", "ghost"])
+
+        assert result.exit_code == 0, result.output
+        assert "@openai/codex@9.9.9" in root_df.read_text()
 
 
 # ---------------------------------------------------------------------------
@@ -1748,6 +1984,31 @@ class TestCmdChatDispatch:
         # cli._launch receives a SessionMeta; chat sessions have meta.is_chat=True.
         meta_arg = mock_launch.call_args[0][0]
         assert meta_arg.is_chat is True
+
+    def _chat_launch(self, fake_tasks_db, argv):
+        """Run cmd_chat with collaborators mocked; return the _launch mock."""
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path.home() / "repo", True)),
+            patch("seekr_hatchery.sessions.next_chat_name", return_value="chat-1"),
+            patch("seekr_hatchery.cli.docker.ensure_dockerfile", return_value=False),
+            patch("seekr_hatchery.cli.docker.ensure_docker_config", return_value=False),
+            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
+            patch("seekr_hatchery.cli.sessions.save_task"),
+            patch("seekr_hatchery.cli._launch") as mock_launch,
+            patch("seekr_hatchery.cli.sessions.task_db_path") as mock_db_path,
+        ):
+            mock_db_path.return_value = MagicMock(exists=lambda: False)
+            CliRunner().invoke(cli, argv)
+        return mock_launch
+
+    def test_chat_rebuild_sandbox_threads_no_cache(self, fake_tasks_db):
+        mock_launch = self._chat_launch(fake_tasks_db, ["chat", "--rebuild-sandbox"])
+        assert mock_launch.call_args[1]["no_cache"] is True
+
+    def test_chat_defaults_to_cached_build(self, fake_tasks_db):
+        mock_launch = self._chat_launch(fake_tasks_db, ["chat"])
+        assert mock_launch.call_args[1]["no_cache"] is False
 
     def test_chat_repo_config_sets_no_commit_without_flag(self, fake_tasks_db, home):
         """repo .hatchery.yaml auto_commit=false + no flag → no_commit=True."""

@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Literal
 import seekr_hatchery.constants as constants
 import seekr_hatchery.docker as docker
 import seekr_hatchery.git as git
+import seekr_hatchery.repo_config as repo_config
 import seekr_hatchery.ui as ui
 from seekr_hatchery.constants import (
     DEFAULT_BASE,
@@ -36,6 +37,7 @@ from seekr_hatchery.utils import open_for_editing, repo_id, run, to_name
 if TYPE_CHECKING:
     from seekr_hatchery.agents.agent_backend import AgentBackend
     from seekr_hatchery.docker import ContainerRuntime
+    from seekr_hatchery.user_config import UserConfig
 
 logger = logging.getLogger(__name__)
 
@@ -1337,6 +1339,100 @@ def prepare_sandbox(
         if in_repo and (df_created or dc_created):
             _commit_docker_files(backend, repo)
     return hdir
+
+
+def harness_root(main_repo: Path, backend: "AgentBackend", task_name: str | None) -> Path:
+    """Resolve which checkout's ``.hatchery`` holds the Dockerfile to update.
+
+    With ``--task <name>``: that task's worktree if it carries its own
+    Dockerfile, else *main_repo* (uncommitted / no-worktree setups keep the
+    Dockerfile at the root). Without it: the nearest
+    ``.hatchery/Dockerfile.<agent>`` walking up from the current directory to
+    *main_repo*, so running inside a worktree updates that worktree's copy.
+    """
+    if task_name is not None:
+        worktree = worktrees_dir(main_repo) / task_name
+        if docker.dockerfile_path(worktree / ".hatchery", backend).exists():
+            return worktree
+        return main_repo
+    cwd = Path.cwd()
+    for d in [cwd, *cwd.parents]:
+        if docker.dockerfile_path(d / ".hatchery", backend).exists():
+            return d
+        if d == main_repo:
+            break
+    return main_repo
+
+
+def update_harness(
+    main_repo: Path,
+    backend: "AgentBackend",
+    *,
+    task_name: str | None,
+    commit: bool | None,
+    cfg: "UserConfig",
+    in_repo: bool,
+) -> None:
+    """Bump *backend*'s harness pin in its Dockerfile, verify it builds, commit.
+
+    Resolves the target Dockerfile (see :func:`harness_root`), rewrites the pin
+    to the registry's latest via ``backend.update``, then rebuilds the sandbox
+    image (``--no-cache``) so a bad version is caught here rather than on the
+    user's next launch. A failed build reverts the pin and exits non-zero. On
+    success the change is committed unless ``no_commit`` is resolved or the
+    Dockerfile is git-ignored.
+    """
+    kind = backend.kind.lower()
+    repo = harness_root(main_repo, backend, task_name)
+    no_commit = repo_config.resolve_no_commit(repo, cfg, commit)
+
+    df = docker.dockerfile_path(repo / ".hatchery", backend)
+    if not df.exists():
+        ui.error(f"No Dockerfile for '{kind}' at {df}.")
+        ui.info(f"  Run `hatchery sandbox shell --agent {kind}` first to create it.")
+        sys.exit(1)
+
+    old_text = df.read_text()
+    result = backend.update(old_text)
+    if result is None:
+        ui.note(
+            f"'{kind}' installs its harness at build time and has no version pin to bump — "
+            "use --rebuild-sandbox to refresh it."
+        )
+        return
+
+    new_text, old_version, version = result
+    if new_text == old_text:
+        ui.success(f"{kind} harness already up to date ({version}).")
+        return
+
+    df.write_text(new_text)
+    ui.info(f"Updating {kind} harness from {old_version or 'unpinned'} → {version}")
+
+    runtime = docker.detect_runtime()
+    ui.info("Rebuilding sandbox…")
+    built = docker.build_docker_image(
+        repo,
+        repo / ".hatchery",
+        image_name(repo, "sandbox"),
+        backend,
+        runtime=runtime,
+        no_cache=True,
+        exit_on_error=False,
+    )
+    if not built:
+        df.write_text(old_text)
+        ui.warn(f"Reverted {kind} harness pin — {version} failed to build.")
+        sys.exit(1)
+
+    ui.success("Updated.")
+    if no_commit or not in_repo:
+        return
+    rel = str(df.relative_to(repo))
+    if git.is_ignored(repo, rel):
+        ui.note(f"  Not committing — {rel} is git-ignored in this repo.")
+        return
+    git.add_and_commit(repo, f"chore: update {kind} harness to {version}", paths=[rel])
 
 
 def launch(
