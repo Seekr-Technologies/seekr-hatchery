@@ -25,11 +25,9 @@ import seekr_hatchery.repo_config as repo_config
 import seekr_hatchery.seeded_volumes as seeded_volumes
 import seekr_hatchery.sessions as sessions
 import seekr_hatchery.ui as ui
-import seekr_hatchery.user_config as user_config
 import seekr_hatchery.utils as utils
 from seekr_hatchery.constants import DEFAULT_BASE
 from seekr_hatchery.includes import IncludeEntry, load_include_entries
-from seekr_hatchery.utils import open_for_editing
 
 logger = logging.getLogger(__name__)
 
@@ -551,7 +549,7 @@ def cli(log_level: str) -> None:
     help=(
         "Whether hatchery should auto-commit its scaffolding (task file, "
         "Docker configuration, etc.). Default: from repo config "
-        "(.hatchery.yaml) if set, else global config (true). "
+        "(.hatchery/config.yaml) if set, else global config (true). "
         "Use --no-commit to skip all hatchery commits."
     ),
 )
@@ -576,10 +574,10 @@ def cmd_new(
         no_worktree = True
         ui.note("not in a git repository — running without worktree isolation.")
 
-    cfg = user_config.UserConfig.load()
+    cfg = repo_config.load_effective_config(repo)
     backend = cfg.resolve_backend(agent_name)
     use_editor = editor if editor is not None else cfg.open_editor
-    no_commit = repo_config.resolve_no_commit(repo, cfg, commit)
+    no_commit = repo_config.resolve_no_commit(cfg, commit)
 
     # Resolve --include paths: convert CLI tuples → entries, then sessions
     # merges them with docker.yaml's 'include:' list.
@@ -661,7 +659,7 @@ def cmd_new(
     default=None,
     help=(
         "Whether hatchery should auto-commit its scaffolding (Docker configuration, etc.). "
-        "Default: from repo config (.hatchery.yaml) if set, else global config (true). "
+        "Default: from repo config (.hatchery/config.yaml) if set, else global config (true). "
         "Use --no-commit to skip all hatchery commits."
     ),
 )
@@ -672,9 +670,9 @@ def cmd_chat(name: str | None, agent_name: str, rebuild_sandbox: bool, commit: b
     if not in_repo:
         ui.note("not in a git repository — running without worktree isolation.")
 
-    cfg = user_config.UserConfig.load()
+    cfg = repo_config.load_effective_config(repo)
     backend = cfg.resolve_backend(agent_name)
-    no_commit = repo_config.resolve_no_commit(repo, cfg, commit)
+    no_commit = repo_config.resolve_no_commit(cfg, commit)
 
     name = sessions.next_chat_name(repo) if name is None else utils.to_name(name)
 
@@ -860,16 +858,16 @@ def cmd_sandbox() -> None:
     default=None,
     help=(
         "Whether hatchery should auto-commit its scaffolding (Docker configuration, etc.). "
-        "Default: from repo config (.hatchery.yaml) if set, else global config (true). "
+        "Default: from repo config (.hatchery/config.yaml) if set, else global config (true). "
         "Use --no-commit to skip all hatchery commits."
     ),
 )
 def cmd_sandbox_shell(shell: str, agent_name: str, rebuild_sandbox: bool, commit: bool | None) -> None:
     """Build the sandbox image and drop into an interactive shell."""
     repo, in_repo = git.git_root_or_cwd()
-    cfg = user_config.UserConfig.load()
+    cfg = repo_config.load_effective_config(repo)
     backend = cfg.resolve_backend(agent_name)
-    no_commit = repo_config.resolve_no_commit(repo, cfg, commit)
+    no_commit = repo_config.resolve_no_commit(cfg, commit)
 
     hdir = sessions.prepare_sandbox(repo, in_repo=in_repo, backend=backend, no_commit=no_commit)
 
@@ -887,6 +885,24 @@ def cmd_sandbox_shell(shell: str, agent_name: str, rebuild_sandbox: bool, commit
         no_cache=rebuild_sandbox,
         hatchery_dir=hdir,
     )
+
+
+_TASK_EDIT_HELP = (
+    "Edit a specific task's copy: its worktree if it has one, else the repo root. "
+    "Default: the nearest copy from the current directory up to the repo root."
+)
+_COMMIT_EDIT_HELP = (
+    "Whether to commit the edit. Default: from repo config (.hatchery/config.yaml) if set, else global config (true)."
+)
+
+
+@cmd_sandbox.command("edit")
+@click.option("--task", "task_name", default=None, help=_TASK_EDIT_HELP)
+@click.option("--commit/--no-commit", "commit", default=None, help=_COMMIT_EDIT_HELP)
+def cmd_sandbox_edit(task_name: str | None, commit: bool | None) -> None:
+    """Edit the sandbox runtime config (docker.yaml)."""
+    main_repo, in_repo = git.git_root_or_cwd()
+    sessions.edit_docker_config(main_repo, task_name=task_name, commit=commit, in_repo=in_repo)
 
 
 @cmd_sandbox.group("harness")
@@ -918,7 +934,7 @@ def cmd_harness() -> None:
     default=None,
     help=(
         "Whether to commit the updated Dockerfile. "
-        "Default: from repo config (.hatchery.yaml) if set, else global config (true)."
+        "Default: from repo config (.hatchery/config.yaml) if set, else global config (true)."
     ),
 )
 def cmd_harness_update(agent_name: str, task_name: str | None, commit: bool | None) -> None:
@@ -929,9 +945,26 @@ def cmd_harness_update(agent_name: str, task_name: str | None, commit: bool | No
     pin is reverted; otherwise the change is committed.
     """
     main_repo, in_repo = git.git_root_or_cwd()
-    cfg = user_config.UserConfig.load()
+    cfg = repo_config.load_effective_config(main_repo)
     backend = cfg.resolve_backend(agent_name)
-    sessions.update_harness(main_repo, backend, task_name=task_name, commit=commit, cfg=cfg, in_repo=in_repo)
+    sessions.update_harness(main_repo, backend, task_name=task_name, commit=commit, in_repo=in_repo)
+
+
+@cmd_harness.command("edit")
+@click.option(
+    "--agent",
+    "agent_name",
+    default=None,
+    type=click.Choice(AGENT_CHOICES, case_sensitive=False),
+    help="Agent whose Dockerfile to edit (auto-detected if not specified)",
+)
+@click.option("--task", "task_name", default=None, help=_TASK_EDIT_HELP)
+@click.option("--commit/--no-commit", "commit", default=None, help=_COMMIT_EDIT_HELP)
+def cmd_harness_edit(agent_name: str, task_name: str | None, commit: bool | None) -> None:
+    """Edit an agent's harness Dockerfile (Dockerfile.<agent>)."""
+    main_repo, in_repo = git.git_root_or_cwd()
+    backend = repo_config.load_effective_config(main_repo).resolve_backend(agent_name)
+    sessions.edit_harness(main_repo, backend, task_name=task_name, commit=commit, in_repo=in_repo)
 
 
 @cli.command("exec")
@@ -1115,36 +1148,22 @@ def cmd_config() -> None:
     """View and edit hatchery configuration."""
 
 
-@cmd_config.command("edit")
+@cmd_config.group("edit")
 def cmd_config_edit() -> None:
-    """Open config in $EDITOR with validation."""
-    config_path = user_config.UserConfig.CONFIG_PATH
-    # Backup the original file before we touch it
-    backup_path = config_path.with_suffix(".yaml.bak")
-    if config_path.exists():
-        shutil.copy2(config_path, backup_path)
-    # Load, migrate, fill defaults, and write back so the user sees all options
-    cfg = user_config.UserConfig.load()
-    cfg.save()
-    # Edit → validate loop
-    while True:
-        open_for_editing(config_path)
-        error = user_config.validate_config_file(config_path)
-        if error is None:
-            break
-        ui.error("Invalid config:")
-        ui.info(error)
-        answer = input("Continue editing? [Y/n] ").strip().lower()
-        if answer == "n":
-            if backup_path.exists():
-                shutil.copy2(backup_path, config_path)
-                backup_path.unlink()
-            else:
-                config_path.unlink(missing_ok=True)
-            ui.warn("Restored previous config.")
-            sys.exit(1)
-    backup_path.unlink(missing_ok=True)
-    ui.success("Config updated.")
+    """Open a hatchery config file in $EDITOR with validation."""
+
+
+@cmd_config_edit.command("global")
+def cmd_config_edit_global() -> None:
+    """Edit the global config (~/.hatchery/config.yaml)."""
+    sessions.edit_global_config()
+
+
+@cmd_config_edit.command("local")
+def cmd_config_edit_local() -> None:
+    """Edit this repo's config (<repo>/.hatchery/config.yaml)."""
+    repo, _ = git.git_root_or_cwd()
+    sessions.edit_repo_config(repo)
 
 
 # ---------------------------------------------------------------------------

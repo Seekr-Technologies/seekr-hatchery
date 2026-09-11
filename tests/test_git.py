@@ -361,3 +361,52 @@ class TestBranchExists:
         repo = _git_repo(tmp_path / "repo")
         utils.run(["git", "tag", "v1"], cwd=repo)
         assert git.branch_exists(repo, "v1") is False
+
+
+# ---------------------------------------------------------------------------
+# is_ignored
+# ---------------------------------------------------------------------------
+
+
+class TestIsIgnored:
+    def test_false_for_tracked_path(self, tmp_path):
+        repo = _git_repo(tmp_path / "repo")
+        assert git.is_ignored(repo, repo / "README") is False
+
+    def test_true_for_gitignored_path(self, tmp_path):
+        repo = _git_repo(tmp_path / "repo")
+        (repo / ".gitignore").write_text(".hatchery/\n")
+        assert git.is_ignored(repo, repo / ".hatchery" / "docker.yaml") is True
+
+    def test_true_for_info_exclude_path(self, tmp_path):
+        """`.git/info/exclude` entries count as ignored — no-commit mode relies on this."""
+        repo = _git_repo(tmp_path / "repo")
+        (repo / ".git" / "info" / "exclude").write_text(".hatchery/\n")
+        assert git.is_ignored(repo, repo / ".hatchery" / "docker.yaml") is True
+
+    def test_false_outside_repo(self, tmp_path):
+        assert git.is_ignored(tmp_path, tmp_path / "anything") is False
+
+
+# ---------------------------------------------------------------------------
+# path_has_changes
+# ---------------------------------------------------------------------------
+
+
+class TestPathHasChanges:
+    def test_false_for_clean_tracked_path(self, tmp_path):
+        repo = _git_repo(tmp_path / "repo")
+        assert git.path_has_changes(repo, repo / "README") is False
+
+    def test_true_for_untracked_path(self, tmp_path):
+        repo = _git_repo(tmp_path / "repo")
+        (repo / "new.txt").write_text("hi")
+        assert git.path_has_changes(repo, repo / "new.txt") is True
+
+    def test_true_for_modified_tracked_path(self, tmp_path):
+        repo = _git_repo(tmp_path / "repo")
+        (repo / "README").write_text("changed")
+        assert git.path_has_changes(repo, repo / "README") is True
+
+    def test_false_outside_repo(self, tmp_path):
+        assert git.path_has_changes(tmp_path, tmp_path / "anything") is False

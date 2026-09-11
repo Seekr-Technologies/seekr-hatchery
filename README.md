@@ -87,8 +87,15 @@ When the agent starts a new task it is given a task file at `.hatchery/tasks/YYY
 | `list` | List all tasks for the current repo |
 | `status <name>` | Show task metadata and the full task file |
 | `self update` | Upgrade hatchery to the latest release |
-| `config edit` | Open `~/.hatchery/config.yaml` in `$EDITOR` with validation |
+| `config edit global` | Edit the global config (`~/.hatchery/config.yaml`) in `$EDITOR` with validation |
+| `config edit local` | Edit this repo's config (`<repo>/.hatchery/config.yaml`) in `$EDITOR` with validation |
+| `sandbox edit` | Edit the sandbox runtime config (`docker.yaml`) in `$EDITOR` with validation |
+| `sandbox harness edit --agent <name>` | Edit an agent's harness `Dockerfile.<agent>` in `$EDITOR` |
+| `sandbox harness update --agent <name>` | Bump the agent harness pin to its latest release, rebuild to verify, and commit |
+| `sandbox shell` | Build the sandbox image and drop into an interactive shell |
 | `logs` | View or follow the hatchery log file (`~/.hatchery/hatchery.log`) |
+
+`sandbox edit` and `sandbox harness edit/update` accept `--task <name>` to target a live task's build copy (its worktree, else the repo root), and `--commit/--no-commit` to control the auto-commit of the edited file (default from repo/global config; committed only when tracked). Without `--task`, they resolve the nearest `.hatchery/` from the current directory up to the repo root.
 
 All `new` / `resume` commands accept:
 - `--no-docker` — skip the container even if a Dockerfile is present
@@ -97,7 +104,7 @@ All `new` / `resume` commands accept:
 `new` also accepts:
 - `--from <ref>` — fork from a specific branch or commit (default: `HEAD`)
 - `--editor / --no-editor` — force editor or prompt mode for the task objective. By default, hatchery prompts in the terminal; set `open_editor: true` in `~/.hatchery/config.yaml` to default to `$EDITOR`. If the editor is opened and the file is unchanged on close, the task is cancelled.
-- `--commit / --no-commit` — control whether hatchery auto-commits its scaffolding (task file, Docker configuration). Default: from a repo-local `.hatchery.yaml` (`auto_commit: true/false`) if present at the repo root, else the global config (`auto_commit: true`). Use `--no-commit` to keep all hatchery files out of the tracked repo — task records and Docker files stay at `<repo>/.hatchery/` but are hidden from git via `.git/info/exclude` instead of being committed. Set `auto_commit: false` in `~/.hatchery/config.yaml` to make no-commit the default everywhere, or in a repo's `.hatchery.yaml` to make it the default for just that repo.
+- `--commit / --no-commit` — control whether hatchery auto-commits its scaffolding (task file, Docker configuration). Default: from a repo-local `.hatchery/config.yaml` (`auto_commit: true/false`) if present, else the global config (`auto_commit: true`). Use `--no-commit` to keep all hatchery files out of the tracked repo — task records and Docker files stay at `<repo>/.hatchery/` but are hidden from git via `.git/info/exclude` instead of being committed. Set `auto_commit: false` in `~/.hatchery/config.yaml` to make no-commit the default everywhere, or in a repo's `.hatchery/config.yaml` to make it the default for just that repo.
 - `--agent [codex]` — choose the AI agent (auto-detected from installed agents)
 
 The chosen agent is stored in task metadata and re-used automatically on `resume`.
@@ -301,8 +308,8 @@ Then output `"$top\n$hatchery_line\n$bottom"` when `$hatchery_line` is non-empty
 
 ```
 <repo>/
-  .hatchery.yaml           # optional repo-local config override (auto_commit)
   .hatchery/
+    config.yaml            # optional repo-local config override (auto_commit)
     Dockerfile             # optional sandbox definition
     docker.yaml            # optional Docker config (custom mounts, etc.)
     tasks/                 # task records: <date>-<name>/task.md

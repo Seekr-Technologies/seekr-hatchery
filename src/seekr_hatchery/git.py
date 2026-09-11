@@ -127,6 +127,15 @@ def has_uncommitted_changes(cwd: Path) -> bool:
     return bool(result.stdout.strip())
 
 
+def path_has_changes(repo: Path, path: Path) -> bool:
+    """True if *path* has uncommitted changes in *repo* (untracked or modified).
+
+    Returns False outside a git repo (git errors, empty output).
+    """
+    result = run(["git", "status", "--porcelain", "--", str(path)], cwd=repo, check=False)
+    return bool(result.stdout.strip())
+
+
 def uncommitted_changes_summary(cwd: Path) -> str:
     """Return a short display of uncommitted changes: file list + diff-stat summary."""
     status = run(["git", "status", "--short"], cwd=cwd, check=False).stdout.strip()
@@ -358,3 +367,15 @@ def add_and_commit(repo: Path, message: str, *, paths: list[str] | None = None) 
     """
     add(repo, paths)
     commit(repo, message)
+
+
+def commit_path_if_tracked(repo: Path, path: Path, message: str) -> None:
+    """Commit *path* under *repo* when it's tracked (not git-ignored).
+
+    A no-op in no-commit mode (``.hatchery/`` is git-excluded) and outside a
+    git repo. Only *path* is staged, so unrelated dirty files stay untouched.
+    """
+    if is_ignored(repo, str(path)) or not path_has_changes(repo, path):
+        return
+    add_and_commit(repo, message, paths=[str(path.relative_to(repo))])
+    ui.success(f"Committed {path.name}.")

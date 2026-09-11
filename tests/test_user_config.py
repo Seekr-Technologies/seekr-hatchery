@@ -14,17 +14,10 @@ import seekr_hatchery.user_config as user_config
 class TestUserConfigModelDefaults:
     def test_defaults(self):
         assert user_config.UserConfigModel().model_dump() == {
-            "schema_version": "1",
             "default_agent": None,
             "open_editor": False,
             "auto_commit": True,
         }
-
-    def test_invalid_schema_version_rejected(self):
-        from pydantic import ValidationError
-
-        with pytest.raises(ValidationError):
-            user_config.UserConfigModel(schema_version="42")  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -33,15 +26,13 @@ class TestUserConfigModelDefaults:
 
 
 class TestMigrate:
-    def test_v0_migrates_to_v1(self):
-        assert user_config._migrate({"default_agent": "CODEX"}) == {
-            "schema_version": "1",
+    def test_strips_legacy_schema_version(self):
+        assert user_config._migrate({"schema_version": "1", "default_agent": "CODEX"}) == {
             "default_agent": "CODEX",
         }
 
-    def test_v1_is_idempotent(self):
-        data = {"schema_version": "1", "default_agent": "CODEX"}
-        assert user_config._migrate(data) == {"schema_version": "1", "default_agent": "CODEX"}
+    def test_no_op_without_schema_version(self):
+        assert user_config._migrate({"default_agent": "CODEX"}) == {"default_agent": "CODEX"}
 
 
 # ---------------------------------------------------------------------------
@@ -52,34 +43,30 @@ class TestMigrate:
 class TestUserConfigLoad:
     def test_missing_file_returns_defaults(self, tmp_path):
         cfg = user_config.UserConfig.load(tmp_path / "config.yaml")
-        assert cfg.schema_version == "1"
         assert cfg.default_agent is None
 
     def test_valid_file_is_loaded(self, tmp_path):
         path = tmp_path / "config.yaml"
-        path.write_text(yaml.dump({"schema_version": "1", "default_agent": "CODEX"}))
+        path.write_text(yaml.dump({"default_agent": "CODEX"}))
         cfg = user_config.UserConfig.load(path)
-        assert cfg.schema_version == "1"
         assert cfg.default_agent == "CODEX"
 
     def test_corrupt_yaml_returns_defaults(self, tmp_path):
         path = tmp_path / "config.yaml"
         path.write_text("not valid yaml: [{{")
         cfg = user_config.UserConfig.load(path)
-        assert cfg.schema_version == "1"
         assert cfg.default_agent is None
 
-    def test_v0_file_is_migrated(self, tmp_path):
+    def test_legacy_schema_version_is_stripped(self, tmp_path):
         path = tmp_path / "config.yaml"
-        path.write_text(yaml.dump({"default_agent": "CODEX"}))
+        path.write_text(yaml.dump({"schema_version": "1", "default_agent": "CODEX"}))
         cfg = user_config.UserConfig.load(path)
-        assert cfg.schema_version == "1"
         assert cfg.default_agent == "CODEX"
 
     def test_legacy_json_config_is_migrated(self, tmp_path, monkeypatch):
         legacy_path = tmp_path / "config.json"
         new_path = tmp_path / "config.yaml"
-        legacy_path.write_text(yaml.dump({"schema_version": "1", "default_agent": "CODEX"}))
+        legacy_path.write_text(yaml.dump({"default_agent": "CODEX"}))
         monkeypatch.setattr(user_config.UserConfig, "CONFIG_PATH", new_path)
         monkeypatch.setattr(user_config.UserConfig, "_LEGACY_CONFIG_PATH", legacy_path)
 
@@ -109,7 +96,6 @@ class TestUserConfigSave:
         cfg.save()
         reloaded = user_config.UserConfig.load(path)
         assert reloaded.default_agent == "CODEX"
-        assert reloaded.schema_version == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +132,7 @@ class TestSetOpenEditor:
 
     def test_load_from_file(self, tmp_path):
         path = tmp_path / "config.yaml"
-        path.write_text(yaml.dump({"schema_version": "1", "open_editor": True}))
+        path.write_text(yaml.dump({"open_editor": True}))
         cfg = user_config.UserConfig.load(path)
         assert cfg.open_editor is True
 
@@ -159,7 +145,7 @@ class TestSetOpenEditor:
 class TestValidateConfigFile:
     def test_valid_file(self, tmp_path):
         path = tmp_path / "config.yaml"
-        path.write_text("schema_version: '1'\ndefault_agent: null\n")
+        path.write_text("default_agent: null\n")
         assert user_config.validate_config_file(path) is None
 
     def test_invalid_yaml(self, tmp_path):
@@ -169,30 +155,25 @@ class TestValidateConfigFile:
         assert result is not None
         assert "Invalid YAML" in result
 
-    def test_invalid_schema_version(self, tmp_path):
+    def test_legacy_schema_version_still_valid(self, tmp_path):
+        """Pre-removal files carrying schema_version pass — migration strips it."""
         path = tmp_path / "config.yaml"
-        path.write_text("schema_version: '99'\n")
-        result = user_config.validate_config_file(path)
-        assert result is not None
+        path.write_text("schema_version: '1'\ndefault_agent: null\n")
+        assert user_config.validate_config_file(path) is None
 
     def test_unknown_key_rejected(self, tmp_path):
         path = tmp_path / "config.yaml"
-        path.write_text("schema_version: '1'\ntypo_key: true\n")
+        path.write_text("typo_key: true\n")
         result = user_config.validate_config_file(path)
         assert result is not None
         assert "typo_key" in result
 
-    def test_v0_file_passes_after_migration(self, tmp_path):
-        path = tmp_path / "config.yaml"
-        path.write_text("default_agent: CODEX\n")
-        assert user_config.validate_config_file(path) is None
-
     def test_load_ignores_unknown_keys(self, tmp_path):
         """Normal load stays permissive for forward compatibility."""
         path = tmp_path / "config.yaml"
-        path.write_text("schema_version: '1'\nfuture_field: 42\n")
+        path.write_text("future_field: 42\n")
         cfg = user_config.UserConfig.load(path)
-        assert cfg.schema_version == "1"
+        assert cfg.default_agent is None
 
 
 # ---------------------------------------------------------------------------
@@ -257,11 +238,11 @@ class TestSetAutoCommit:
 
     def test_load_from_file(self, tmp_path):
         path = tmp_path / "config.yaml"
-        path.write_text(yaml.dump({"schema_version": "1", "auto_commit": False}))
+        path.write_text(yaml.dump({"auto_commit": False}))
         cfg = user_config.UserConfig.load(path)
         assert cfg.auto_commit is False
 
     def test_validate_accepts_auto_commit(self, tmp_path):
         path = tmp_path / "config.yaml"
-        path.write_text("schema_version: '1'\nauto_commit: false\n")
+        path.write_text("auto_commit: false\n")
         assert user_config.validate_config_file(path) is None

@@ -1767,3 +1767,46 @@ class TestRemoveClipboardDir:
         # No clipboard subdir was ever created.
         docker.remove_clipboard_dir(tmp_path)  # must not raise
         assert not docker.clipboard_image_dir(tmp_path).exists()
+
+
+class TestValidateDockerConfigFile:
+    def test_valid_returns_none(self, tmp_path):
+        path = tmp_path / "docker.yaml"
+        path.write_text("schema_version: '1'\nmounts: []\n")
+        assert docker.validate_docker_config_file(path) is None
+
+    def test_empty_file_returns_none(self, tmp_path):
+        path = tmp_path / "docker.yaml"
+        path.write_text("")
+        assert docker.validate_docker_config_file(path) is None
+
+    def test_unknown_key_returns_error(self, tmp_path):
+        path = tmp_path / "docker.yaml"
+        path.write_text("bogus_key: 1\n")
+        assert docker.validate_docker_config_file(path) is not None
+
+    def test_bad_capability_returns_error(self, tmp_path):
+        path = tmp_path / "docker.yaml"
+        path.write_text("cap_add: [BOGUS_CAP]\n")
+        assert docker.validate_docker_config_file(path) is not None
+
+    def test_invalid_yaml_returns_error(self, tmp_path):
+        path = tmp_path / "docker.yaml"
+        path.write_text("mounts: [unterminated\n")
+        assert "Invalid YAML" in docker.validate_docker_config_file(path)
+
+
+class TestEnsureHelpersNoPrompt:
+    def test_ensure_docker_config_writes_valid_template(self, tmp_path):
+        created = docker.ensure_docker_config(tmp_path, prompt=False)
+        path = tmp_path / docker.DOCKER_CONFIG
+        assert created is True
+        assert path.exists()
+        assert docker.validate_docker_config_file(path) is None
+
+    def test_ensure_dockerfile_writes_populated_template(self, tmp_path):
+        created = docker.ensure_dockerfile(tmp_path, agent.CODEX, prompt=False)
+        path = tmp_path / "Dockerfile.codex"
+        assert created is True
+        assert path.exists()
+        assert "{{AGENT_INSTALL}}" not in path.read_text()

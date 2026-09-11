@@ -25,6 +25,7 @@ import seekr_hatchery.docker as docker
 import seekr_hatchery.git as git
 import seekr_hatchery.repo_config as repo_config
 import seekr_hatchery.ui as ui
+import seekr_hatchery.user_config as user_config
 from seekr_hatchery.constants import (
     DEFAULT_BASE,
     DOCKER_CONFIG,
@@ -32,12 +33,11 @@ from seekr_hatchery.constants import (
 )
 from seekr_hatchery.includes import IncludeEntry, load_include_entries, serialize_include_entries
 from seekr_hatchery.models import SCHEMA_VERSION, SessionMeta
-from seekr_hatchery.utils import open_for_editing, repo_id, run, to_name
+from seekr_hatchery.utils import edit_with_validation, open_for_editing, repo_id, run, to_name
 
 if TYPE_CHECKING:
     from seekr_hatchery.agents.agent_backend import AgentBackend
     from seekr_hatchery.docker import ContainerRuntime
-    from seekr_hatchery.user_config import UserConfig
 
 logger = logging.getLogger(__name__)
 
@@ -1341,27 +1341,48 @@ def prepare_sandbox(
     return hdir
 
 
-def harness_root(main_repo: Path, backend: "AgentBackend", task_name: str | None) -> Path:
-    """Resolve which checkout's ``.hatchery`` holds the Dockerfile to update.
+def _nearest_root(main_repo: Path, task_name: str | None, has_file: "Callable[[Path], bool]") -> Path:
+    """Resolve which checkout's ``.hatchery`` holds the file to edit.
 
-    With ``--task <name>``: that task's worktree if it carries its own
-    Dockerfile, else *main_repo* (uncommitted / no-worktree setups keep the
-    Dockerfile at the root). Without it: the nearest
-    ``.hatchery/Dockerfile.<agent>`` walking up from the current directory to
-    *main_repo*, so running inside a worktree updates that worktree's copy.
+    With ``--task <name>``: that task's worktree if it carries the file, else
+    *main_repo* (uncommitted / no-worktree setups keep the file at the root).
+    Without it: the nearest checkout whose ``.hatchery`` has the file, walking
+    up from the current directory to *main_repo*, so running inside a worktree
+    edits that worktree's copy. Falls back to *main_repo* when none is found —
+    the template new tasks inherit.
+
+    *has_file* is a ``root -> bool`` predicate testing a candidate checkout root.
     """
     if task_name is not None:
         worktree = worktrees_dir(main_repo) / task_name
-        if docker.dockerfile_path(worktree / ".hatchery", backend).exists():
+        if has_file(worktree):
             return worktree
         return main_repo
     cwd = Path.cwd()
     for d in [cwd, *cwd.parents]:
-        if docker.dockerfile_path(d / ".hatchery", backend).exists():
+        if has_file(d):
             return d
         if d == main_repo:
             break
     return main_repo
+
+
+def harness_root(main_repo: Path, backend: "AgentBackend", task_name: str | None) -> Path:
+    """Resolve which checkout's ``.hatchery`` holds the Dockerfile to edit/update."""
+    return _nearest_root(
+        main_repo,
+        task_name,
+        lambda root: docker.dockerfile_path(root / ".hatchery", backend).exists(),
+    )
+
+
+def docker_config_root(main_repo: Path, task_name: str | None) -> Path:
+    """Resolve which checkout's ``.hatchery`` holds the ``docker.yaml`` to edit."""
+    return _nearest_root(
+        main_repo,
+        task_name,
+        lambda root: (root / ".hatchery" / constants.DOCKER_CONFIG).exists(),
+    )
 
 
 def update_harness(
@@ -1370,7 +1391,6 @@ def update_harness(
     *,
     task_name: str | None,
     commit: bool | None,
-    cfg: "UserConfig",
     in_repo: bool,
 ) -> None:
     """Bump *backend*'s harness pin in its Dockerfile, verify it builds, commit.
@@ -1384,7 +1404,8 @@ def update_harness(
     """
     kind = backend.kind.lower()
     repo = harness_root(main_repo, backend, task_name)
-    no_commit = repo_config.resolve_no_commit(repo, cfg, commit)
+    cfg = repo_config.load_effective_config(repo)
+    no_commit = repo_config.resolve_no_commit(cfg, commit)
 
     df = docker.dockerfile_path(repo / ".hatchery", backend)
     if not df.exists():
@@ -1433,6 +1454,82 @@ def update_harness(
         ui.note(f"  Not committing — {rel} is git-ignored in this repo.")
         return
     git.add_and_commit(repo, f"chore: update {kind} harness to {version}", paths=[rel])
+
+
+# ---------------------------------------------------------------------------
+# Config / sandbox file editing
+# ---------------------------------------------------------------------------
+
+
+def _commit_edit(root: Path, *, in_repo: bool, commit: bool | None, path: Path, message: str) -> None:
+    """Auto-commit an edited sandbox file when tracked and commit mode is on.
+
+    Resolves the ``--commit/--no-commit`` flag against *root*'s effective config
+    (like ``sandbox shell`` / ``harness update``); a no-op outside a repo, in
+    no-commit mode, or when *path* is git-ignored (e.g. an excluded worktree).
+    """
+    if not in_repo:
+        return
+    cfg = repo_config.load_effective_config(root)
+    if repo_config.resolve_no_commit(cfg, commit):
+        return
+    git.commit_path_if_tracked(root, path, message)
+
+
+def edit_global_config() -> None:
+    """Edit the global config (~/.hatchery/config.yaml) in $EDITOR."""
+    edit_with_validation(
+        user_config.UserConfig.CONFIG_PATH,
+        user_config.validate_config_file,
+        # Always merge-in defaults so the user sees every option, even if their
+        # existing file predates a field.
+        prepare=lambda: user_config.UserConfig.load().save(),
+    )
+
+
+def edit_repo_config(repo: Path) -> None:
+    """Edit this repo's config (<repo>/.hatchery/config.yaml) in $EDITOR."""
+    edit_with_validation(
+        repo / constants.REPO_CONFIG,
+        repo_config.validate_config_file,
+        seed=lambda: repo_config.create_repo_config(repo),
+    )
+
+
+def _apply_hint(task_name: str | None) -> None:
+    if task_name is not None:
+        ui.info(f"Run `hatchery resume {task_name} --rebuild-sandbox` to apply.")
+
+
+def edit_docker_config(main_repo: Path, *, task_name: str | None, commit: bool | None, in_repo: bool) -> None:
+    """Edit the sandbox runtime config (docker.yaml) for the resolved checkout."""
+    root = docker_config_root(main_repo, task_name)
+    hdir = root / ".hatchery"
+    path = hdir / constants.DOCKER_CONFIG
+    edit_with_validation(
+        path,
+        docker.validate_docker_config_file,
+        seed=lambda: docker.ensure_docker_config(hdir, prompt=False),
+    )
+    _commit_edit(root, in_repo=in_repo, commit=commit, path=path, message="chore: update hatchery docker.yaml")
+    _apply_hint(task_name)
+
+
+def edit_harness(
+    main_repo: Path,
+    backend: "AgentBackend",
+    *,
+    task_name: str | None,
+    commit: bool | None,
+    in_repo: bool,
+) -> None:
+    """Edit an agent's harness Dockerfile (Dockerfile.<agent>) for the resolved checkout."""
+    root = harness_root(main_repo, backend, task_name)
+    hdir = root / ".hatchery"
+    path = docker.dockerfile_path(hdir, backend)
+    edit_with_validation(path, seed=lambda: docker.ensure_dockerfile(hdir, backend, prompt=False))
+    _commit_edit(root, in_repo=in_repo, commit=commit, path=path, message=f"chore: update {backend.kind} Dockerfile")
+    _apply_hint(task_name)
 
 
 def launch(

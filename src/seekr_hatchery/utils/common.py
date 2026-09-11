@@ -11,8 +11,10 @@ import hashlib
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import seekr_hatchery.ui as ui
@@ -87,3 +89,45 @@ def open_for_editing(path: Path) -> None:
         else:
             subprocess.run(["xdg-open", str(path)])
         input(f"Edit {path.name}, then press Enter to continue...")
+
+
+def edit_with_validation(
+    path: Path,
+    validate: Callable[[Path], str | None] | None = None,
+    *,
+    seed: Callable[[], object] | None = None,
+    prepare: Callable[[], object] | None = None,
+) -> None:
+    """Edit *path* in $EDITOR, re-validating in a loop; backup/restore on abort.
+
+    *validate* is a ``path -> str | None`` callable (error message or None);
+    pass None to skip validation. *seed* is a no-arg callable that creates the
+    file when it does not exist yet. *prepare* is a no-arg callable run every
+    time (after the backup is taken) — used to normalise/merge-in defaults so
+    the user sees all current options before editing.
+    """
+    backup_path = path.with_name(path.name + ".bak")
+    if path.exists():
+        shutil.copy2(path, backup_path)
+    elif seed is not None:
+        seed()
+    if prepare is not None:
+        prepare()
+    while True:
+        open_for_editing(path)
+        error = validate(path) if validate is not None else None
+        if error is None:
+            break
+        ui.error("Invalid config:")
+        ui.info(error)
+        answer = input("Continue editing? [Y/n] ").strip().lower()
+        if answer == "n":
+            if backup_path.exists():
+                shutil.copy2(backup_path, path)
+                backup_path.unlink()
+            else:
+                path.unlink(missing_ok=True)
+            ui.warn("Restored previous config.")
+            sys.exit(1)
+    backup_path.unlink(missing_ok=True)
+    ui.success("Config updated.")
