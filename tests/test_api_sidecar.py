@@ -575,6 +575,62 @@ class TestProxyWebSocketRelay:
 
             assert conn.sock.recv(1) == b""
 
+    def test_websocket_close_error_is_logged_without_escaping_handler(self, monkeypatch, caplog):
+        """An upstream close race must not make socketserver print a traceback."""
+        import socket as _socket
+
+        created = []
+        closed = threading.Event()
+
+        class _WSResp:
+            status = 101
+            fp = None
+
+            def getheaders(self):
+                return [("upgrade", "websocket"), ("connection", "Upgrade"), ("sec-websocket-accept", "abc123==")]
+
+        class _WSConn:
+            def __init__(self, host, timeout=None):
+                self._upstream, self._downstream = _socket.socketpair()
+                self.sock = self._upstream
+                created.append(self)
+
+            def request(self, method, path, body=None, headers=None):
+                resp = _WSResp()
+                resp.fp = self._downstream.makefile("rb")
+                self._resp = resp
+
+            def getresponse(self):
+                return self._resp
+
+            def close(self):
+                closed.set()
+                raise OSError("upstream connection already reset")
+
+        monkeypatch.setattr(http.client, "HTTPSConnection", _WSConn)
+        with caplog.at_level(logging.WARNING, logger="seekr_hatchery"):
+            with proxy.api_server(_make_bearer_mutator("real-key"), _TOKEN, target_host="api.example.com") as server:
+                port = server.port
+                _wait_for_port(port)
+                conn = http.client.HTTPConnection("localhost", port, timeout=1)
+                conn.request(
+                    "GET",
+                    "/ws",
+                    headers={
+                        "Authorization": f"Bearer {_TOKEN}",
+                        "Upgrade": "websocket",
+                        "Connection": "Upgrade",
+                        "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+                        "Sec-WebSocket-Version": "13",
+                    },
+                )
+                assert conn.getresponse().status == 101
+                created[0]._upstream.shutdown(_socket.SHUT_WR)
+                assert conn.sock.recv(1) == b""
+                assert closed.wait(timeout=2)
+
+        assert any("upstream WebSocket connection close failed" in r.getMessage() for r in caplog.records)
+
     def test_101_forwarded_with_websocket_headers(self, monkeypatch):
         """Proxy must forward 101 with Connection/Upgrade headers intact and relay bytes."""
         import socket as _socket
