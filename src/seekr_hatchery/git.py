@@ -75,6 +75,13 @@ def create_worktree(repo: Path, branch: str, worktree: Path, base: str, allow_re
     was reused.
     """
     worktree.parent.mkdir(parents=True, exist_ok=True)
+    if (
+        base == "HEAD"
+        and run(["git", "rev-parse", "--verify", "--quiet", "HEAD"], cwd=repo, check=False).returncode != 0
+    ):
+        ui.error("this repository has no commits. Make an initial commit before starting a task.")
+        sys.exit(1)
+
     run(["git", "worktree", "remove", "--force", str(worktree)], cwd=repo, check=False)
 
     if allow_reuse:

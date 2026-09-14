@@ -410,3 +410,15 @@ class TestPathHasChanges:
 
     def test_false_outside_repo(self, tmp_path):
         assert git.path_has_changes(tmp_path, tmp_path / "anything") is False
+
+
+class TestCreateWorktreeUnbornHead:
+    def test_unborn_head_instructs_user_to_make_initial_commit(self, tmp_path, capsys):
+        """An empty repository cannot provide the default base for a task."""
+        repo = tmp_path / "repo"
+        utils.run(["git", "init", "--initial-branch=main", str(repo)])
+
+        with pytest.raises(SystemExit):
+            git.create_worktree(repo, "hatchery/t", repo / "wt", "HEAD")
+
+        assert "Make an initial commit" in capsys.readouterr().err
