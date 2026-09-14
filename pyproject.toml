@@ -19,9 +19,9 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-    "click>=8.3.1",
-    "cryptography>=41,<50",
-    "prompt-toolkit>=3.0.52",
+    "click>=8",
+    "cryptography>=41",
+    "prompt-toolkit>=3",
     "pyyaml>=6",
     "pydantic>=2",
     "urllib3>=2.0",
