@@ -572,9 +572,9 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "click", specifier = ">=8.3.1" },
-    { name = "cryptography", specifier = ">=41,<50" },
-    { name = "prompt-toolkit", specifier = ">=3.0.52" },
+    { name = "click", specifier = ">=8" },
+    { name = "cryptography", specifier = ">=41" },
+    { name = "prompt-toolkit", specifier = ">=3" },
     { name = "pydantic", specifier = ">=2" },
     { name = "pyyaml", specifier = ">=6" },
     { name = "tomli-w", specifier = ">=1.0" },
