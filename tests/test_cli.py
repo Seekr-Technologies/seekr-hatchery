@@ -158,7 +158,15 @@ def _new_patches():
     read all git invocations from one call_args_list — including the bare
     ``run([\"git\", \"add\", ...])`` issued indirectly by ``git.add_and_commit``.
     """
-    shared_run = MagicMock(return_value=MagicMock(returncode=0, stdout="", stderr=""))
+
+    def git_result(command, **_kwargs):
+        return MagicMock(
+            returncode=1 if command[:4] == ["git", "check-ignore", "-q", "--no-index"] else 0,
+            stdout="",
+            stderr="",
+        )
+
+    shared_run = MagicMock(side_effect=git_result)
     return [
         patch("seekr_hatchery.cli.git.git_root_or_cwd"),
         patch("seekr_hatchery.cli.sessions.ensure_gitignore"),

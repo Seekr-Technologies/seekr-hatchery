@@ -777,6 +777,27 @@ class TestSessionCreateTask:
         log = _git(worktree, "log", "--oneline").stdout
         assert "hatchery Docker configuration" in log
 
+    def test_commit_mode_removes_no_commit_exclusion(self, git_repo, fake_tasks_db, no_input):
+        sessions.create(name="local", repo=git_repo, type="task", backend=agent.CODEX, no_commit=True, objective="x")
+
+        sessions.create(name="committed", repo=git_repo, type="task", backend=agent.CODEX, objective="x")
+
+        exclude = (git_repo / ".git" / "info" / "exclude").read_text()
+        worktree = git_repo / ".hatchery" / "worktrees" / "committed"
+        assert ".hatchery/" not in exclude
+        assert "hatchery Docker configuration" in _git(worktree, "log", "--oneline").stdout
+
+    def test_commit_mode_rejects_ignored_hatchery_dir(self, git_repo, fake_tasks_db, no_input, capsys):
+        (git_repo / ".gitignore").write_text(".hatchery/\n")
+
+        with pytest.raises(SystemExit):
+            sessions.create(name="t", repo=git_repo, type="task", backend=agent.CODEX, objective="x")
+
+        assert capsys.readouterr().err == (
+            "Error: .hatchery/ is ignored by Git, so Hatchery cannot commit its task and Docker files. "
+            "Remove the ignore rule to use commit mode, or use --no-commit (or set auto_commit: false).\n"
+        )
+
     def test_not_committed_skips_task_file_commit(self, git_repo, fake_tasks_db, no_input):
         sessions.create(
             name="t",
