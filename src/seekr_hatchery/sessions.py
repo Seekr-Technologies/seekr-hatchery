@@ -995,6 +995,17 @@ def _check_not_in_progress(repo: Path, name: str, *, label: str = "session") -> 
         sys.exit(1)
 
 
+def _require_hatchery_tracking(repo: Path) -> None:
+    """Exit with guidance when commit mode cannot track ``.hatchery/``."""
+    if not git.is_ignored(repo, ".hatchery/"):
+        return
+    ui.error(
+        ".hatchery/ is ignored by Git, so Hatchery cannot commit its task and Docker files. "
+        "Remove the ignore rule to use commit mode, or use --no-commit (or set auto_commit: false)."
+    )
+    sys.exit(1)
+
+
 def _commit_docker_files(backend: "AgentBackend", worktree: Path) -> None:
     """Stage and commit any newly created Docker scaffolding files."""
     ui.info("  Committing...")
@@ -1183,6 +1194,8 @@ def create(
         else:
             ensure_tasks_dir(repo)
             if in_repo:
+                git.remove_local_git_exclude(repo, ".hatchery/")
+                _require_hatchery_tracking(repo)
                 ensure_gitignore(repo)
 
     _check_not_in_progress(repo, name, label="chat" if is_chat else "task")
@@ -1334,6 +1347,9 @@ def prepare_sandbox(
     else:
         hdir = repo / ".hatchery"
         ensure_tasks_dir(repo)
+        if in_repo:
+            git.remove_local_git_exclude(repo, ".hatchery/")
+            _require_hatchery_tracking(repo)
         df_created = docker.ensure_dockerfile(hdir, backend)
         dc_created = docker.ensure_docker_config(hdir)
         if in_repo and (df_created or dc_created):
