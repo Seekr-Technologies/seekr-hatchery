@@ -339,7 +339,16 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
                 except Exception:
                     pass
             finally:
-                conn.close()
+                # HTTPConnection.close() closes its response object too.  When
+                # the WebSocket peer has already reset the connection, that
+                # response close can fail while flushing its buffered socket.
+                # This is an expected teardown race; do not let it escape the
+                # handler and make socketserver dump a traceback into the
+                # agent's terminal.
+                try:
+                    conn.close()
+                except OSError as exc:
+                    logger.warning("proxy: [c%d] upstream WebSocket connection close failed: %s", cid, exc)
             return
 
         # Normal request — use the shared connection pool.
