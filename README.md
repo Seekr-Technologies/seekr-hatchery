@@ -240,6 +240,18 @@ There is no automatic token refresh — when the host bearer rotates,
 update `config.toml` on the host through whatever workflow your setup
 uses.
 
+### The container's `~/.pi/agent`
+
+Pi sandbox sessions keep their own agent state in a per-task volume. Hatchery
+bind-mounts your host `settings.json`, `models-store.json`, installed npm
+modules, and global `extensions/` directory. Hatchery creates the extensions
+directory on the host if needed, then mounts it read-write: extensions are
+auto-discovered normally, session-authored changes persist on the host, and
+host edits can be hot-reloaded with `/reload`. Symlink targets within
+extensions are mounted too, so dotfiles-managed extensions and their
+dependencies load correctly. Authentication remains container-local and
+contains only the per-session proxy credentials.
+
 ### Container runtime auto-detection
 
 Hatchery prefers **Podman** as the sandbox runtime when it is installed, falling back to Docker otherwise. Podman is rootless-native: UID 0 inside the sandbox maps to the calling user on the host — not real root. No daemon required. If you have both installed, `podman info` is checked first.
