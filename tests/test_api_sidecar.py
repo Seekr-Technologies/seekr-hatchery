@@ -605,7 +605,7 @@ class TestProxyWebSocketRelay:
 
             def close(self):
                 closed.set()
-                raise OSError("upstream connection already reset")
+                raise ValueError("I/O operation on closed file")
 
         monkeypatch.setattr(http.client, "HTTPSConnection", _WSConn)
         with caplog.at_level(logging.WARNING, logger="seekr_hatchery"):
