@@ -406,15 +406,24 @@ class TestContainerEnv:
 
 
 class TestConstructMounts:
-    def test_returns_only_volume_when_no_host_config(self, tmp_path):
+    def test_creates_and_mounts_extensions_when_no_host_config(self, home, tmp_path):
         # autouse ``home`` fixture points Path.home() at an empty temp dir,
         # so neither settings.json nor models-store.json exists.
-        mounts = agent.PI.construct_mounts(tmp_path)
-        assert len(mounts) == 1
-        (m,) = mounts
-        assert isinstance(m, mount.VolumeMount)
-        assert m.dst == f"{agent.CONTAINER_HOME}/.pi/agent"
-        assert m.seed is None
+        vol, ext = agent.PI.construct_mounts(tmp_path)
+
+        assert (vol.name, vol.dst, vol.mode, vol.seed) == (
+            "pi-dir",
+            f"{agent.CONTAINER_HOME}/.pi/agent",
+            "RW",
+            None,
+        )
+        assert (ext.src, ext.dst, ext.mode, ext.follow_links) == (
+            home / ".pi" / "agent" / "extensions",
+            f"{agent.CONTAINER_HOME}/.pi/agent/extensions",
+            "RW",
+            True,
+        )
+        assert ext.src.is_dir()
 
     def test_layers_host_config_binds_over_volume(self, home, tmp_path):
         agent_dir = home / ".pi" / "agent"
@@ -423,8 +432,10 @@ class TestConstructMounts:
         (agent_dir / "models-store.json").write_text("{}")
         node_modules = agent_dir / "npm" / "node_modules"
         node_modules.mkdir(parents=True)
+        extensions = agent_dir / "extensions"
+        extensions.mkdir()
 
-        vol, settings, store, nm = agent.PI.construct_mounts(tmp_path)
+        vol, settings, store, nm, ext = agent.PI.construct_mounts(tmp_path)
 
         assert isinstance(vol, mount.VolumeMount)
         assert vol.dst == f"{agent.CONTAINER_HOME}/.pi/agent"
@@ -442,6 +453,12 @@ class TestConstructMounts:
             node_modules,
             f"{agent.CONTAINER_HOME}/.pi/agent/npm/node_modules",
             "RO",
+        )
+        assert (ext.src, ext.dst, ext.mode, ext.follow_links) == (
+            extensions,
+            f"{agent.CONTAINER_HOME}/.pi/agent/extensions",
+            "RW",
+            True,
         )
 
     def test_never_binds_the_real_auth_json(self, home, tmp_path):
