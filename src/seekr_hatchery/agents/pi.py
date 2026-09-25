@@ -302,9 +302,9 @@ class PiBackend(AgentBackend):
         ``~/.pi/agent/auth.json`` (containing real keys/OAuth tokens) is
         never mounted or read into the container.
 
-        Host paths layered on top of the volume, all ``.exists()``-guarded (a
-        bind whose source is missing would make Docker create a directory
-        there):
+        Host paths layered on top of the volume. Optional files and npm modules
+        are ``.exists()``-guarded. ``extensions/`` is created before mounting so
+        sandbox-authored global extensions persist on the host:
 
         - ``settings.json`` RW — user config, flows both ways.
         - ``models-store.json`` RO — pi's model catalogue; RO keeps upstream
@@ -314,6 +314,9 @@ class PiBackend(AgentBackend):
           itself, so it takes the host's; RO stops per-task installs from
           polluting the host tree. Pure-JS + same arch, so portable (unlike
           ``bin/``, which holds native binaries).
+        - ``extensions/`` RW — global extensions are auto-discovered here and
+          session-authored changes persist on the host. Symlink targets are
+          also mounted so dotfiles-managed extensions load.
 
         ``bin/`` and ``sessions/`` stay container-local in the volume.
         """
@@ -329,6 +332,9 @@ class PiBackend(AgentBackend):
         node_modules = agent_dir / "npm" / "node_modules"
         if node_modules.exists():
             mounts.append(BindMount(src=node_modules, dst=f"{agent_dst}/npm/node_modules", mode="RO"))
+        extensions = agent_dir / "extensions"
+        extensions.mkdir(parents=True, exist_ok=True)
+        mounts.append(BindMount(src=extensions, dst=f"{agent_dst}/extensions", follow_links=True))
         return mounts
 
     @staticmethod
