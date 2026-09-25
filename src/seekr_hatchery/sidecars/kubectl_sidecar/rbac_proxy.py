@@ -450,6 +450,7 @@ def start_rbac_proxy(
     rules: list[KubectlRBACRule],
     proxy_token: str,
     kubectl_proxy_port: int,
+    certificate: tuple[bytes, bytes] | None = None,
 ) -> tuple[http.server.HTTPServer, int, bytes]:
     """Start the TLS RBAC filtering proxy and return ``(server, port, cert_pem)``.
 
@@ -475,7 +476,7 @@ def start_rbac_proxy(
     _BoundHandler.kubectl_proxy_port = kubectl_proxy_port
     _BoundHandler.rules = rules
 
-    cert_pem, key_pem = _generate_self_signed_cert()
+    cert_pem, key_pem = certificate or _generate_self_signed_cert()
 
     server = ThreadingHTTPServer(("0.0.0.0", 0), _BoundHandler)
     port = server.server_address[1]

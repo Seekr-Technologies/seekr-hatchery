@@ -676,7 +676,11 @@ def docker_features(config: DockerConfig) -> list[str]:
     if config.dind:
         features.append("DinD")
     if config.kubernetes is not None:
-        features.append("kubectl")
+        contexts = config.kubernetes.resolved_contexts()
+        if len(contexts) > 1:
+            features.append(f"kubectl ({', '.join(context.display_name for context in contexts)})")
+        else:
+            features.append("kubectl")
     return features
 
 
