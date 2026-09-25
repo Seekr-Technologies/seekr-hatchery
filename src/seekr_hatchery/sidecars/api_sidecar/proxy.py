@@ -347,7 +347,7 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
                 # agent's terminal.
                 try:
                     conn.close()
-                except OSError as exc:
+                except (OSError, ValueError) as exc:
                     logger.warning("proxy: [c%d] upstream WebSocket connection close failed: %s", cid, exc)
             return
 
