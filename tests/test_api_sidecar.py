@@ -575,8 +575,15 @@ class TestProxyWebSocketRelay:
 
             assert conn.sock.recv(1) == b""
 
-    def test_websocket_close_error_is_logged_without_escaping_handler(self, monkeypatch, caplog):
-        """An upstream close race must not make socketserver print a traceback."""
+    @pytest.mark.parametrize(
+        ("error_type", "message"),
+        [
+            (OSError, "upstream connection already reset"),
+            (ValueError, "I/O operation on closed file"),
+        ],
+    )
+    def test_websocket_close_error_is_logged_without_escaping_handler(self, monkeypatch, caplog, error_type, message):
+        """Expected upstream close races must not make socketserver print a traceback."""
         import socket as _socket
 
         created = []
@@ -605,7 +612,7 @@ class TestProxyWebSocketRelay:
 
             def close(self):
                 closed.set()
-                raise ValueError("I/O operation on closed file")
+                raise error_type(message)
 
         monkeypatch.setattr(http.client, "HTTPSConnection", _WSConn)
         with caplog.at_level(logging.WARNING, logger="seekr_hatchery"):
