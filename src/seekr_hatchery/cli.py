@@ -191,7 +191,7 @@ def _do_delete(meta: sessions.SessionMeta, *, confirmed: bool = False) -> None:
 
     sessions.delete(meta)
     _cleanup_task(meta.repo_path, meta.name)
-    seeded_volumes.cleanup_task_volumes(meta.repo_path, meta.name)
+    seeded_volumes.cleanup_task_volumes(meta.repo_path, meta.runtime_name)
 
 
 def _launch(

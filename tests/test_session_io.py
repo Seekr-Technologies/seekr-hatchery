@@ -497,6 +497,7 @@ class TestSessionMetaRoundTrip:
             name="chat-1",
             repo="/some/repo",
             worktree="/some/repo",
+            resource_name="chat-1",
             type="chat",
             no_worktree=True,
         )
@@ -504,6 +505,26 @@ class TestSessionMetaRoundTrip:
         loaded = sessions.load(Path(meta.repo), meta.name)
         assert loaded.type == "chat"
         assert loaded.is_chat is True
+
+    def test_v1_metadata_uses_original_name_as_runtime_identity(self, fake_tasks_db):
+        path = sessions.task_db_path(Path("/r"), "chat-7")
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "name": "chat-7",
+                    "repo": "/r",
+                    "worktree": "/r",
+                    "type": "chat",
+                    "schema_version": 1,
+                }
+            )
+        )
+
+        loaded = sessions.load(Path("/r"), "chat-7")
+
+        assert loaded.resource_name == "chat-7"
+        assert loaded.schema_version == sessions.SCHEMA_VERSION
 
     def test_extra_field_in_meta_json_raises(self, fake_tasks_db):
         """extra='forbid' is the deliberate choice: migrate() must normalise legacy
@@ -616,9 +637,9 @@ class TestSessionMetaProperties:
         assert m.session_dir == sessions.task_session_dir(Path("/r"), "x")
 
     def test_image_and_container_name_delegate(self):
-        m = sessions.SessionMeta(name="x", repo="/a/repo", worktree="/a/repo/w")
-        assert m.image_name == sessions.image_name(Path("/a/repo"), "x")
-        assert m.container_name == sessions.container_name(Path("/a/repo"), "x")
+        m = sessions.SessionMeta(name="renamed", resource_name="chat-1", repo="/a/repo", worktree="/a/repo/w")
+        assert m.image_name == sessions.image_name(Path("/a/repo"), "chat-1")
+        assert m.container_name == sessions.container_name(Path("/a/repo"), "chat-1")
 
 
 # ---------------------------------------------------------------------------

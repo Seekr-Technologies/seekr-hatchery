@@ -512,6 +512,14 @@ def _migrate(meta: dict) -> dict:
         meta["schema_version"] = 1
         v = 1
 
+    # v1 -> v2: separate the mutable display/lookup name from the immutable
+    # runtime identity used by containers, images, and task-scoped volumes.
+    if v == 1:
+        if "name" in meta:
+            meta["resource_name"] = meta["name"]
+        meta["schema_version"] = 2
+        v = 2
+
     return meta
 
 
@@ -1304,6 +1312,7 @@ def create(
         name=name,
         repo=str(repo),
         worktree=str(worktree),
+        resource_name=name,
         type=type,
         status="in-progress",
         branch=branch,

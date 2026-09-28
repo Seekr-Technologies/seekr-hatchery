@@ -18,7 +18,7 @@ from seekr_hatchery.includes import IncludeEntry, load_include_entries
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 SessionStatus = Literal["in-progress", "running", "complete", "archived"]
@@ -37,6 +37,11 @@ class SessionMeta(BaseModel):
     name: str
     repo: str
     worktree: str
+
+    # Immutable runtime identity. User-facing names may change, but container
+    # images and per-session volumes must continue using the name under which
+    # they were first created.
+    resource_name: str = ""
 
     type: SessionType = "task"
     status: SessionStatus = "in-progress"
@@ -101,16 +106,21 @@ class SessionMeta(BaseModel):
         return task_session_dir(self.repo_path, self.name)
 
     @property
+    def runtime_name(self) -> str:
+        """Immutable name used for containers, images, and task-scoped volumes."""
+        return self.resource_name or self.name
+
+    @property
     def container_name(self) -> str:
         from seekr_hatchery.sessions import container_name
 
-        return container_name(self.repo_path, self.name)
+        return container_name(self.repo_path, self.runtime_name)
 
     @property
     def image_name(self) -> str:
         from seekr_hatchery.sessions import image_name
 
-        return image_name(self.repo_path, self.name)
+        return image_name(self.repo_path, self.runtime_name)
 
     @property
     def include_entries(self) -> list[IncludeEntry]:
