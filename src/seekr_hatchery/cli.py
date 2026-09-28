@@ -1057,8 +1057,9 @@ def cmd_harness_edit(agent_name: str, task_name: str | None, commit: bool | None
 def cmd_exec(name: str, shell: str) -> None:
     """Exec an interactive shell into a running task's container."""
     repo, _ = git.git_root_or_cwd()
+    meta = sessions.load(repo, name)
     runtime = docker.detect_runtime()
-    docker.exec_task_shell(sessions.container_name(repo, name), runtime, shell=shell)
+    docker.exec_task_shell(meta.container_name, runtime, shell=shell)
 
 
 @cli.command("done")

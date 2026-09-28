@@ -2467,37 +2467,27 @@ class TestResumeChat:
 
 
 class TestExec:
-    def test_exec_dispatches_to_exec_task_shell(self, tmp_path):
+    @pytest.mark.parametrize(("shell_args", "expected_shell"), [([], "/bin/bash"), (["--shell", "/bin/sh"], "/bin/sh")])
+    def test_exec_uses_stable_container_identity(self, tmp_path, shell_args, expected_shell):
         runner = CliRunner()
-        expected_name = sessions.container_name(tmp_path, "my-task")
+        meta = sessions.SessionMeta(
+            name="renamed-chat",
+            resource_name="chat-1",
+            repo=str(tmp_path),
+            worktree=str(tmp_path),
+            type="chat",
+        )
+        runtime = docker.DockerRuntime()
         with (
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(tmp_path, True)),
-            patch("seekr_hatchery.cli.docker.detect_runtime", return_value=docker.DockerRuntime()),
+            patch("seekr_hatchery.cli.sessions.load", return_value=meta),
+            patch("seekr_hatchery.cli.docker.detect_runtime", return_value=runtime),
             patch("seekr_hatchery.cli.docker.exec_task_shell") as mock_exec,
         ):
-            result = runner.invoke(cli, ["exec", "my-task"])
-        assert result.exit_code == 0, result.output
-        mock_exec.assert_called_once()
-        call_args = mock_exec.call_args
-        assert call_args[0][0] == expected_name
-        assert isinstance(call_args[0][1], docker.DockerRuntime)
-        assert call_args[1] == {"shell": "/bin/bash"}
+            result = runner.invoke(cli, ["exec", "renamed-chat", *shell_args])
 
-    def test_exec_custom_shell(self, tmp_path):
-        runner = CliRunner()
-        expected_name = sessions.container_name(tmp_path, "my-task")
-        with (
-            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(tmp_path, True)),
-            patch("seekr_hatchery.cli.docker.detect_runtime", return_value=docker.DockerRuntime()),
-            patch("seekr_hatchery.cli.docker.exec_task_shell") as mock_exec,
-        ):
-            result = runner.invoke(cli, ["exec", "my-task", "--shell", "/bin/sh"])
         assert result.exit_code == 0, result.output
-        mock_exec.assert_called_once()
-        call_args = mock_exec.call_args
-        assert call_args[0][0] == expected_name
-        assert isinstance(call_args[0][1], docker.DockerRuntime)
-        assert call_args[1] == {"shell": "/bin/sh"}
+        mock_exec.assert_called_once_with(meta.container_name, runtime, shell=expected_shell)
 
 
 # ---------------------------------------------------------------------------
