@@ -80,6 +80,7 @@ class TestHelp:
             "ls | list",
             "logs",
             "new",
+            "promote",
             "rename",
             "resume",
             "sandbox",
@@ -1928,6 +1929,67 @@ class TestChat:
         result = runner.invoke(cli, ["chat", "--help"])
         assert result.exit_code == 0
         assert "NAME" in result.output
+
+
+class TestPromoteChat:
+    def _meta(self, name: str = "chat-1") -> sessions.SessionMeta:
+        return sessions.SessionMeta(
+            name=name,
+            resource_name=name,
+            repo="/r",
+            worktree="/r",
+            type="chat",
+            no_worktree=True,
+            agent="CODEX",
+        )
+
+    def test_auto_name_requires_explicit_task_name(self):
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path("/r"), True)),
+            patch("seekr_hatchery.cli.sessions.load", return_value=self._meta()),
+        ):
+            result = CliRunner().invoke(cli, ["promote", "chat-1"])
+
+        assert result.exit_code == 1
+        assert "explicit task name is required" in result.output
+
+    def test_custom_chat_name_defaults_task_name_and_respects_policy_flags(self):
+        meta = self._meta("api-research")
+        promoted = meta.model_copy(update={"type": "task"})
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path("/r"), True)),
+            patch("seekr_hatchery.cli.sessions.load", return_value=meta),
+            patch("seekr_hatchery.cli._prompt_objective", return_value="Build it"),
+            patch("seekr_hatchery.cli.sessions.merge_includes_with_config", return_value=[]),
+            patch("seekr_hatchery.cli.sessions.promote_chat", return_value=promoted) as promote,
+        ):
+            result = CliRunner().invoke(
+                cli,
+                ["promote", "api-research", "--no-worktree", "--no-commit", "--branch", "ignored"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert promote.call_args.kwargs["name"] == "api-research"
+        assert promote.call_args.kwargs["no_worktree"] is True
+        assert promote.call_args.kwargs["no_commit"] is True
+        assert promote.call_args.kwargs["branch"] == "ignored"
+        assert promote.call_args.kwargs["objective"] == "Build it"
+        assert "hatchery resume api-research" in result.output
+
+    def test_explicit_task_name_is_normalized(self):
+        meta = self._meta()
+        promoted = meta.model_copy(update={"name": "api-fix", "type": "task"})
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path("/r"), True)),
+            patch("seekr_hatchery.cli.sessions.load", return_value=meta),
+            patch("seekr_hatchery.cli._prompt_objective", return_value="Build it"),
+            patch("seekr_hatchery.cli.sessions.merge_includes_with_config", return_value=[]),
+            patch("seekr_hatchery.cli.sessions.promote_chat", return_value=promoted) as promote,
+        ):
+            result = CliRunner().invoke(cli, ["promote", "chat-1", "API Fix"])
+
+        assert result.exit_code == 0, result.output
+        assert promote.call_args.kwargs["name"] == "api-fix"
 
 
 class TestRenameChat:

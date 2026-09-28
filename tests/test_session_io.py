@@ -913,6 +913,71 @@ class TestSessionCreateChat:
         assert ".hatchery/" in exclude
 
 
+class TestPromoteChat:
+    def test_creates_task_and_preserves_session_state(self, git_repo, fake_tasks_db, no_input):
+        chat = sessions.create(name="chat-1", repo=git_repo, type="chat", backend=agent.CODEX)
+        chat.session_id = "existing-session"
+        sessions.save(chat)
+        (chat.session_dir / "history-marker").write_text("kept")
+
+        promoted = sessions.promote_chat(
+            chat,
+            name="api-investigation",
+            backend=agent.CODEX,
+            objective="Investigate the API",
+        )
+
+        assert (
+            promoted.name,
+            promoted.type,
+            promoted.session_id,
+            promoted.runtime_name,
+            promoted.branch,
+            promoted.no_worktree,
+        ) == (
+            "api-investigation",
+            "task",
+            "existing-session",
+            "chat-1",
+            "hatchery/api-investigation",
+            False,
+        )
+        assert promoted.worktree_path.exists()
+        assert promoted.task_file is not None
+        assert "Investigate the API" in promoted.task_file.read_text()
+        assert (promoted.session_dir / "history-marker").read_text() == "kept"
+        assert not sessions.task_db_path(git_repo, "chat-1").exists()
+
+    def test_custom_name_can_be_promoted_in_place_without_worktree_or_commits(self, git_repo, fake_tasks_db, no_input):
+        chat = sessions.create(name="research", repo=git_repo, type="chat", backend=agent.CODEX, no_commit=True)
+
+        promoted = sessions.promote_chat(
+            chat,
+            name="research",
+            backend=agent.CODEX,
+            no_worktree=True,
+            no_commit=True,
+            objective="Record the research",
+        )
+
+        assert (promoted.name, promoted.type, promoted.branch, promoted.no_worktree, promoted.no_commit) == (
+            "research",
+            "task",
+            "",
+            True,
+            True,
+        )
+        assert promoted.task_file is not None
+        assert promoted.task_file.is_relative_to(git_repo / ".hatchery" / "tasks")
+
+    def test_rejects_running_chat(self, git_repo, fake_tasks_db):
+        chat = sessions.SessionMeta(
+            name="chat-1", repo=str(git_repo), worktree=str(git_repo), type="chat", status="running"
+        )
+        with pytest.raises(SystemExit):
+            sessions.promote_chat(chat, name="task", backend=agent.CODEX, objective="x")
+
+
 class TestPrepareSandbox:
     """sessions.prepare_sandbox — sandbox hatchery-dir setup + docker scaffolding.
 

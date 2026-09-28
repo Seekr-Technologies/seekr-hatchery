@@ -1189,6 +1189,7 @@ def create(
     include_entries: list[IncludeEntry] | None = None,
     objective: str | None = None,
     use_editor: bool = False,
+    promoted_from: SessionMeta | None = None,
 ) -> SessionMeta:
     """Create a new session end-to-end and persist it.
 
@@ -1243,7 +1244,8 @@ def create(
                 _require_hatchery_tracking(repo)
                 ensure_gitignore(repo)
 
-    _check_not_in_progress(repo, name, label="chat" if is_chat else "task")
+    if promoted_from is None or promoted_from.name != name:
+        _check_not_in_progress(repo, name, label="chat" if is_chat else "task")
 
     # Tracked for KeyboardInterrupt + editor-cancel rollback.
     cleanup_worktree: Path | None = None
@@ -1349,24 +1351,75 @@ def create(
         name=name,
         repo=str(repo),
         worktree=str(worktree),
-        resource_name=name,
+        resource_name=promoted_from.runtime_name if promoted_from else name,
         type=type,
         status="in-progress",
         branch=branch,
         branch_owned=branch_owned,
-        created=datetime.now().isoformat(),
-        session_id=session_id,
+        created=promoted_from.created if promoted_from else datetime.now().isoformat(),
+        session_id=promoted_from.session_id if promoted_from else session_id,
         no_worktree=no_worktree,
         no_commit=no_commit,
-        agent=backend.kind,
+        agent=promoted_from.agent if promoted_from else backend.kind,
         include=serialize_include_entries(include_entries),
     )
+    # Move the chat's host-side session state to its new lookup name. Runtime
+    # volumes retain ``resource_name`` and therefore do not need renaming.
+    if promoted_from and promoted_from.name != name:
+        old_session_dir = _task_dir(repo, promoted_from.name)
+        new_session_dir = _task_dir(repo, name)
+        old_session_dir.rename(new_session_dir)
     # save_task (dict path) preserves the on-disk shape callers compared
     # against in PR1's tests. SessionMeta.model_dump(exclude_none=True)
     # drops completed=None / session_id=None when unset — matches the
     # pre-refactor behaviour.
     save_task(meta.model_dump(mode="json", exclude_none=True))
     return meta
+
+
+def promote_chat(
+    meta: SessionMeta,
+    *,
+    name: str,
+    backend: "AgentBackend",
+    base: str | None = None,
+    branch: str | None = None,
+    no_worktree: bool = False,
+    no_commit: bool = False,
+    in_repo: bool = True,
+    include_entries: list[IncludeEntry] | None = None,
+    objective: str | None = None,
+    use_editor: bool = False,
+) -> SessionMeta:
+    """Convert a stopped chat into a task while retaining its agent session."""
+    if not meta.is_chat:
+        ui.error(f"session '{meta.name}' is already a task.")
+        sys.exit(1)
+    if meta.status == "running":
+        ui.error(f"chat '{meta.name}' is currently running; exit it before promoting.")
+        sys.exit(1)
+    if not name:
+        ui.error("task name cannot be empty.")
+        sys.exit(1)
+    if name != meta.name and task_db_path(meta.repo_path, name).exists():
+        ui.error(f"session '{name}' already exists.")
+        sys.exit(1)
+
+    return create(
+        name=name,
+        repo=meta.repo_path,
+        type="task",
+        backend=backend,
+        base=base,
+        branch=branch,
+        no_worktree=no_worktree,
+        no_commit=no_commit,
+        in_repo=in_repo,
+        include_entries=include_entries,
+        objective=objective,
+        use_editor=use_editor,
+        promoted_from=meta,
+    )
 
 
 def prepare_sandbox(
