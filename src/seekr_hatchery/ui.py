@@ -3,6 +3,7 @@
 import logging
 import sys
 from itertools import zip_longest
+from pathlib import Path
 
 import click
 
@@ -153,27 +154,57 @@ def task_list_table(task_list: list[dict], archived_count: int, show_all: bool) 
             info(f"+ {archived_count} archived task{'s' if archived_count != 1 else ''}.")
         return
 
-    name_w = max(len(t["name"]) for t in task_list)
-    st_w = max(len(t["status"]) for t in task_list)
-    header = f"{'NAME':<{name_w}}  {'STATUS':<{st_w}}  CREATED"
-    click.echo(click.style(header, bold=True))
-    click.echo("-" * (len(header) + 10))
+    def branch_label(meta: dict) -> str:
+        return meta.get("branch") or "—"
 
-    for t in task_list:
-        created = t.get("created", "")[:10]
-        status = t["status"]
+    def worktree_label(meta: dict) -> str:
+        if meta.get("type", "task") == "chat":
+            return "—"
+        if meta.get("no_worktree"):
+            return "current"
+        worktree = meta.get("worktree", "")
+        return Path(worktree).name if worktree else "—"
+
+    rows = [
+        {
+            "name": t["name"],
+            "type": t.get("type", "task"),
+            "status": t["status"],
+            "branch": branch_label(t),
+            "worktree": worktree_label(t),
+            "created": t.get("created", "")[:10],
+        }
+        for t in task_list
+    ]
+    widths = {
+        key: max(len(key.upper()), *(len(row[key]) for row in rows))
+        for key in ("name", "type", "status", "branch", "worktree")
+    }
+    header = (
+        f"{'NAME':<{widths['name']}}  {'TYPE':<{widths['type']}}  "
+        f"{'STATUS':<{widths['status']}}  {'BRANCH':<{widths['branch']}}  "
+        f"{'WORKTREE':<{widths['worktree']}}  CREATED"
+    )
+    click.echo(click.style(header, bold=True))
+    click.echo("-" * len(header))
+
+    for row in rows:
+        status = row["status"]
         match status:
             case "running":
-                status_str = click.style(f"{status:<{st_w}}", fg="cyan")
+                status_str = click.style(f"{status:<{widths['status']}}", fg="cyan")
             case "in-progress":
-                status_str = click.style(f"{status:<{st_w}}", fg="green")
+                status_str = click.style(f"{status:<{widths['status']}}", fg="green")
             case "archived":
-                status_str = click.style(f"{status:<{st_w}}", fg="yellow")
+                status_str = click.style(f"{status:<{widths['status']}}", fg="yellow")
             case "complete":
-                status_str = click.style(f"{status:<{st_w}}", dim=True)
+                status_str = click.style(f"{status:<{widths['status']}}", dim=True)
             case _:
-                status_str = f"{status:<{st_w}}"
-        click.echo(f"{t['name']:<{name_w}}  {status_str}  {created}")
+                status_str = f"{status:<{widths['status']}}"
+        click.echo(
+            f"{row['name']:<{widths['name']}}  {row['type']:<{widths['type']}}  {status_str}  "
+            f"{row['branch']:<{widths['branch']}}  {row['worktree']:<{widths['worktree']}}  {row['created']}"
+        )
 
     if archived_count:
         click.echo(

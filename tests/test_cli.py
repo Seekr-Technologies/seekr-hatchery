@@ -1293,8 +1293,51 @@ class TestCmdList:
             mock_root.return_value = (Path("/my/repo"), True)
             mock_tasks.return_value = task_list
             result = runner.invoke(cli, ["list"])
-        assert "STATUS" in result.output
-        assert "CREATED" in result.output
+        assert all(column in result.output for column in ("NAME", "TYPE", "STATUS", "BRANCH", "WORKTREE", "CREATED"))
+
+    def test_rows_show_compact_branch_and_worktree_details(self, monkeypatch, fake_tasks_db):
+        task_list = [
+            {
+                "name": "build-api",
+                "type": "task",
+                "status": "in-progress",
+                "branch": "hatchery/build-api",
+                "worktree": "/repo/.hatchery/worktrees/build-api",
+                "created": "2026-01-02",
+            },
+            {
+                "name": "research",
+                "type": "task",
+                "status": "in-progress",
+                "branch": "",
+                "worktree": "/repo",
+                "no_worktree": True,
+                "created": "2026-01-01",
+            },
+            {
+                "name": "chat-1",
+                "type": "chat",
+                "status": "in-progress",
+                "branch": "",
+                "worktree": "/repo",
+                "created": "2025-12-31",
+            },
+        ]
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path("/repo"), True)),
+            patch("seekr_hatchery.cli.sessions.repo_tasks_for_current_repo", return_value=task_list),
+        ):
+            result = CliRunner().invoke(cli, ["list"])
+
+        assert result.exit_code == 0
+        rows = [
+            line.split() for line in result.output.splitlines() if line.startswith(("build-api", "research", "chat-1"))
+        ]
+        assert rows == [
+            ["build-api", "task", "in-progress", "hatchery/build-api", "build-api", "2026-01-02"],
+            ["research", "task", "in-progress", "—", "current", "2026-01-01"],
+            ["chat-1", "chat", "in-progress", "—", "—", "2025-12-31"],
+        ]
 
 
 # ---------------------------------------------------------------------------
