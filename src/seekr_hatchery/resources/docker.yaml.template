@@ -100,9 +100,10 @@ follow_symlinks: false
 # Also uncomment the kubectl section in .hatchery/Dockerfile.
 # The host's active kubeconfig context is used for credentials.
 #
-# context: (optional) pin which kubeconfig context kubectl proxy uses.
-#   Useful when you have multiple contexts and want to avoid ambiguity.
-#   Defaults to the host's currently active context.
+# contexts: one entry per cluster the agent can reach, each with its own rules.
+#   The first healthy entry becomes the default; switch with
+#   `kubectl --context <name> ...`. A context that cannot start is warned about
+#   and omitted, unless all contexts fail.
 # Rules are an allowlist; unmatched requests are denied (fail-closed).
 # Verbs map to HTTP methods: get/list/watch → GET, create → POST,
 #   update → PUT, patch → PATCH, delete/deletecollection → DELETE.
@@ -112,8 +113,17 @@ follow_symlinks: false
 # Subresources exec / attach / portforward / proxy are always blocked.
 #
 # kubernetes:
-#   context: my-dev-cluster   # optional: pin kubeconfig context
-#   rules:
-#     - verbs: [get, list, watch]
-#       resources: ["*"]
-#       namespaces: ["*"]
+#   contexts:
+#     - context: my-dev-cluster
+#       rules:
+#         - verbs: [get, list, watch, create, update, patch, delete]
+#           resources: ["*"]
+#           namespaces: ["*"]
+#     - context: my-production-cluster
+#       rules:
+#         - verbs: [get, list, watch]
+#           resources: ["*"]
+#           namespaces: ["*"]
+#
+# A top-level `context:` / `rules:` pair remains a single-context shorthand;
+# it cannot be combined with `contexts:`.

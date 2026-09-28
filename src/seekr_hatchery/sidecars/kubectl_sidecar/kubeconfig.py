@@ -3,40 +3,45 @@
 from __future__ import annotations
 
 import base64
-import textwrap
+
+import yaml
+
+from seekr_hatchery.models import DEFAULT_KUBECTL_CONTEXT_NAME
 
 
-def make_kubeconfig(rbac_port: int, proxy_token: str, ca_cert_pem: bytes) -> str:
-    """Return a kubeconfig YAML that routes kubectl through the RBAC proxy over TLS.
+def make_kubeconfig(contexts: list[tuple[str, int]], proxy_token: str, ca_cert_pem: bytes) -> str:
+    """Return a kubeconfig routing each named context through its RBAC proxy.
 
-    kubectl refuses to send ``Authorization: Bearer`` headers over plain HTTP
-    to non-localhost hosts.  This kubeconfig uses ``https://`` and pins the
-    self-signed certificate via ``certificate-authority-data``, which is the
-    same pattern used by kind / k3d / minikube for local cluster endpoints.
-
-    Args:
-        rbac_port: Port where the RBAC proxy is listening (on the host).
-        proxy_token: Bearer token embedded for the container to authenticate.
-        ca_cert_pem: PEM-encoded self-signed cert returned by
-            :func:`seekr_hatchery.sidecars.kubectl_sidecar.rbac_proxy.start_rbac_proxy`.
+    The first context is the default. All entries use the same bearer token and
+    TLS certificate, but each endpoint independently enforces its own rules.
     """
+    if not contexts:
+        raise ValueError("make_kubeconfig requires at least one context")
+
     ca_b64 = base64.b64encode(ca_cert_pem).decode()
-    return textwrap.dedent(f"""\
-        apiVersion: v1
-        kind: Config
-        clusters:
-          - name: hatchery-proxy
-            cluster:
-              server: https://host.docker.internal:{rbac_port}
-              certificate-authority-data: {ca_b64}
-        current-context: hatchery-proxy
-        contexts:
-          - name: hatchery-proxy
-            context:
-              cluster: hatchery-proxy
-              user: hatchery-agent
-        users:
-          - name: hatchery-agent
-            user:
-              token: {proxy_token}
-    """)
+    user = "hatchery-agent"
+    config = {
+        "apiVersion": "v1",
+        "kind": "Config",
+        "clusters": [
+            {
+                "name": name,
+                "cluster": {
+                    "server": f"https://host.docker.internal:{port}",
+                    "certificate-authority-data": ca_b64,
+                },
+            }
+            for name, port in contexts
+        ],
+        "current-context": contexts[0][0],
+        "contexts": [{"name": name, "context": {"cluster": name, "user": user}} for name, _ in contexts],
+        "users": [{"name": user, "user": {"token": proxy_token}}],
+    }
+    if len(contexts) == 1 and contexts[0][0] != DEFAULT_KUBECTL_CONTEXT_NAME:
+        config["contexts"].append(
+            {
+                "name": DEFAULT_KUBECTL_CONTEXT_NAME,
+                "context": {"cluster": contexts[0][0], "user": user},
+            }
+        )
+    return yaml.safe_dump(config, sort_keys=False)
