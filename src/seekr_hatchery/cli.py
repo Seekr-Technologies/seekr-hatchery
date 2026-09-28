@@ -388,8 +388,8 @@ TASK_NAME = TaskNameType()
 # named here fall into a trailing "Other commands" section, so a newly added
 # command is never silently dropped from help.
 COMMAND_SECTIONS: list[tuple[str, list[str]]] = [
-    ("Start a task", ["new", "chat", "resume"]),
-    ("Manage tasks", ["list", "status", "shell", "exec", "done", "archive", "delete"]),
+    ("Start a task", ["new", "chat", "resume", "promote"]),
+    ("Manage tasks", ["list", "status", "rename", "shell", "exec", "done", "archive", "delete"]),
     ("Sandbox", ["sandbox"]),
     ("Maintenance", ["logs", "config", "self"]),
 ]
@@ -722,6 +722,17 @@ def _confirm_recreate_worktree(name: str, branch: str, prev_status: str, base: s
         return input(msg).strip().lower() == "y"
     except (EOFError, KeyboardInterrupt):
         raise sessions.SessionCancelled()
+
+
+@cli.command("rename")
+@click.argument("name", type=TASK_NAME)
+@click.argument("new_name")
+def cmd_rename(name: str, new_name: str) -> None:
+    """Rename a chat without converting it to a task."""
+    repo, _ = git.git_root_or_cwd()
+    meta = sessions.load(repo, name)
+    renamed = sessions.rename_chat(meta, utils.to_name(new_name))
+    ui.success(f"Chat '{name}' renamed to '{renamed.name}'.")
 
 
 @cli.command("resume")

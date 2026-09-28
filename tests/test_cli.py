@@ -80,6 +80,7 @@ class TestHelp:
             "ls | list",
             "logs",
             "new",
+            "rename",
             "resume",
             "sandbox",
             "self",
@@ -1927,6 +1928,22 @@ class TestChat:
         result = runner.invoke(cli, ["chat", "--help"])
         assert result.exit_code == 0
         assert "NAME" in result.output
+
+
+class TestRenameChat:
+    def test_renames_chat(self):
+        meta = sessions.SessionMeta(name="chat-1", repo="/r", worktree="/r", type="chat")
+        renamed = meta.model_copy(update={"name": "api-investigation"})
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path("/r"), True)),
+            patch("seekr_hatchery.cli.sessions.load", return_value=meta),
+            patch("seekr_hatchery.cli.sessions.rename_chat", return_value=renamed) as rename,
+        ):
+            result = CliRunner().invoke(cli, ["rename", "chat-1", "API Investigation"])
+
+        assert result.exit_code == 0
+        rename.assert_called_once_with(meta, "api-investigation")
+        assert "renamed to 'api-investigation'" in result.output
 
 
 class TestNextChatName:

@@ -562,6 +562,43 @@ def save(meta: SessionMeta) -> None:
     save_task(meta.model_dump(mode="json", exclude_none=True))
 
 
+def rename_chat(meta: SessionMeta, new_name: str) -> SessionMeta:
+    """Rename a stopped chat while preserving its runtime resources.
+
+    The metadata directory is the user-facing lookup key, so it moves to the
+    new name. ``resource_name`` remains unchanged, keeping the existing agent
+    volumes, image, and container identity available to the resumed chat.
+    """
+    if not meta.is_chat:
+        ui.error(f"session '{meta.name}' is a task; only chats can be renamed.")
+        sys.exit(1)
+    if meta.status == "running":
+        ui.error(f"chat '{meta.name}' is currently running; exit it before renaming.")
+        sys.exit(1)
+    if not new_name:
+        ui.error("chat name cannot be empty.")
+        sys.exit(1)
+    if new_name == meta.name:
+        return meta
+    if task_db_path(meta.repo_path, new_name).exists():
+        ui.error(f"session '{new_name}' already exists.")
+        sys.exit(1)
+
+    old_dir = _task_dir(meta.repo_path, meta.name)
+    new_dir = _task_dir(meta.repo_path, new_name)
+    new_dir.parent.mkdir(parents=True, exist_ok=True)
+    old_name = meta.name
+    old_dir.rename(new_dir)
+    try:
+        meta.name = new_name
+        save(meta)
+    except Exception:
+        meta.name = old_name
+        new_dir.rename(old_dir)
+        raise
+    return meta
+
+
 # ---------------------------------------------------------------------------
 # Session-scoped tokens (moved from docker.py — they live on the session, not
 # on the container runtime).

@@ -617,6 +617,44 @@ class TestSessionMetaRoundTrip:
         assert all(e.mode == "worktree" for e in entries)
 
 
+class TestRenameChat:
+    def test_moves_metadata_and_preserves_runtime_identity(self, fake_tasks_db):
+        meta = sessions.SessionMeta(
+            name="chat-1",
+            resource_name="chat-1",
+            repo="/r",
+            worktree="/r",
+            type="chat",
+            no_worktree=True,
+            session_id="sid",
+        )
+        sessions.save(meta)
+
+        renamed = sessions.rename_chat(meta, "api-investigation")
+
+        assert not sessions.task_db_path(Path("/r"), "chat-1").exists()
+        assert sessions.load(Path("/r"), "api-investigation") == renamed
+        assert (renamed.name, renamed.runtime_name, renamed.session_id) == ("api-investigation", "chat-1", "sid")
+
+    def test_rejects_tasks(self, fake_tasks_db):
+        meta = sessions.SessionMeta(name="task", repo="/r", worktree="/r/w")
+        with pytest.raises(SystemExit):
+            sessions.rename_chat(meta, "other")
+
+    def test_rejects_running_chat(self, fake_tasks_db):
+        meta = sessions.SessionMeta(name="chat-1", repo="/r", worktree="/r", type="chat", status="running")
+        with pytest.raises(SystemExit):
+            sessions.rename_chat(meta, "other")
+
+    def test_rejects_name_collision(self, fake_tasks_db):
+        first = sessions.SessionMeta(name="chat-1", repo="/r", worktree="/r", type="chat")
+        second = sessions.SessionMeta(name="taken", repo="/r", worktree="/r", type="chat")
+        sessions.save(first)
+        sessions.save(second)
+        with pytest.raises(SystemExit):
+            sessions.rename_chat(first, "taken")
+
+
 class TestSessionMetaProperties:
     def test_is_chat(self):
         assert sessions.SessionMeta(name="c", repo="/r", worktree="/r", type="chat").is_chat
