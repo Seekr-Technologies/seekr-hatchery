@@ -1643,6 +1643,14 @@ def edit_harness(
     _apply_hint(task_name)
 
 
+def _repo_relative_path(path: Path, repo: Path) -> Path:
+    """Return *path* relative to *repo* when possible, otherwise unchanged."""
+    try:
+        return path.relative_to(repo)
+    except ValueError:
+        return path
+
+
 def launch(
     meta: SessionMeta,
     *,
@@ -1723,9 +1731,11 @@ def launch(
             session_id, system_prompt, wrap_up, docker=docker_flag, workdir=container_workdir
         )
 
+    hatchery_dir = _repo_relative_path(meta.hatchery_dir, meta.repo_path) if runtime else None
     if is_chat:
-        ui.chat_banner(meta.name, meta.repo_path, features=features)
+        ui.chat_banner(meta.name, meta.repo_path, features=features, hatchery_dir=hatchery_dir)
     else:
+        worktree_path = None if meta.no_worktree else _repo_relative_path(meta.worktree_path, meta.repo_path)
         ui.banner(
             meta.name,
             meta.repo_path,
@@ -1733,6 +1743,8 @@ def launch(
             sandbox=bool(runtime),
             worktree=not meta.no_worktree,
             features=features,
+            worktree_path=worktree_path,
+            hatchery_dir=hatchery_dir,
         )
 
     set_status(meta.repo_path, meta.name, "running")

@@ -843,6 +843,27 @@ class TestBuildDockerImage:
         _cmd, kw = self._capture_build(monkeypatch, tmp_path, debug=True)
         assert kw.get("stdin") is subprocess.DEVNULL
 
+    def test_failed_build_reports_dockerfile_path(self, monkeypatch, tmp_path, capsys):
+        repo = tmp_path / "repo"
+        hatchery_dir = repo / ".hatchery"
+        hatchery_dir.mkdir(parents=True)
+        dockerfile = docker.dockerfile_path(hatchery_dir, agent.CODEX)
+        dockerfile.write_text("FROM debian\n")
+        monkeypatch.setattr(docker.logger, "isEnabledFor", lambda _lvl: False)
+        monkeypatch.setattr(docker, "_stream_build", lambda cmd, cwd: (1, ["build error"]))
+
+        result = docker.build_docker_image(
+            repo,
+            hatchery_dir,
+            "test-task",
+            agent.CODEX,
+            runtime=docker.PodmanRuntime(),
+            exit_on_error=False,
+        )
+
+        assert result is False
+        assert capsys.readouterr().err == f"Error: podman build failed.\n  Dockerfile: {dockerfile}\n"
+
 
 # ---------------------------------------------------------------------------
 # _stream_build() — stdin handling
@@ -1767,6 +1788,20 @@ class TestRemoveClipboardDir:
         # No clipboard subdir was ever created.
         docker.remove_clipboard_dir(tmp_path)  # must not raise
         assert not docker.clipboard_image_dir(tmp_path).exists()
+
+
+class TestLoadDockerConfig:
+    def test_invalid_config_reports_config_path(self, tmp_path, capsys):
+        hatchery_dir = tmp_path / ".hatchery"
+        hatchery_dir.mkdir()
+        config_file = hatchery_dir / "docker.yaml"
+        config_file.write_text("unknown: value\n")
+
+        with pytest.raises(SystemExit):
+            docker.load_docker_config(hatchery_dir)
+
+        first_line = capsys.readouterr().err.splitlines()[0]
+        assert first_line == f"Error: invalid docker config {config_file}: 1 validation error for DockerConfig"
 
 
 class TestValidateDockerConfigFile:

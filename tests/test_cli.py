@@ -1883,6 +1883,57 @@ class TestLaunchHooks:
         assert docker is False
         assert workdir == ""
 
+    @pytest.mark.parametrize("case", ["worktree", "no-worktree", "chat"])
+    def test_sandbox_launch_banner_receives_session_paths(self, spy_backend, case):
+        no_worktree = case != "worktree"
+        is_chat = case == "chat"
+        meta = _launch_meta(
+            repo="/repo",
+            worktree="/repo" if no_worktree else "/repo/.hatchery/worktrees/t",
+            branch="" if no_worktree else "b",
+            is_chat=is_chat,
+            no_worktree=no_worktree,
+        )
+        runtime = MagicMock()
+
+        with ExitStack() as stack:
+            for p in self._patches():
+                stack.enter_context(p)
+            stack.enter_context(
+                patch(
+                    "seekr_hatchery.sessions.docker.launch_context",
+                    return_value=(docker.DockerConfig(), [], str(meta.worktree_path)),
+                )
+            )
+            stack.enter_context(patch("seekr_hatchery.sessions.docker.run_session"))
+            stack.enter_context(patch("seekr_hatchery.sessions.get_or_create_proxy_token", return_value="token"))
+            mock_banner = stack.enter_context(patch("seekr_hatchery.sessions.ui.banner"))
+            mock_chat_banner = stack.enter_context(patch("seekr_hatchery.sessions.ui.chat_banner"))
+            sessions.launch(
+                meta,
+                kind="new",
+                backend=spy_backend,
+                runtime=runtime,
+                main_branch="main",
+                session_id="sid",
+            )
+
+        if is_chat:
+            mock_chat_banner.assert_called_once_with("t", Path("/repo"), features=[], hatchery_dir=Path(".hatchery"))
+            mock_banner.assert_not_called()
+        else:
+            mock_banner.assert_called_once_with(
+                "t",
+                Path("/repo"),
+                branch="" if no_worktree else "b",
+                sandbox=True,
+                worktree=not no_worktree,
+                features=[],
+                worktree_path=None if no_worktree else Path(".hatchery/worktrees/t"),
+                hatchery_dir=Path(".hatchery" if no_worktree else ".hatchery/worktrees/t/.hatchery"),
+            )
+            mock_chat_banner.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # running state
