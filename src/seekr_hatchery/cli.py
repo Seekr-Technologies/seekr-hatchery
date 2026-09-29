@@ -191,7 +191,7 @@ def _do_delete(meta: sessions.SessionMeta, *, confirmed: bool = False) -> None:
 
     sessions.delete(meta)
     _cleanup_task(meta.repo_path, meta.name)
-    seeded_volumes.cleanup_task_volumes(meta.repo_path, meta.name)
+    seeded_volumes.cleanup_task_volumes(meta.repo_path, meta.runtime_name)
 
 
 def _launch(
@@ -389,7 +389,7 @@ TASK_NAME = TaskNameType()
 # command is never silently dropped from help.
 COMMAND_SECTIONS: list[tuple[str, list[str]]] = [
     ("Start a task", ["new", "chat", "resume"]),
-    ("Manage tasks", ["list", "status", "shell", "exec", "done", "archive", "delete"]),
+    ("Manage tasks", ["list", "status", "rename", "promote", "shell", "exec", "done", "archive", "delete"]),
     ("Sandbox", ["sandbox"]),
     ("Maintenance", ["logs", "config", "self"]),
 ]
@@ -724,6 +724,90 @@ def _confirm_recreate_worktree(name: str, branch: str, prev_status: str, base: s
         raise sessions.SessionCancelled()
 
 
+@cli.command("promote")
+@click.argument("chat_name", type=TASK_NAME)
+@click.argument("task_name", required=False)
+@click.option(
+    "--from",
+    "base",
+    default=DEFAULT_BASE,
+    metavar="REF",
+    help=f"Branch or commit to fork from (default: {DEFAULT_BASE})",
+)
+@click.option("--branch", default=None, metavar="BRANCH", help="Use this branch instead of hatchery/<task-name>.")
+@click.option("--no-worktree", is_flag=True, help="Work directly in the current directory.")
+@click.option("--editor/--no-editor", default=None, help="Open $EDITOR for the task file (default: from config)")
+@click.option(
+    "--commit/--no-commit",
+    "commit",
+    default=None,
+    help="Whether to commit task scaffolding (default: from repo/global config).",
+)
+def cmd_promote(
+    chat_name: str,
+    task_name: str | None,
+    base: str,
+    branch: str | None,
+    no_worktree: bool,
+    editor: bool | None,
+    commit: bool | None,
+) -> None:
+    """Convert a stopped chat into a task, preserving its conversation."""
+    repo, in_repo = git.git_root_or_cwd()
+    meta = sessions.load(repo, chat_name)
+    if task_name is None:
+        if re.fullmatch(r"chat-\d+", meta.name):
+            ui.error("an explicit task name is required when promoting an auto-named chat.")
+            sys.exit(1)
+        task_name = meta.name
+    task_name = utils.to_name(task_name)
+
+    if not in_repo:
+        no_worktree = True
+        ui.note("not in a git repository — promoting without worktree isolation.")
+
+    cfg = repo_config.load_effective_config(repo)
+    no_commit = repo_config.resolve_no_commit(cfg, commit)
+    use_editor = editor if editor is not None else cfg.open_editor
+    early_config = docker.load_docker_config(repo / ".hatchery")
+    include_repos = sessions.merge_includes_with_config([], early_config.include, repo)
+    objective = None if use_editor else _prompt_objective()
+
+    try:
+        promoted = sessions.promote_chat(
+            meta,
+            name=task_name,
+            backend=agent.from_kind(meta.agent),
+            base=base,
+            branch=branch,
+            no_worktree=no_worktree,
+            no_commit=no_commit,
+            in_repo=in_repo,
+            include_entries=include_repos,
+            objective=objective,
+            use_editor=use_editor,
+        )
+    except sessions.SessionCancelled:
+        sys.exit(1)
+    except KeyboardInterrupt:
+        ui.warn("Cancelled.")
+        sys.exit(1)
+
+    ui.success(f"Chat '{chat_name}' promoted to task '{promoted.name}'.")
+    ui.info(f"Resume with: hatchery resume {promoted.name}")
+
+
+@cli.command("rename")
+@click.argument("name", type=TASK_NAME)
+@click.argument("new_name")
+def cmd_rename(name: str, new_name: str) -> None:
+    """Rename a chat without converting it to a task."""
+    repo, _ = git.git_root_or_cwd()
+    meta = sessions.load(repo, name)
+    renamed = sessions.rename_chat(meta, utils.to_name(new_name))
+    ui.success(f"Chat '{name}' renamed to '{renamed.name}'.")
+
+
 @cli.command("resume")
 @click.argument("name", type=TASK_NAME)
 @click.option("--no-docker", is_flag=True, help="Run agent directly, even if a Dockerfile is present")
@@ -973,8 +1057,9 @@ def cmd_harness_edit(agent_name: str, task_name: str | None, commit: bool | None
 def cmd_exec(name: str, shell: str) -> None:
     """Exec an interactive shell into a running task's container."""
     repo, _ = git.git_root_or_cwd()
+    meta = sessions.load(repo, name)
     runtime = docker.detect_runtime()
-    docker.exec_task_shell(sessions.container_name(repo, name), runtime, shell=shell)
+    docker.exec_task_shell(meta.container_name, runtime, shell=shell)
 
 
 @cli.command("done")

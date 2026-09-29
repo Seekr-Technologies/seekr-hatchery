@@ -51,6 +51,15 @@ hatchery new add-auth
 # Start a new task using OpenAI Codex
 hatchery new add-auth --agent codex
 
+# Start a free-form chat (name optional)
+hatchery chat api-research
+
+# Rename an existing chat
+hatchery rename api-research auth-options
+
+# Promote the chat to a task, preserving its conversation
+hatchery promote auth-options add-auth
+
 # Resume an interrupted session
 hatchery resume add-auth
 
@@ -64,6 +73,8 @@ hatchery list
 ## How it works
 
 `hatchery new <name>` creates a git worktree on a `hatchery/<name>` branch, drops a task file there for you to fill in, commits it, then launches an agent session pointed at that worktree. The agent runs inside a Docker sandbox by default — a starter Dockerfile is created automatically on first use. The agent plans, implements, commits, and marks the task complete — all inside the isolated branch. When you're satisfied, `hatchery done <name>` cleans up the worktree and leaves the branch ready to merge.
+
+For exploratory work, `hatchery chat [name]` starts a free-form session in the current repository without a worktree or task file. Unnamed chats receive the next available `chat-N` name. After exiting the agent, use `hatchery rename <chat> <new-name>` to give the chat a clearer name, or `hatchery promote <chat> [task-name]` to create task scaffolding while preserving the conversation and sandbox state. A task name is required when promoting an auto-generated `chat-N`; a custom chat name is reused when the task name is omitted.
 
 ## Task workflow
 
@@ -80,11 +91,14 @@ When the agent starts a new task it is given a task file at `.hatchery/tasks/YYY
 | Command | Description |
 |---|---|
 | `new <name>` | Create worktree + branch, open task file, launch agent |
+| `chat [name]` | Start a named or automatically numbered free-form chat |
+| `rename <chat> <new-name>` | Rename a stopped chat without promoting it |
+| `promote <chat> [task-name]` | Convert a stopped chat into a task while preserving its conversation |
 | `resume <name>` | Reattach to the existing session exactly where it left off |
 | `done <name>` | Remove worktree, retain branch, mark task complete |
-| `abort <name>` | Remove worktree without marking complete (branch kept) |
+| `archive <name>` | Remove worktree while retaining the branch and resumable session |
 | `delete <name>` | Remove worktree, delete branch, erase all metadata |
-| `list` | List all tasks for the current repo |
+| `list` | List chats and tasks with type and worktree-isolation status |
 | `status <name>` | Show task metadata and the full task file |
 | `self update` | Upgrade hatchery to the latest release |
 | `config edit global` | Edit the global config (`~/.hatchery/config.yaml`) in `$EDITOR` with validation |
@@ -105,7 +119,9 @@ All `new` / `resume` commands accept:
 - `--from <ref>` — fork from a specific branch or commit (default: `HEAD`)
 - `--editor / --no-editor` — force editor or prompt mode for the task objective. By default, hatchery prompts in the terminal; set `open_editor: true` in `~/.hatchery/config.yaml` to default to `$EDITOR`. If the editor is opened and the file is unchanged on close, the task is cancelled.
 - `--commit / --no-commit` — control whether hatchery auto-commits its scaffolding (task file, Docker configuration). Default: from a repo-local `.hatchery/config.yaml` (`auto_commit: true/false`) if present, else the global config (`auto_commit: true`). Use `--no-commit` to keep all hatchery files out of the tracked repo — task records and Docker files stay at `<repo>/.hatchery/` but are hidden from git via `.git/info/exclude` instead of being committed. Set `auto_commit: false` in `~/.hatchery/config.yaml` to make no-commit the default everywhere, or in a repo's `.hatchery/config.yaml` to make it the default for just that repo.
-- `--agent [codex]` — choose the AI agent (auto-detected from installed agents)
+- `--agent <name>` — choose the AI agent (auto-detected from installed agents)
+
+`promote` resolves current repository/global configuration when creating the task and supports `--from`, `--branch`, `--no-worktree`, `--editor/--no-editor`, and `--commit/--no-commit`, matching the corresponding `new` behavior. Promotion must be run after exiting the chat because an active agent process cannot safely switch into a newly created worktree.
 
 The chosen agent is stored in task metadata and re-used automatically on `resume`.
 

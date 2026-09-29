@@ -347,15 +347,15 @@ class TestWorktreesDir:
 
 
 class TestMigrate:
-    def test_v0_migrates_to_v1(self):
+    def test_v0_migrates_to_current(self):
         meta = {"name": "test"}
         result = sessions._migrate(meta)
-        assert result["schema_version"] == 1
+        assert result == {"name": "test", "schema_version": 1}
 
     def test_v1_is_idempotent(self):
         meta = {"name": "test", "schema_version": 1}
         result = sessions._migrate(meta)
-        assert result["schema_version"] == 1
+        assert result == meta
 
     def test_v0_does_not_add_agent_field(self):
         meta = {"name": "test"}

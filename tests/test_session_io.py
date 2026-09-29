@@ -497,6 +497,7 @@ class TestSessionMetaRoundTrip:
             name="chat-1",
             repo="/some/repo",
             worktree="/some/repo",
+            resource_name="chat-1",
             type="chat",
             no_worktree=True,
         )
@@ -504,6 +505,29 @@ class TestSessionMetaRoundTrip:
         loaded = sessions.load(Path(meta.repo), meta.name)
         assert loaded.type == "chat"
         assert loaded.is_chat is True
+
+    def test_v1_metadata_without_resource_name_still_loads(self, fake_tasks_db):
+        path = sessions.task_db_path(Path("/r"), "chat-7")
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "name": "chat-7",
+                    "repo": "/r",
+                    "worktree": "/r",
+                    "type": "chat",
+                    "schema_version": 1,
+                }
+            )
+        )
+
+        loaded = sessions.load(Path("/r"), "chat-7")
+
+        assert (loaded.resource_name, loaded.runtime_name, loaded.schema_version) == (
+            "",
+            "chat-7",
+            sessions.SCHEMA_VERSION,
+        )
 
     def test_extra_field_in_meta_json_raises(self, fake_tasks_db):
         """extra='forbid' is the deliberate choice: migrate() must normalise legacy
@@ -596,6 +620,43 @@ class TestSessionMetaRoundTrip:
         assert all(e.mode == "worktree" for e in entries)
 
 
+class TestRenameChat:
+    def test_moves_metadata_and_preserves_runtime_identity(self, fake_tasks_db):
+        meta = sessions.SessionMeta(
+            name="chat-1",
+            repo="/r",
+            worktree="/r",
+            type="chat",
+            no_worktree=True,
+            session_id="sid",
+        )
+        sessions.save(meta)
+
+        renamed = sessions.rename_chat(meta, "api-investigation")
+
+        assert not sessions.task_db_path(Path("/r"), "chat-1").exists()
+        assert sessions.load(Path("/r"), "api-investigation") == renamed
+        assert (renamed.name, renamed.runtime_name, renamed.session_id) == ("api-investigation", "chat-1", "sid")
+
+    def test_rejects_tasks(self, fake_tasks_db):
+        meta = sessions.SessionMeta(name="task", repo="/r", worktree="/r/w")
+        with pytest.raises(SystemExit):
+            sessions.rename_chat(meta, "other")
+
+    def test_rejects_running_chat(self, fake_tasks_db):
+        meta = sessions.SessionMeta(name="chat-1", repo="/r", worktree="/r", type="chat", status="running")
+        with pytest.raises(SystemExit):
+            sessions.rename_chat(meta, "other")
+
+    def test_rejects_name_collision(self, fake_tasks_db):
+        first = sessions.SessionMeta(name="chat-1", repo="/r", worktree="/r", type="chat")
+        second = sessions.SessionMeta(name="taken", repo="/r", worktree="/r", type="chat")
+        sessions.save(first)
+        sessions.save(second)
+        with pytest.raises(SystemExit):
+            sessions.rename_chat(first, "taken")
+
+
 class TestSessionMetaProperties:
     def test_is_chat(self):
         assert sessions.SessionMeta(name="c", repo="/r", worktree="/r", type="chat").is_chat
@@ -616,9 +677,9 @@ class TestSessionMetaProperties:
         assert m.session_dir == sessions.task_session_dir(Path("/r"), "x")
 
     def test_image_and_container_name_delegate(self):
-        m = sessions.SessionMeta(name="x", repo="/a/repo", worktree="/a/repo/w")
-        assert m.image_name == sessions.image_name(Path("/a/repo"), "x")
-        assert m.container_name == sessions.container_name(Path("/a/repo"), "x")
+        m = sessions.SessionMeta(name="renamed", resource_name="chat-1", repo="/a/repo", worktree="/a/repo/w")
+        assert m.image_name == sessions.image_name(Path("/a/repo"), "chat-1")
+        assert m.container_name == sessions.container_name(Path("/a/repo"), "chat-1")
 
 
 # ---------------------------------------------------------------------------
@@ -852,6 +913,71 @@ class TestSessionCreateChat:
         sessions.create(name="chat-1", repo=git_repo, type="chat", backend=agent.CODEX, no_commit=True, in_repo=True)
         exclude = (git_repo / ".git" / "info" / "exclude").read_text()
         assert ".hatchery/" in exclude
+
+
+class TestPromoteChat:
+    def test_creates_task_and_preserves_session_state(self, git_repo, fake_tasks_db, no_input):
+        chat = sessions.create(name="chat-1", repo=git_repo, type="chat", backend=agent.CODEX)
+        chat.session_id = "existing-session"
+        sessions.save(chat)
+        (chat.session_dir / "history-marker").write_text("kept")
+
+        promoted = sessions.promote_chat(
+            chat,
+            name="api-investigation",
+            backend=agent.CODEX,
+            objective="Investigate the API",
+        )
+
+        assert (
+            promoted.name,
+            promoted.type,
+            promoted.session_id,
+            promoted.runtime_name,
+            promoted.branch,
+            promoted.no_worktree,
+        ) == (
+            "api-investigation",
+            "task",
+            "existing-session",
+            "chat-1",
+            "hatchery/api-investigation",
+            False,
+        )
+        assert promoted.worktree_path.exists()
+        assert promoted.task_file is not None
+        assert "Investigate the API" in promoted.task_file.read_text()
+        assert (promoted.session_dir / "history-marker").read_text() == "kept"
+        assert not sessions.task_db_path(git_repo, "chat-1").exists()
+
+    def test_custom_name_can_be_promoted_in_place_without_worktree_or_commits(self, git_repo, fake_tasks_db, no_input):
+        chat = sessions.create(name="research", repo=git_repo, type="chat", backend=agent.CODEX, no_commit=True)
+
+        promoted = sessions.promote_chat(
+            chat,
+            name="research",
+            backend=agent.CODEX,
+            no_worktree=True,
+            no_commit=True,
+            objective="Record the research",
+        )
+
+        assert (promoted.name, promoted.type, promoted.branch, promoted.no_worktree, promoted.no_commit) == (
+            "research",
+            "task",
+            "",
+            True,
+            True,
+        )
+        assert promoted.task_file is not None
+        assert promoted.task_file.is_relative_to(git_repo / ".hatchery" / "tasks")
+
+    def test_rejects_running_chat(self, git_repo, fake_tasks_db):
+        chat = sessions.SessionMeta(
+            name="chat-1", repo=str(git_repo), worktree=str(git_repo), type="chat", status="running"
+        )
+        with pytest.raises(SystemExit):
+            sessions.promote_chat(chat, name="task", backend=agent.CODEX, objective="x")
 
 
 class TestPrepareSandbox:

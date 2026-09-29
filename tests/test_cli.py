@@ -80,6 +80,8 @@ class TestHelp:
             "ls | list",
             "logs",
             "new",
+            "promote",
+            "rename",
             "resume",
             "sandbox",
             "self",
@@ -1291,8 +1293,67 @@ class TestCmdList:
             mock_root.return_value = (Path("/my/repo"), True)
             mock_tasks.return_value = task_list
             result = runner.invoke(cli, ["list"])
-        assert "STATUS" in result.output
-        assert "CREATED" in result.output
+        assert all(column in result.output for column in ("NAME", "TYPE", "STATUS", "WORKTREE", "CREATED"))
+        assert "BRANCH" not in result.output
+
+    def test_rows_indicate_worktree_isolation(self, monkeypatch, fake_tasks_db):
+        task_list = [
+            {
+                "name": "build-api",
+                "type": "task",
+                "status": "in-progress",
+                "branch": "hatchery/build-api",
+                "worktree": "/repo/.hatchery/worktrees/build-api",
+                "created": "2026-01-02",
+            },
+            {
+                "name": "research",
+                "type": "task",
+                "status": "in-progress",
+                "branch": "",
+                "worktree": "/repo",
+                "no_worktree": True,
+                "created": "2026-01-01",
+            },
+            {
+                "name": "chat-1",
+                "type": "chat",
+                "status": "in-progress",
+                "branch": "",
+                "worktree": "/repo",
+                "created": "2025-12-31",
+            },
+        ]
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path("/repo"), True)),
+            patch("seekr_hatchery.cli.sessions.repo_tasks_for_current_repo", return_value=task_list),
+        ):
+            result = CliRunner().invoke(cli, ["list"])
+
+        assert result.exit_code == 0
+        rows = [
+            line.split() for line in result.output.splitlines() if line.startswith(("build-api", "research", "chat-1"))
+        ]
+        assert rows == [
+            ["build-api", "task", "in-progress", "✓", "2026-01-02"],
+            ["research", "task", "in-progress", "2026-01-01"],
+            ["chat-1", "chat", "in-progress", "2025-12-31"],
+        ]
+
+    def test_task_type_is_magenta_and_chat_type_is_uncolored(self, fake_tasks_db):
+        task_list = [
+            {"name": "build-api", "type": "task", "status": "running", "created": "2026-01-02"},
+            {"name": "chat-1", "type": "chat", "status": "running", "created": "2026-01-01"},
+        ]
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path("/repo"), True)),
+            patch("seekr_hatchery.cli.sessions.repo_tasks_for_current_repo", return_value=task_list),
+        ):
+            result = CliRunner().invoke(cli, ["list"], color=True)
+
+        assert result.exit_code == 0
+        assert "\x1b[35mtask" in result.output
+        assert "\x1b[35mchat" not in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -1929,6 +1990,107 @@ class TestChat:
         assert "NAME" in result.output
 
 
+class TestPromoteChat:
+    def _meta(self, name: str = "chat-1") -> sessions.SessionMeta:
+        return sessions.SessionMeta(
+            name=name,
+            resource_name=name,
+            repo="/r",
+            worktree="/r",
+            type="chat",
+            no_worktree=True,
+            agent="CODEX",
+        )
+
+    def test_auto_name_requires_explicit_task_name(self):
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path("/r"), True)),
+            patch("seekr_hatchery.cli.sessions.load", return_value=self._meta()),
+        ):
+            result = CliRunner().invoke(cli, ["promote", "chat-1"])
+
+        assert result.exit_code == 1
+        assert "explicit task name is required" in result.output
+
+    def test_custom_chat_name_defaults_task_name_and_respects_policy_flags(self):
+        meta = self._meta("api-research")
+        promoted = meta.model_copy(update={"type": "task"})
+        backend = MagicMock()
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path("/r"), True)),
+            patch("seekr_hatchery.cli.sessions.load", return_value=meta),
+            patch("seekr_hatchery.cli.agent.from_kind", return_value=backend),
+            patch("seekr_hatchery.cli._prompt_objective", return_value="Build it"),
+            patch("seekr_hatchery.cli.sessions.merge_includes_with_config", return_value=[]),
+            patch("seekr_hatchery.cli.sessions.promote_chat", return_value=promoted) as promote,
+        ):
+            result = CliRunner().invoke(
+                cli,
+                ["promote", "api-research", "--no-worktree", "--no-commit", "--branch", "ignored"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert promote.call_args.args == (meta,)
+        assert promote.call_args.kwargs == {
+            "name": "api-research",
+            "backend": backend,
+            "base": "HEAD",
+            "branch": "ignored",
+            "no_worktree": True,
+            "no_commit": True,
+            "in_repo": True,
+            "include_entries": [],
+            "objective": "Build it",
+            "use_editor": False,
+        }
+        assert "hatchery resume api-research" in result.output
+
+    def test_explicit_task_name_is_normalized(self):
+        meta = self._meta()
+        promoted = meta.model_copy(update={"name": "api-fix", "type": "task"})
+        backend = MagicMock()
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path("/r"), True)),
+            patch("seekr_hatchery.cli.sessions.load", return_value=meta),
+            patch("seekr_hatchery.cli.agent.from_kind", return_value=backend),
+            patch("seekr_hatchery.cli._prompt_objective", return_value="Build it"),
+            patch("seekr_hatchery.cli.sessions.merge_includes_with_config", return_value=[]),
+            patch("seekr_hatchery.cli.sessions.promote_chat", return_value=promoted) as promote,
+        ):
+            result = CliRunner().invoke(cli, ["promote", "chat-1", "API Fix"])
+
+        assert result.exit_code == 0, result.output
+        assert promote.call_args.args == (meta,)
+        assert promote.call_args.kwargs == {
+            "name": "api-fix",
+            "backend": backend,
+            "base": "HEAD",
+            "branch": None,
+            "no_worktree": False,
+            "no_commit": False,
+            "in_repo": True,
+            "include_entries": [],
+            "objective": "Build it",
+            "use_editor": False,
+        }
+
+
+class TestRenameChat:
+    def test_renames_chat(self):
+        meta = sessions.SessionMeta(name="chat-1", repo="/r", worktree="/r", type="chat")
+        renamed = meta.model_copy(update={"name": "api-investigation"})
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path("/r"), True)),
+            patch("seekr_hatchery.cli.sessions.load", return_value=meta),
+            patch("seekr_hatchery.cli.sessions.rename_chat", return_value=renamed) as rename,
+        ):
+            result = CliRunner().invoke(cli, ["rename", "chat-1", "API Investigation"])
+
+        assert result.exit_code == 0
+        rename.assert_called_once_with(meta, "api-investigation")
+        assert "renamed to 'api-investigation'" in result.output
+
+
 class TestNextChatName:
     def test_no_existing_chats(self, fake_tasks_db):
         with patch("seekr_hatchery.cli.sessions.repo_tasks_for_current_repo", return_value=[]):
@@ -2345,37 +2507,27 @@ class TestResumeChat:
 
 
 class TestExec:
-    def test_exec_dispatches_to_exec_task_shell(self, tmp_path):
+    @pytest.mark.parametrize(("shell_args", "expected_shell"), [([], "/bin/bash"), (["--shell", "/bin/sh"], "/bin/sh")])
+    def test_exec_uses_stable_container_identity(self, tmp_path, shell_args, expected_shell):
         runner = CliRunner()
-        expected_name = sessions.container_name(tmp_path, "my-task")
+        meta = sessions.SessionMeta(
+            name="renamed-chat",
+            resource_name="chat-1",
+            repo=str(tmp_path),
+            worktree=str(tmp_path),
+            type="chat",
+        )
+        runtime = docker.DockerRuntime()
         with (
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(tmp_path, True)),
-            patch("seekr_hatchery.cli.docker.detect_runtime", return_value=docker.DockerRuntime()),
+            patch("seekr_hatchery.cli.sessions.load", return_value=meta),
+            patch("seekr_hatchery.cli.docker.detect_runtime", return_value=runtime),
             patch("seekr_hatchery.cli.docker.exec_task_shell") as mock_exec,
         ):
-            result = runner.invoke(cli, ["exec", "my-task"])
-        assert result.exit_code == 0, result.output
-        mock_exec.assert_called_once()
-        call_args = mock_exec.call_args
-        assert call_args[0][0] == expected_name
-        assert isinstance(call_args[0][1], docker.DockerRuntime)
-        assert call_args[1] == {"shell": "/bin/bash"}
+            result = runner.invoke(cli, ["exec", "renamed-chat", *shell_args])
 
-    def test_exec_custom_shell(self, tmp_path):
-        runner = CliRunner()
-        expected_name = sessions.container_name(tmp_path, "my-task")
-        with (
-            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(tmp_path, True)),
-            patch("seekr_hatchery.cli.docker.detect_runtime", return_value=docker.DockerRuntime()),
-            patch("seekr_hatchery.cli.docker.exec_task_shell") as mock_exec,
-        ):
-            result = runner.invoke(cli, ["exec", "my-task", "--shell", "/bin/sh"])
         assert result.exit_code == 0, result.output
-        mock_exec.assert_called_once()
-        call_args = mock_exec.call_args
-        assert call_args[0][0] == expected_name
-        assert isinstance(call_args[0][1], docker.DockerRuntime)
-        assert call_args[1] == {"shell": "/bin/sh"}
+        mock_exec.assert_called_once_with(meta.container_name, runtime, shell=expected_shell)
 
 
 # ---------------------------------------------------------------------------
