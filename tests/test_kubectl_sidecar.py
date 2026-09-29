@@ -256,30 +256,56 @@ _DUMMY_CERT = b"-----BEGIN CERTIFICATE-----\nZmFrZWNlcnQ=\n-----END CERTIFICATE-
 
 class TestMakeKubeconfig:
     def test_contains_rbac_port(self) -> None:
-        kc = make_kubeconfig(12345, "my-token", _DUMMY_CERT)
-        assert "12345" in kc
+        assert "12345" in make_kubeconfig([("hatchery-proxy", 12345)], "my-token", _DUMMY_CERT)
 
     def test_contains_token(self) -> None:
-        kc = make_kubeconfig(12345, "my-secret-token", _DUMMY_CERT)
-        assert "my-secret-token" in kc
+        assert "my-secret-token" in make_kubeconfig([("hatchery-proxy", 12345)], "my-secret-token", _DUMMY_CERT)
 
-    def test_valid_yaml(self) -> None:
-        import yaml
-
-        kc = make_kubeconfig(8080, "tok", _DUMMY_CERT)
-        parsed = yaml.safe_load(kc)
-        assert parsed["kind"] == "Config"
-        assert parsed["current-context"] == "hatchery-proxy"
-
-    def test_uses_https(self) -> None:
-        kc = make_kubeconfig(8080, "tok", _DUMMY_CERT)
-        assert "https://" in kc
-
-    def test_embeds_ca_cert(self) -> None:
+    def test_multiple_contexts_have_distinct_servers_and_first_is_default(self) -> None:
         import base64
 
-        kc = make_kubeconfig(8080, "tok", _DUMMY_CERT)
-        assert base64.b64encode(_DUMMY_CERT).decode() in kc
+        import yaml
+
+        config = yaml.safe_load(make_kubeconfig([("dev", 1111), ("prd", 2222)], "tok", _DUMMY_CERT))
+        assert config == {
+            "apiVersion": "v1",
+            "kind": "Config",
+            "clusters": [
+                {
+                    "name": "dev",
+                    "cluster": {
+                        "server": "https://host.docker.internal:1111",
+                        "certificate-authority-data": base64.b64encode(_DUMMY_CERT).decode(),
+                    },
+                },
+                {
+                    "name": "prd",
+                    "cluster": {
+                        "server": "https://host.docker.internal:2222",
+                        "certificate-authority-data": base64.b64encode(_DUMMY_CERT).decode(),
+                    },
+                },
+            ],
+            "current-context": "dev",
+            "contexts": [
+                {"name": "dev", "context": {"cluster": "dev", "user": "hatchery-agent"}},
+                {"name": "prd", "context": {"cluster": "prd", "user": "hatchery-agent"}},
+            ],
+            "users": [{"name": "hatchery-agent", "user": {"token": "tok"}}],
+        }
+
+    def test_single_named_context_includes_legacy_alias(self) -> None:
+        import yaml
+
+        config = yaml.safe_load(make_kubeconfig([("dev", 8080)], "tok", _DUMMY_CERT))
+        assert config["contexts"] == [
+            {"name": "dev", "context": {"cluster": "dev", "user": "hatchery-agent"}},
+            {"name": "hatchery-proxy", "context": {"cluster": "dev", "user": "hatchery-agent"}},
+        ]
+
+    def test_requires_at_least_one_context(self) -> None:
+        with pytest.raises(ValueError, match="at least one context"):
+            make_kubeconfig([], "tok", _DUMMY_CERT)
 
 
 # ── Integration: RBAC proxy server ───────────────────────────────────────────

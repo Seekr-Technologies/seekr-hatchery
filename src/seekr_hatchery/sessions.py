@@ -512,14 +512,6 @@ def _migrate(meta: dict) -> dict:
         meta["schema_version"] = 1
         v = 1
 
-    # v1 -> v2: separate the mutable display/lookup name from the immutable
-    # runtime identity used by containers, images, and task-scoped volumes.
-    if v == 1:
-        if "name" in meta:
-            meta["resource_name"] = meta["name"]
-        meta["schema_version"] = 2
-        v = 2
-
     return meta
 
 
@@ -588,6 +580,10 @@ def rename_chat(meta: SessionMeta, new_name: str) -> SessionMeta:
     new_dir = _task_dir(meta.repo_path, new_name)
     new_dir.parent.mkdir(parents=True, exist_ok=True)
     old_name = meta.name
+    # Metadata written before resource_name existed uses the current name as
+    # its runtime identity. Capture it before changing the user-facing name.
+    if not meta.resource_name:
+        meta.resource_name = old_name
     old_dir.rename(new_dir)
     try:
         meta.name = new_name

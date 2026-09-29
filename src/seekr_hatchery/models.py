@@ -12,13 +12,13 @@ import logging
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from seekr_hatchery.includes import IncludeEntry, load_include_entries
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 1
 
 
 SessionStatus = Literal["in-progress", "running", "complete", "archived"]
@@ -206,13 +206,49 @@ class KubectlRBACRule(BaseModel):
         return verbs
 
 
+DEFAULT_KUBECTL_CONTEXT_NAME = "hatchery-proxy"
+
+
+class KubectlContext(BaseModel):
+    """One cluster the agent can reach, with its own RBAC allowlist."""
+
+    context: str | None = None
+    rules: list[KubectlRBACRule] = []
+
+    @property
+    def display_name(self) -> str:
+        """Return the container-side context name."""
+        return self.context or DEFAULT_KUBECTL_CONTEXT_NAME
+
+
 class KubectlConfig(BaseModel):
     """Top-level kubectl proxy configuration loaded from docker.yaml."""
 
+    model_config = ConfigDict(extra="forbid")
+
+    contexts: list[KubectlContext] = []
+    """Clusters the agent can reach; the first is the default context."""
+
     context: str | None = None
-    """Kubeconfig context to use.  Defaults to the host's active context.
-    Set this when you have multiple contexts and want to pin which cluster
-    the agent can reach (e.g. ``context: my-dev-cluster``)."""
+    """Legacy single-context shorthand for ``contexts``."""
 
     rules: list[KubectlRBACRule] = []
-    """Allowlist rules.  Empty list means deny everything (fail-closed)."""
+    """Legacy single-context allowlist. Empty means deny everything."""
+
+    @model_validator(mode="after")
+    def _check_forms(self) -> "KubectlConfig":
+        if self.contexts and (self.context is not None or self.rules):
+            raise ValueError(
+                "kubernetes: 'contexts' cannot be combined with the single-context 'context'/'rules' shorthand"
+            )
+        names = [context.display_name for context in self.contexts]
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        if duplicates:
+            raise ValueError(f"kubernetes: duplicate context name(s) {duplicates} in 'contexts'")
+        return self
+
+    def resolved_contexts(self) -> list[KubectlContext]:
+        """Return configured contexts, normalizing the legacy shorthand."""
+        if self.contexts:
+            return list(self.contexts)
+        return [KubectlContext(context=self.context, rules=self.rules)]

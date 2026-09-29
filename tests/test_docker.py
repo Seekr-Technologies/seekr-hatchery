@@ -12,7 +12,7 @@ import seekr_hatchery.constants as constants
 import seekr_hatchery.docker as docker
 import seekr_hatchery.mount as mount
 import seekr_hatchery.mount_links as mount_links
-from seekr_hatchery.models import SessionMeta
+from seekr_hatchery.models import KubectlConfig, KubectlContext, SessionMeta
 
 
 def _no_wt_meta(cwd):
@@ -1794,6 +1794,17 @@ class TestValidateDockerConfigFile:
         path = tmp_path / "docker.yaml"
         path.write_text("mounts: [unterminated\n")
         assert "Invalid YAML" in docker.validate_docker_config_file(path)
+
+
+class TestDockerFeatures:
+    def test_lists_context_names_when_multiple_kubernetes_contexts_are_configured(self) -> None:
+        config = docker.DockerConfig(
+            kubernetes=KubectlConfig(contexts=[KubectlContext(context="dev"), KubectlContext(context="prd")])
+        )
+        assert docker.docker_features(config) == ["kubectl (dev, prd)"]
+
+    def test_single_kubernetes_context_keeps_existing_feature_label(self) -> None:
+        assert docker.docker_features(docker.DockerConfig(kubernetes=KubectlConfig(context="dev"))) == ["kubectl"]
 
 
 class TestEnsureHelpersNoPrompt:

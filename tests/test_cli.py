@@ -1293,9 +1293,10 @@ class TestCmdList:
             mock_root.return_value = (Path("/my/repo"), True)
             mock_tasks.return_value = task_list
             result = runner.invoke(cli, ["list"])
-        assert all(column in result.output for column in ("NAME", "TYPE", "STATUS", "BRANCH", "WORKTREE", "CREATED"))
+        assert all(column in result.output for column in ("NAME", "TYPE", "STATUS", "WORKTREE", "CREATED"))
+        assert "BRANCH" not in result.output
 
-    def test_rows_show_compact_branch_and_worktree_details(self, monkeypatch, fake_tasks_db):
+    def test_rows_indicate_worktree_isolation(self, monkeypatch, fake_tasks_db):
         task_list = [
             {
                 "name": "build-api",
@@ -1334,10 +1335,25 @@ class TestCmdList:
             line.split() for line in result.output.splitlines() if line.startswith(("build-api", "research", "chat-1"))
         ]
         assert rows == [
-            ["build-api", "task", "in-progress", "hatchery/build-api", "build-api", "2026-01-02"],
-            ["research", "task", "in-progress", "—", "current", "2026-01-01"],
-            ["chat-1", "chat", "in-progress", "—", "—", "2025-12-31"],
+            ["build-api", "task", "in-progress", "✓", "2026-01-02"],
+            ["research", "task", "in-progress", "2026-01-01"],
+            ["chat-1", "chat", "in-progress", "2025-12-31"],
         ]
+
+    def test_task_type_is_magenta_and_chat_type_is_uncolored(self, fake_tasks_db):
+        task_list = [
+            {"name": "build-api", "type": "task", "status": "running", "created": "2026-01-02"},
+            {"name": "chat-1", "type": "chat", "status": "running", "created": "2026-01-01"},
+        ]
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path("/repo"), True)),
+            patch("seekr_hatchery.cli.sessions.repo_tasks_for_current_repo", return_value=task_list),
+        ):
+            result = CliRunner().invoke(cli, ["list"], color=True)
+
+        assert result.exit_code == 0
+        assert "\x1b[35mtask" in result.output
+        assert "\x1b[35mchat" not in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -1999,9 +2015,11 @@ class TestPromoteChat:
     def test_custom_chat_name_defaults_task_name_and_respects_policy_flags(self):
         meta = self._meta("api-research")
         promoted = meta.model_copy(update={"type": "task"})
+        backend = MagicMock()
         with (
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path("/r"), True)),
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
+            patch("seekr_hatchery.cli.agent.from_kind", return_value=backend),
             patch("seekr_hatchery.cli._prompt_objective", return_value="Build it"),
             patch("seekr_hatchery.cli.sessions.merge_includes_with_config", return_value=[]),
             patch("seekr_hatchery.cli.sessions.promote_chat", return_value=promoted) as promote,
@@ -2012,19 +2030,29 @@ class TestPromoteChat:
             )
 
         assert result.exit_code == 0, result.output
-        assert promote.call_args.kwargs["name"] == "api-research"
-        assert promote.call_args.kwargs["no_worktree"] is True
-        assert promote.call_args.kwargs["no_commit"] is True
-        assert promote.call_args.kwargs["branch"] == "ignored"
-        assert promote.call_args.kwargs["objective"] == "Build it"
+        assert promote.call_args.args == (meta,)
+        assert promote.call_args.kwargs == {
+            "name": "api-research",
+            "backend": backend,
+            "base": "HEAD",
+            "branch": "ignored",
+            "no_worktree": True,
+            "no_commit": True,
+            "in_repo": True,
+            "include_entries": [],
+            "objective": "Build it",
+            "use_editor": False,
+        }
         assert "hatchery resume api-research" in result.output
 
     def test_explicit_task_name_is_normalized(self):
         meta = self._meta()
         promoted = meta.model_copy(update={"name": "api-fix", "type": "task"})
+        backend = MagicMock()
         with (
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path("/r"), True)),
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
+            patch("seekr_hatchery.cli.agent.from_kind", return_value=backend),
             patch("seekr_hatchery.cli._prompt_objective", return_value="Build it"),
             patch("seekr_hatchery.cli.sessions.merge_includes_with_config", return_value=[]),
             patch("seekr_hatchery.cli.sessions.promote_chat", return_value=promoted) as promote,
@@ -2032,7 +2060,19 @@ class TestPromoteChat:
             result = CliRunner().invoke(cli, ["promote", "chat-1", "API Fix"])
 
         assert result.exit_code == 0, result.output
-        assert promote.call_args.kwargs["name"] == "api-fix"
+        assert promote.call_args.args == (meta,)
+        assert promote.call_args.kwargs == {
+            "name": "api-fix",
+            "backend": backend,
+            "base": "HEAD",
+            "branch": None,
+            "no_worktree": False,
+            "no_commit": False,
+            "in_repo": True,
+            "include_entries": [],
+            "objective": "Build it",
+            "use_editor": False,
+        }
 
 
 class TestRenameChat:

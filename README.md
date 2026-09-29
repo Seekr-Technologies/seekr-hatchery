@@ -98,7 +98,7 @@ When the agent starts a new task it is given a task file at `.hatchery/tasks/YYY
 | `done <name>` | Remove worktree, retain branch, mark task complete |
 | `archive <name>` | Remove worktree while retaining the branch and resumable session |
 | `delete <name>` | Remove worktree, delete branch, erase all metadata |
-| `list` | List chats and tasks with type, branch, and worktree details |
+| `list` | List chats and tasks with type and worktree-isolation status |
 | `status <name>` | Show task metadata and the full task file |
 | `self update` | Upgrade hatchery to the latest release |
 | `config edit global` | Edit the global config (`~/.hatchery/config.yaml`) in `$EDITOR` with validation |

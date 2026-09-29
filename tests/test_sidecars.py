@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from seekr_hatchery.agents import CONTAINER_HOME, ProxyEndpoint
-from seekr_hatchery.models import KubectlConfig
+from seekr_hatchery.models import KubectlConfig, KubectlContext
 from seekr_hatchery.mount import BindMount
 from seekr_hatchery.sidecars import base
 from seekr_hatchery.sidecars.api_sidecar import sidecar as api_sidecar
@@ -215,7 +215,7 @@ class TestKubectlSidecar:
             log.append(f"start_proc:{context}")
             return proc, 8001
 
-        def start_rbac(rules, token, kube_port):
+        def start_rbac(rules, token, kube_port, certificate=None):
             log.append("start_rbac")
             if rbac_error:
                 raise RuntimeError("rbac boom")
@@ -223,6 +223,7 @@ class TestKubectlSidecar:
 
         monkeypatch.setattr(kubectl_proc, "start_kubectl_proxy_proc", start_proc)
         monkeypatch.setattr(rbac_proxy, "start_rbac_proxy", start_rbac)
+        monkeypatch.setattr(rbac_proxy, "_generate_self_signed_cert", lambda: (b"cert-pem", b"key-pem"))
         monkeypatch.setattr(kubeconfig, "make_kubeconfig", lambda *a: "kubeconfig-yaml")
         monkeypatch.setattr(rbac_proxy, "stop_rbac_proxy", lambda server: log.append(f"stop_rbac:{server.name}"))
         monkeypatch.setattr(kubectl_proc, "stop_kubectl_proxy_proc", lambda p: log.append(f"stop_proc:{p.name}"))
@@ -252,13 +253,39 @@ class TestKubectlSidecar:
         sidecar.stop()
         assert log == ["stop_rbac:rbac", "stop_proc:proc"]
 
-    def test_partial_start_still_reaps_proc(self, tmp_path: Path, monkeypatch) -> None:
+    def test_failed_context_is_stopped_and_other_contexts_continue(self, tmp_path: Path, monkeypatch) -> None:
         log: list[str] = []
-        self._patch_kubectl(monkeypatch, log, rbac_error=True)
-        sidecar = kubectl_sidecar.KubectlSidecar(KubectlConfig(), tmp_path, "tok")
-        with pytest.raises(RuntimeError, match="rbac boom"):
-            sidecar.start()
-        log.clear()
+        proc = SimpleNamespace(name="proc")
+        rbac = SimpleNamespace(name="rbac")
+
+        def start_proc(context=None):
+            log.append(f"start_proc:{context}")
+            if context == "broken":
+                raise RuntimeError("expired credentials")
+            return proc, 8001
+
+        monkeypatch.setattr(kubectl_proc, "start_kubectl_proxy_proc", start_proc)
+        monkeypatch.setattr(rbac_proxy, "_generate_self_signed_cert", lambda: (b"cert-pem", b"key-pem"))
+        monkeypatch.setattr(rbac_proxy, "start_rbac_proxy", lambda *args, **kwargs: (rbac, 8443, b"cert-pem"))
+        monkeypatch.setattr(rbac_proxy, "stop_rbac_proxy", lambda server: log.append(f"stop_rbac:{server.name}"))
+        monkeypatch.setattr(kubectl_proc, "stop_kubectl_proxy_proc", lambda p: log.append(f"stop_proc:{p.name}"))
+        monkeypatch.setattr(kubeconfig, "make_kubeconfig", lambda *args: "kubeconfig-yaml")
+        sidecar = kubectl_sidecar.KubectlSidecar(
+            KubectlConfig(contexts=[KubectlContext(context="dev"), KubectlContext(context="broken")]), tmp_path, "tok"
+        )
+
+        sidecar.start()
         sidecar.stop()
-        # RBAC server never came up, but the kubectl proc did — so only it is reaped.
-        assert log == ["stop_proc:proc"]
+
+        assert log == ["start_proc:dev", "start_proc:broken", "stop_rbac:rbac", "stop_proc:proc"]
+
+    def test_all_context_failures_raise(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr(rbac_proxy, "_generate_self_signed_cert", lambda: (b"cert-pem", b"key-pem"))
+        monkeypatch.setattr(
+            kubectl_proc,
+            "start_kubectl_proxy_proc",
+            lambda context=None: (_ for _ in ()).throw(RuntimeError("expired credentials")),
+        )
+        sidecar = kubectl_sidecar.KubectlSidecar(KubectlConfig(context="broken"), tmp_path, "tok")
+        with pytest.raises(RuntimeError, match="no configured context"):
+            sidecar.start()

@@ -388,8 +388,8 @@ TASK_NAME = TaskNameType()
 # named here fall into a trailing "Other commands" section, so a newly added
 # command is never silently dropped from help.
 COMMAND_SECTIONS: list[tuple[str, list[str]]] = [
-    ("Start a task", ["new", "chat", "resume", "promote"]),
-    ("Manage tasks", ["list", "status", "rename", "shell", "exec", "done", "archive", "delete"]),
+    ("Start a task", ["new", "chat", "resume"]),
+    ("Manage tasks", ["list", "status", "rename", "promote", "shell", "exec", "done", "archive", "delete"]),
     ("Sandbox", ["sandbox"]),
     ("Maintenance", ["logs", "config", "self"]),
 ]

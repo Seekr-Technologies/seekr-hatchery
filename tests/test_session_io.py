@@ -506,7 +506,7 @@ class TestSessionMetaRoundTrip:
         assert loaded.type == "chat"
         assert loaded.is_chat is True
 
-    def test_v1_metadata_uses_original_name_as_runtime_identity(self, fake_tasks_db):
+    def test_v1_metadata_without_resource_name_still_loads(self, fake_tasks_db):
         path = sessions.task_db_path(Path("/r"), "chat-7")
         path.parent.mkdir(parents=True)
         path.write_text(
@@ -523,8 +523,11 @@ class TestSessionMetaRoundTrip:
 
         loaded = sessions.load(Path("/r"), "chat-7")
 
-        assert loaded.resource_name == "chat-7"
-        assert loaded.schema_version == sessions.SCHEMA_VERSION
+        assert (loaded.resource_name, loaded.runtime_name, loaded.schema_version) == (
+            "",
+            "chat-7",
+            sessions.SCHEMA_VERSION,
+        )
 
     def test_extra_field_in_meta_json_raises(self, fake_tasks_db):
         """extra='forbid' is the deliberate choice: migrate() must normalise legacy
@@ -621,7 +624,6 @@ class TestRenameChat:
     def test_moves_metadata_and_preserves_runtime_identity(self, fake_tasks_db):
         meta = sessions.SessionMeta(
             name="chat-1",
-            resource_name="chat-1",
             repo="/r",
             worktree="/r",
             type="chat",
