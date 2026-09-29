@@ -1522,10 +1522,16 @@ def run_session(
 
     mode_label = "no-worktree mode" if meta.no_worktree else "worktree mode"
     logger.debug(f"Launching {runtime.binary} container for session '{meta.name}' ({mode_label})")
-    active_sidecars = [
-        *(sidecars.ApiProxySidecar(ep, proxy_token, backend) for ep in endpoints),
-        sidecars.KubectlSidecar(config.kubernetes, session_dir, kubectl_proxy_token or ""),
-    ]
+    active_sidecars = sidecars.builtin_providers.session_sidecars(
+        sidecars.SessionProviderContext(
+            backend=backend,
+            endpoints=endpoints,
+            proxy_token=proxy_token,
+            kubernetes=config.kubernetes,
+            session_dir=session_dir,
+            kubectl_proxy_token=kubectl_proxy_token or "",
+        )
+    )
     with sidecars.run_sidecars(active_sidecars) as contrib:
         mounts.extend(contrib.mounts)
         spec = build_spec(
@@ -1586,9 +1592,13 @@ def launch_sandbox_shell(
     # virtio-fs share roots (only /Users/ and /private/tmp are shared).
     sandbox_session_dir = constants.HATCHERY_DIR / "sandbox-sessions" / str(uuid.uuid4())
     sandbox_session_dir.mkdir(parents=True, exist_ok=True)
-    active_sidecars = [
-        sidecars.KubectlSidecar(config.kubernetes, sandbox_session_dir, kubectl_proxy_token),
-    ]
+    active_sidecars = sidecars.builtin_providers.shell_sidecars(
+        sidecars.ShellProviderContext(
+            kubernetes=config.kubernetes,
+            session_dir=sandbox_session_dir,
+            kubectl_proxy_token=kubectl_proxy_token,
+        )
+    )
     try:
         with sidecars.run_sidecars(active_sidecars) as contrib:
             mounts = list(mounts) + contrib.mounts

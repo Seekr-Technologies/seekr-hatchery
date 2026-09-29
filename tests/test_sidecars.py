@@ -11,7 +11,7 @@ import pytest
 from seekr_hatchery.agents import CONTAINER_HOME, ProxyEndpoint
 from seekr_hatchery.models import KubectlConfig, KubectlContext
 from seekr_hatchery.mount import BindMount
-from seekr_hatchery.sidecars import base
+from seekr_hatchery.sidecars import base, providers
 from seekr_hatchery.sidecars.api_sidecar import sidecar as api_sidecar
 from seekr_hatchery.sidecars.kubectl_sidecar import kubeconfig, kubectl_proc, rbac_proxy
 from seekr_hatchery.sidecars.kubectl_sidecar import sidecar as kubectl_sidecar
@@ -114,6 +114,51 @@ class TestRunSidecars:
         with base.run_sidecars([first, second]):
             pass
         assert log == [("start", "first"), ("start", "second"), ("stop", "second"), ("stop", "first")]
+
+
+# ── Provider registry ───────────────────────────────────────────────────────
+
+
+class _Provider:
+    def __init__(self, name: str, sidecars: list[base.SandboxSidecar]) -> None:
+        self.name = name
+        self._sidecars = sidecars
+
+    def session_sidecars(self, context: providers.SessionProviderContext) -> list[base.SandboxSidecar]:
+        return self._sidecars
+
+    def shell_sidecars(self, context: providers.ShellProviderContext) -> list[base.SandboxSidecar]:
+        return self._sidecars
+
+
+class TestProviderRegistry:
+    def test_preserves_registration_order_for_each_launch_kind(self) -> None:
+        registry = providers.SandboxProviderRegistry()
+        first = _RecordingSidecar("first", [])
+        second = _RecordingSidecar("second", [])
+        registry.register(_Provider("one", [first]))
+        registry.register(_Provider("two", [second]))
+        session_context = providers.SessionProviderContext(
+            backend=SimpleNamespace(),
+            endpoints=[],
+            proxy_token="token",
+            kubernetes=None,
+            session_dir=Path("/tmp/session"),
+            kubectl_proxy_token="kube-token",
+        )
+        shell_context = providers.ShellProviderContext(
+            kubernetes=None,
+            session_dir=Path("/tmp/session"),
+            kubectl_proxy_token="kube-token",
+        )
+        assert registry.session_sidecars(session_context) == [first, second]
+        assert registry.shell_sidecars(shell_context) == [first, second]
+
+    def test_rejects_duplicate_provider_names(self) -> None:
+        registry = providers.SandboxProviderRegistry()
+        registry.register(_Provider("duplicate", []))
+        with pytest.raises(ValueError, match="duplicate"):
+            registry.register(_Provider("duplicate", []))
 
 
 # ── ApiProxySidecar ─────────────────────────────────────────────────────────
