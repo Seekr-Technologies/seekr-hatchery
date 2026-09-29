@@ -720,7 +720,7 @@ def load_docker_config(hatchery_dir: Path) -> DockerConfig:
         raw = _migrate_docker_config(raw)
         return DockerConfig.model_validate(raw)
     except Exception as exc:
-        ui.error(f"invalid {DOCKER_CONFIG}: {exc}")
+        ui.error(f"invalid docker config {config_file}: {exc}")
         sys.exit(1)
 
 
@@ -1262,7 +1262,7 @@ def build_docker_image(
                     ui.info(f"  {line}")
 
         if returncode != 0:
-            ui.error(f"{runtime.binary} build failed.")
+            ui.error(f"{runtime.binary} build failed.\n  Dockerfile: {worktree_dockerfile}")
             if exit_on_error:
                 sys.exit(1)
             return False

@@ -111,7 +111,7 @@ The chosen agent is stored in task metadata and re-used automatically on `resume
 
 ## Docker sandbox
 
-By default, `new` and `resume` build a Docker image from `.hatchery/Dockerfile` and run the agent inside it. On first `new`, if no Dockerfile exists, a starter is created for the selected agent and opened for editing.
+By default, `new` and `resume` build a Docker image from the selected agent's `.hatchery/Dockerfile.<agent>` and run the agent inside it. On first `new`, if no matching Dockerfile exists, a starter is created for the selected agent and opened for editing. The sandbox launch banner shows the active worktree and Hatchery directory relative to the displayed repository; the Hatchery directory contains the Dockerfile and `docker.yaml` used for the session. Showing both paths makes it clear when a `--no-commit` worktree is using repository-level sandbox configuration. Configuration-validation and image-build errors also print the exact `docker.yaml` or `Dockerfile.<agent>` path involved.
 
 The container receives:
 

@@ -3,6 +3,7 @@
 import logging
 import sys
 from itertools import zip_longest
+from pathlib import Path
 
 import click
 
@@ -70,6 +71,12 @@ def _pad_line(s: str, width: int) -> str:
     return s + " " * (width - len(click.unstyle(s)))
 
 
+def _format_banner_rows(rows: list[tuple[str, object]]) -> list[str]:
+    """Format labeled banner rows with every value starting in one column."""
+    label_width = max(len(label) for label, _ in rows) + 1
+    return [f"  {label + ':':<{label_width}}  {value}" for label, value in rows]
+
+
 def _banner_box(lines: list[str], inner: int, label: str, double: bool, color: str) -> None:
     """Render a labeled border box around content lines."""
     if double:
@@ -97,6 +104,8 @@ def banner(
     sandbox: bool = False,
     worktree: bool = True,
     features: list[str] | None = None,
+    worktree_path: Path | None = None,
+    hatchery_dir: Path | None = None,
 ) -> None:
     """Print the launch frame banner with isolation-level visual encoding.
 
@@ -105,13 +114,18 @@ def banner(
       worktree=True  → single-line box (green)  git isolation
       both False     → flat ━━━ bar             no isolation
     """
-    lines: list[str] = [f"  Task:    {name}"]
+    rows: list[tuple[str, object]] = [("Task", name)]
     if branch:
-        lines.append(f"  Branch:  {click.style(branch, fg='green')}")
-    lines.append(f"  {'Repo' if worktree else 'Dir'}:     {repo}")
+        rows.append(("Branch", click.style(branch, fg="green")))
+    rows.append(("Repo" if worktree else "Dir", repo))
+    if worktree_path is not None:
+        rows.append(("Worktree", worktree_path))
+    if hatchery_dir is not None:
+        rows.append(("Hatchery", hatchery_dir))
     if features:
         features_str = "  ".join(click.style(f, fg="cyan", bold=True) for f in features)
-        lines.append(f"  Features: {features_str}")
+        rows.append(("Features", features_str))
+    lines = _format_banner_rows(rows)
     inner = max(max(len(click.unstyle(ln)) for ln in lines) + 2, _BANNER_MIN_INNER)
     if sandbox:
         _banner_box(lines, inner, label=" sandbox ", double=True, color="cyan")
@@ -129,15 +143,16 @@ def chat_banner(
     name: str,
     repo: object,
     features: list[str] | None = None,
+    hatchery_dir: Path | None = None,
 ) -> None:
     """Print the launch frame banner for a chat session (always sandboxed)."""
-    lines: list[str] = [
-        f"  Chat:    {name}",
-        f"  Dir:     {repo}",
-    ]
+    rows: list[tuple[str, object]] = [("Chat", name), ("Dir", repo)]
+    if hatchery_dir is not None:
+        rows.append(("Hatchery", hatchery_dir))
     if features:
         features_str = "  ".join(click.style(f, fg="cyan", bold=True) for f in features)
-        lines.append(f"  Features: {features_str}")
+        rows.append(("Features", features_str))
+    lines = _format_banner_rows(rows)
     inner = max(max(len(click.unstyle(ln)) for ln in lines) + 2, _BANNER_MIN_INNER)
     _banner_box(lines, inner, label=" sandbox ", double=True, color="cyan")
 
