@@ -1,7 +1,7 @@
 """Pydantic models for hatchery domain objects.
 
-This module is a deliberate leaf: it imports only ``includes`` (itself a
-leaf) and is imported by both ``sessions`` and ``docker``. Keeping the
+This module is a deliberate leaf: it imports only the ``branches`` and
+``includes`` domain leaves and is imported by both ``sessions`` and ``docker``. Keeping the
 model here means neither of those modules needs to import the other just
 for the type — relevant once subsequent refactors move lifecycle logic
 into ``sessions``, where ``sessions.launch`` will call ``docker.run_session``
@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
+import seekr_hatchery.branches as branches
 from seekr_hatchery.includes import IncludeEntry, load_include_entries
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,9 @@ class SessionMeta(BaseModel):
     status: SessionStatus = "in-progress"
 
     branch: str = ""
+    # Persisted so included-repository lifecycle operations keep using the
+    # prefix selected at task creation even if configuration later changes.
+    branch_prefix: str = branches.DEFAULT_BRANCH_PREFIX
     created: str = ""
     completed: str | None = None
     session_id: str | None = None
@@ -84,6 +88,16 @@ class SessionMeta(BaseModel):
     @property
     def is_complete(self) -> bool:
         return self.status == "complete"
+
+    @property
+    def branch_name(self) -> branches.BranchName:
+        """Exact primary-repository branch identity."""
+        return branches.BranchName(self.branch)
+
+    @property
+    def include_branch_name(self) -> branches.BranchName:
+        """Included-repository branch identity derived from persisted task policy."""
+        return branches.BranchPrefix(self.branch_prefix).task_branch(self.name)
 
     @property
     def repo_path(self) -> Path:

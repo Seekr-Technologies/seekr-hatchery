@@ -481,7 +481,7 @@ def cli(log_level: str) -> None:
     default=None,
     metavar="BRANCH",
     help=(
-        "Use this branch name instead of hatchery/<name>. If it already "
+        "Use this branch name instead of <configured-prefix><name>. If it already "
         "exists (locally or on origin) it's checked out as-is; otherwise "
         "it's created fresh from --from, like the default branch."
     ),
@@ -514,7 +514,7 @@ def cli(log_level: str) -> None:
     metavar="PATH",
     help=(
         "Mount an additional directory inside the container at /includes/<basename>/. "
-        "Git repos get a hatchery/<name> worktree for branch isolation (read-write). "
+        "Git repos get a prefixed task worktree for branch isolation (read-write). "
         "Repeatable; merged with docker.yaml 'include:' list."
     ),
 )
@@ -598,6 +598,7 @@ def cmd_new(
             backend=backend,
             base=base,
             branch=branch,
+            branch_prefix=cfg.branch_prefix,
             no_worktree=no_worktree,
             no_commit=no_commit,
             no_docker=no_docker,
@@ -633,7 +634,7 @@ def cmd_new(
                 git.delete_branch(repo, meta.branch)
         if include_repos:
             git.remove_include_worktrees(include_repos, meta.name)
-            git.delete_include_branches(include_repos, meta.name)
+            git.delete_include_branches(include_repos, meta.name, meta.include_branch_name)
         ui.warn("Cancelled.")
         sys.exit(1)
 
@@ -780,6 +781,7 @@ def cmd_promote(
             backend=agent.from_kind(meta.agent),
             base=base,
             branch=branch,
+            branch_prefix=cfg.branch_prefix,
             no_worktree=no_worktree,
             no_commit=no_commit,
             in_repo=in_repo,

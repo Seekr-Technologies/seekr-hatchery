@@ -353,7 +353,7 @@ class TestMigrate:
         assert result == {"name": "test", "schema_version": 1}
 
     def test_v1_is_idempotent(self):
-        meta = {"name": "test", "schema_version": 1}
+        meta = {"name": "test", "branch_prefix": "agents-", "schema_version": 1}
         result = sessions._migrate(meta)
         assert result == meta
 

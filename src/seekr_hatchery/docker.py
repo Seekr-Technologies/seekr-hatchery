@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 from pydantic import ValidationError as _PydanticValidationError
 
 import seekr_hatchery.agents as agent
+import seekr_hatchery.branches as branches
 import seekr_hatchery.constants as constants
 import seekr_hatchery.mount_links as mount_links
 import seekr_hatchery.pty_proxy as pty_proxy
@@ -784,7 +785,7 @@ def _construct_docker_mounts(config: DockerConfig) -> list[Mount]:
 
 # Prefix applied to user-declared volume names when forming the actual
 # docker/podman volume name. Mirrors the namespacing already used elsewhere
-# (e.g. hatchery/<task> branch refs) and keeps these volumes visually distinct
+# (e.g. prefixed task branch refs) and keeps these volumes visually distinct
 # from any unrelated volumes the user may have on the host runtime.
 _VOLUME_NAME_PREFIX = "hatchery-"
 
@@ -922,12 +923,12 @@ def _validate_mounts(mounts: list[Mount]) -> list[Mount]:
     return result
 
 
-def _git_worktree_mounts(repo: Path, name: str, container_root: str) -> list[Mount]:
+def _git_worktree_mounts(repo: Path, name: str, branch: branches.BranchName, container_root: str) -> list[Mount]:
     """Return the layered Mounts for one repo + worktree pair (pre-worktree portion).
 
     Produces the read-only repo root + targeted read-write .git sub-mounts that
-    protect the main branch while allowing the hatchery/<name> worktree's git
-    metadata to be modified.  The worktree directory itself and any git-pointer
+    protect the main branch while allowing the task branch's git metadata to be
+    modified. The worktree directory itself and any git-pointer
     shadow file are NOT included — callers append those afterwards (so sentinel
     files can be inserted between the .git layers and the worktree mount if needed).
 
@@ -941,11 +942,17 @@ def _git_worktree_mounts(repo: Path, name: str, container_root: str) -> list[Mou
         BindMount(src=str(git_dir), dst=f"{container_root}/.git", mode="RW"),
         BindMount(src=str(git_dir / "objects"), dst=f"{container_root}/.git/objects", mode="RW"),
     ]
-    # Mount the entire hatchery/ ref directory rw so git can create .lock sidecar
-    # files alongside the branch ref during commits.
-    hatchery_refs = git_dir / "refs" / "heads" / "hatchery"
-    if hatchery_refs.exists():
-        mounts.append(BindMount(src=str(hatchery_refs), dst=f"{container_root}/.git/refs/heads/hatchery", mode="RW"))
+    # Mount the branch's namespace directory rw so git can create .lock
+    # sidecars alongside the branch ref during commits.
+    branch_refs = git_dir / branch.ref_dir
+    if branch_refs.exists():
+        mounts.append(
+            BindMount(
+                src=str(branch_refs),
+                dst=f"{container_root}/.git/{branch.ref_dir}",
+                mode="RW",
+            )
+        )
     logs_dir = git_dir / "logs"
     if logs_dir.exists():
         mounts.append(BindMount(src=str(logs_dir), dst=f"{container_root}/.git/logs", mode="RW"))
@@ -983,8 +990,8 @@ def build_mounts(
 
     Known security holes for the worktree case (accepted; fixing them would
     break real-time git visibility):
-      LOW-MEDIUM: refs/heads/hatchery/ rw allows creating arbitrary
-        hatchery/<anything> branch refs.
+      LOW-MEDIUM: the task branch's refs/heads namespace is rw, allowing the
+        container to create arbitrary branches within that namespace.
       MEDIUM: .git/ root rw allows modifying config/packed-refs/FETCH_HEAD
         etc. Required so git can take rebase/cherry-pick/merge locks.
       HIGH: .git/objects/ rw against the real object store — the container
@@ -1016,7 +1023,7 @@ def build_mounts(
         container_root = str(meta.repo_path)
         container_worktree = str(meta.worktree_path)
 
-        mounts = _git_worktree_mounts(meta.repo_path, meta.name, container_root)
+        mounts = _git_worktree_mounts(meta.repo_path, meta.name, meta.branch_name, container_root)
 
         # git writes these into .git/ root during normal commits; use per-task
         # sentinel files so .git/ root stays ro.
@@ -1053,7 +1060,15 @@ def build_mounts(
             mounts.append(BindMount(src=str(task_file.parent), dst=str(task_file.parent), mode="RW"))
 
     if include_entries:
-        mounts.extend(_docker_mounts_includes(include_entries, meta.name, session_dir, no_worktree=meta.no_worktree))
+        mounts.extend(
+            _docker_mounts_includes(
+                include_entries,
+                meta.name,
+                session_dir,
+                no_worktree=meta.no_worktree,
+                branch=meta.include_branch_name,
+            )
+        )
 
     # Expand then validate, last and only here: every branch above and every
     # mount source (worktree, backend, docker.yaml, includes) is covered by the
@@ -1068,6 +1083,7 @@ def _docker_mounts_includes(
     name: str,
     session_dir: Path,
     no_worktree: bool,
+    branch: branches.BranchName,
 ) -> list[Mount]:
     """Return Mounts for paths included via --include / --include-rw / --include-ro.
 
@@ -1077,7 +1093,7 @@ def _docker_mounts_includes(
     pointer already resolves correctly under host-path mirroring, so no
     pointer rewrite is needed either.
 
-    mode="worktree": For git repos with a hatchery/<name> worktree the
+    mode="worktree": For git repos with a prefixed task worktree the
     same layered mount strategy as the primary repo is applied (root:ro,
     targeted .git sub-dirs:rw, worktree:rw).
 
@@ -1100,7 +1116,7 @@ def _docker_mounts_includes(
                 worktree = path / WORKTREES_SUBDIR / name
                 if worktree.exists():
                     # Layered mounts: root ro + targeted .git rw (same as primary repo)
-                    mounts.extend(_git_worktree_mounts(path, name, container_path))
+                    mounts.extend(_git_worktree_mounts(path, name, branch, container_path))
                     mounts.append(BindMount(src=str(worktree), dst=str(worktree), mode="RW"))
                     continue
                 logger.warning(

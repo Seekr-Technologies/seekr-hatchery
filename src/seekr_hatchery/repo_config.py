@@ -12,8 +12,9 @@ import sys
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, field_validator
 
+import seekr_hatchery.branches as branches
 import seekr_hatchery.constants as constants
 import seekr_hatchery.ui as ui
 import seekr_hatchery.user_config as user_config
@@ -23,6 +24,12 @@ class RepoConfigModel(BaseModel):
     default_agent: str | None = None
     open_editor: bool | None = None
     auto_commit: bool | None = None
+    branch_prefix: str | None = None
+
+    @field_validator("branch_prefix")
+    @classmethod
+    def _validate_branch_prefix(cls, value: str | None) -> str | None:
+        return branches.validate_branch_prefix(value) if value is not None else None
 
 
 # The fields a repo config may override on the global config. None = inherit.
@@ -99,7 +106,7 @@ def load_effective_config(repo: Path) -> "user_config.UserConfig":
 
     Loads ``~/.hatchery/config.yaml`` and overlays any field the repo's
     ``.hatchery/config.yaml`` sets (non-``None``), so callers can read a single
-    resolved config for agent/editor/commit decisions.
+    resolved config for agent/editor/commit/branch-prefix decisions.
     """
     cfg = user_config.UserConfig.load()
     repo_cfg = load_repo_config(repo)

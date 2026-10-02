@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 import seekr_hatchery.agents as agent
 import seekr_hatchery.agents.pi as pi_backend
+import seekr_hatchery.branches as branches
 import seekr_hatchery.constants as constants
 import seekr_hatchery.git as git
 import seekr_hatchery.sessions as sessions
@@ -418,6 +419,18 @@ class TestSandboxContextChat:
         assert "pull request" not in result.lower()
         assert "push" not in result.lower()
 
+    def test_worktree_docker_uses_branch_ref_namespace(self):
+        result = sessions.sandbox_context(
+            name="task",
+            branch="team/agents/task",
+            worktree=Path("/host/repo/.hatchery/worktrees/task"),
+            repo=Path("/host/repo"),
+            main_branch="main",
+            use_docker=True,
+        )
+        assert "`/host/repo/.git/refs/heads/team/agents/`" in result
+        assert ".git/refs/heads/hatchery/" not in result
+
 
 # ---------------------------------------------------------------------------
 # SessionMeta model: load/save round-trip + property coverage
@@ -490,7 +503,9 @@ class TestSessionMetaRoundTrip:
             "schema_version": 1,
         }
         sessions.save_task(dict(legacy))  # raw dict write, no validation
-        sessions.load(Path(legacy["repo"]), legacy["name"])  # shouldn't raise
+        loaded = sessions.load(Path(legacy["repo"]), legacy["name"])
+        assert loaded.branch_prefix == "hatchery/"
+        assert loaded.include_branch_name == branches.BranchName("hatchery/legacy")
 
     def test_chat_type_round_trips(self, fake_tasks_db):
         meta = sessions.SessionMeta(
@@ -739,6 +754,40 @@ class TestSessionCreateTask:
         assert meta.status == "in-progress"
         assert meta.branch == "hatchery/my-task"
 
+    def test_uses_and_persists_custom_branch_prefix(self, git_repo, fake_tasks_db, no_input):
+        meta = sessions.create(
+            name="my-task",
+            repo=git_repo,
+            type="task",
+            backend=agent.CODEX,
+            branch_prefix="agents/",
+            objective="Test objective",
+        )
+
+        assert meta.branch == "agents/my-task"
+        assert meta.branch_prefix == "agents/"
+        assert meta.branch_name == branches.BranchName("agents/my-task")
+        assert meta.include_branch_name == branches.BranchName("agents/my-task")
+        assert _git(git_repo, "rev-parse", "--verify", "agents/my-task", check=False).returncode == 0
+        loaded = sessions.load(git_repo, "my-task")
+        assert loaded.branch_prefix == "agents/"
+        assert loaded.include_branch_name == branches.BranchName("agents/my-task")
+
+    def test_empty_branch_prefix_uses_task_name(self, git_repo, fake_tasks_db, no_input):
+        meta = sessions.create(
+            name="my-task",
+            repo=git_repo,
+            type="task",
+            backend=agent.CODEX,
+            branch_prefix="",
+            objective="Test objective",
+        )
+
+        assert meta.branch == "my-task"
+        assert meta.branch_prefix == ""
+        assert meta.include_branch_name == branches.BranchName("my-task")
+        assert _git(git_repo, "rev-parse", "--verify", "my-task", check=False).returncode == 0
+
     def test_task_file_contains_objective(self, git_repo, fake_tasks_db, no_input):
         sessions.create(
             name="t",
@@ -926,6 +975,7 @@ class TestPromoteChat:
             chat,
             name="api-investigation",
             backend=agent.CODEX,
+            branch_prefix="agents-",
             objective="Investigate the API",
         )
 
@@ -941,7 +991,7 @@ class TestPromoteChat:
             "task",
             "existing-session",
             "chat-1",
-            "hatchery/api-investigation",
+            "agents-api-investigation",
             False,
         )
         assert promoted.worktree_path.exists()
