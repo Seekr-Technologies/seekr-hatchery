@@ -11,6 +11,7 @@ import pytest
 import yaml
 from click.testing import CliRunner
 
+import seekr_hatchery.branches as branches
 import seekr_hatchery.docker as docker
 import seekr_hatchery.sessions as sessions
 import seekr_hatchery.utils as utils
@@ -196,6 +197,8 @@ def _fake_meta(**overrides):
     meta.no_worktree = False
     meta.worktree_path = Path("/repo/.hatchery/worktrees/my-task")
     meta.branch = "hatchery/my-task"
+    meta.branch_prefix = "hatchery/"
+    meta.include_branch_name = branches.BranchName("hatchery/my-task")
     meta.branch_owned = True
     meta.hatchery_dir = Path("/repo/.hatchery")
     meta.include = []
@@ -207,7 +210,14 @@ def _fake_meta(**overrides):
 
 @contextmanager
 def _new_env(
-    *, in_repo=True, open_editor=False, auto_commit=True, objective="Add a login page", meta=None, real_config=False
+    *,
+    in_repo=True,
+    open_editor=False,
+    auto_commit=True,
+    branch_prefix="hatchery/",
+    objective="Add a login page",
+    meta=None,
+    real_config=False,
 ):
     """Patch only cmd_new's *direct* collaborators and yield them as a namespace.
 
@@ -224,6 +234,7 @@ def _new_env(
     cfg.resolve_backend.return_value = MagicMock(name="backend")
     cfg.open_editor = open_editor
     cfg.auto_commit = auto_commit
+    cfg.branch_prefix = branch_prefix
     with ExitStack() as stack:
         ns = SimpleNamespace(cfg=cfg)
         ns.root = stack.enter_context(
@@ -258,6 +269,7 @@ class TestCliNew:
         assert result.exit_code == 0, result.output
         assert ns.create.call_args[1]["name"] == "my-task"
         assert ns.create.call_args[1]["type"] == "task"
+        assert ns.create.call_args[1]["branch_prefix"] == "hatchery/"
         assert ns.launch.called
 
     def test_from_flag_passed_as_base(self):
@@ -265,6 +277,12 @@ class TestCliNew:
             result = CliRunner().invoke(cli, ["new", "my-task", "--from", "main"])
         assert result.exit_code == 0
         assert ns.create.call_args[1]["base"] == "main"
+
+    def test_configured_branch_prefix_passed_to_create(self):
+        with _new_env(branch_prefix="agents/") as ns:
+            result = CliRunner().invoke(cli, ["new", "my-task"])
+        assert result.exit_code == 0, result.output
+        assert ns.create.call_args[1]["branch_prefix"] == "agents/"
 
     def test_no_docker_passed_through(self):
         with _new_env() as ns:
@@ -2087,6 +2105,7 @@ class TestPromoteChat:
             "backend": backend,
             "base": "HEAD",
             "branch": "ignored",
+            "branch_prefix": "hatchery/",
             "no_worktree": True,
             "no_commit": True,
             "in_repo": True,
@@ -2104,6 +2123,14 @@ class TestPromoteChat:
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path("/r"), True)),
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
             patch("seekr_hatchery.cli.agent.from_kind", return_value=backend),
+            patch(
+                "seekr_hatchery.cli.repo_config.load_effective_config",
+                return_value=SimpleNamespace(
+                    branch_prefix="agents-",
+                    auto_commit=True,
+                    open_editor=False,
+                ),
+            ),
             patch("seekr_hatchery.cli._prompt_objective", return_value="Build it"),
             patch("seekr_hatchery.cli.sessions.merge_includes_with_config", return_value=[]),
             patch("seekr_hatchery.cli.sessions.promote_chat", return_value=promoted) as promote,
@@ -2117,6 +2144,7 @@ class TestPromoteChat:
             "backend": backend,
             "base": "HEAD",
             "branch": None,
+            "branch_prefix": "agents-",
             "no_worktree": False,
             "no_commit": False,
             "in_repo": True,
@@ -3688,7 +3716,9 @@ class TestDoDeleteInclude:
             cli_mod._do_delete(meta_obj, confirmed=True)
 
         mock_remove.assert_called_once_with([IncludeEntry(repo_b, "worktree")], "my-task")
-        mock_delete_br.assert_called_once_with([IncludeEntry(repo_b, "worktree")], "my-task")
+        mock_delete_br.assert_called_once_with(
+            [IncludeEntry(repo_b, "worktree")], "my-task", branches.BranchName("hatchery/my-task")
+        )
 
     def test_delete_no_include_does_not_call_helpers(self, fake_tasks_db, tmp_path):
         repo = Path("/my/repo")

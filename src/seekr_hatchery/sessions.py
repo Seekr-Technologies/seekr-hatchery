@@ -20,6 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+import seekr_hatchery.branches as branches
 import seekr_hatchery.constants as constants
 import seekr_hatchery.docker as docker
 import seekr_hatchery.git as git
@@ -185,7 +186,7 @@ def sandbox_context(
             "**Filesystem permissions:**",
             f"- `{worktree}/` — your worktree (read-write; all edits land here)",
             f"- `{repo}/.git/objects/` — git object store (read-write; your commits are visible on the host)",
-            f"- `{repo}/.git/refs/heads/hatchery/` — branch refs (read-write for your branch only)",
+            f"- `{repo}/.git/{branches.BranchName(branch).ref_dir}/` — branch refs (read-write for your branch namespace)",
             "",
             f"Main-branch files are not directly visible at `{repo}/` — the worktree overlays it. "
             f"Use `git show main:path/to/file` or `git diff main...` to inspect main-branch content.",
@@ -510,7 +511,6 @@ def _migrate(meta: dict) -> dict:
     # v0 -> v1: initial versioned schema (just stamps the version)
     if v == 0:
         meta["schema_version"] = 1
-        v = 1
 
     return meta
 
@@ -784,7 +784,7 @@ def restore_worktree_if_needed(
     git.create_worktree(repo, meta.branch, meta.worktree_path, base)
     includes = load_include_entries({"include": meta.include})
     if includes:
-        git.create_include_worktrees(includes, meta.name)
+        git.create_include_worktrees(includes, meta.name, meta.include_branch_name)
     meta.status = "in-progress"
     save(meta)
     # The restored task file may carry a stale `**Status**: complete` from
@@ -992,7 +992,7 @@ def merge_include_updates(
         existing = by_path.get(update.path)
         if existing is None:
             # New path — create worktree if needed (base resolved per-repo).
-            git.create_include_worktrees([update], meta.name)
+            git.create_include_worktrees([update], meta.name, meta.include_branch_name)
             by_path[update.path] = update
         elif existing.mode == update.mode:
             pass  # no-op
@@ -1003,7 +1003,7 @@ def merge_include_updates(
                 git.remove_include_worktrees([existing], meta.name)
             elif existing.is_reference() and not update.is_reference():
                 ui.info(f"include mode {existing.mode!r} → {update.mode!r} for {update.path}; creating worktree.")
-                git.create_include_worktrees([update], meta.name)
+                git.create_include_worktrees([update], meta.name, meta.include_branch_name)
             by_path[update.path] = update
 
     # Preserve original ordering, appending new entries at the end.
@@ -1143,7 +1143,7 @@ def delete(meta: SessionMeta) -> None:
 
         if include_repos:
             git.remove_include_worktrees(include_repos, meta.name)
-            git.delete_include_branches(include_repos, meta.name)
+            git.delete_include_branches(include_repos, meta.name, meta.include_branch_name)
 
     task_db_path(meta.repo_path, meta.name).unlink(missing_ok=True)
     ui.success(f"Task '{meta.name}' deleted.")
@@ -1178,6 +1178,7 @@ def create(
     backend: "AgentBackend",
     base: str | None = None,
     branch: str | None = None,
+    branch_prefix: str = branches.DEFAULT_BRANCH_PREFIX,
     no_worktree: bool = False,
     no_commit: bool = False,
     no_docker: bool = False,
@@ -1197,8 +1198,8 @@ def create(
     For ``type="chat"``: no worktree/branch, no task file. ``no_worktree`` is
     forced to True; ``worktree`` in the meta points at ``repo``.
 
-    ``branch``, if given, names the branch to use instead of the default
-    ``hatchery/<name>``. If it already exists (locally or on ``origin``) the
+    ``branch``, if given, names the branch to use instead of the configured
+    ``<branch_prefix><name>``. If it already exists (locally or on ``origin``) the
     worktree attaches to it as-is and ``meta.branch_owned`` is set False, so
     later cleanup never deletes it. Ignored (with a warning) if
     ``no_worktree`` is True.
@@ -1215,6 +1216,7 @@ def create(
     include_entries = list(include_entries or [])
     is_chat = type == "chat"
     branch_opt = branch
+    generated_branch = branches.BranchPrefix(branch_prefix).task_branch(name)
     branch_owned = True
     # Backends that accept a session id at launch (claude) get a pre-generated
     # UUID here. Backends that generate their own id at runtime (codex) leave
@@ -1273,13 +1275,13 @@ def create(
                     if not branch_owned:
                         ui.note(f"Using existing branch {branch!r}")
                 else:
-                    branch = f"hatchery/{name}"
+                    branch = generated_branch.value
                     git.create_worktree(repo, branch, worktree, resolved_base)
                 cleanup_worktree = worktree
                 cleanup_branch = branch if branch_owned else None
 
             if include_entries:
-                git.create_include_worktrees(include_entries, name)
+                git.create_include_worktrees(include_entries, name, generated_branch)
                 cleanup_includes = list(include_entries)
 
             hdir = hatchery_dir(repo, worktree, no_commit=no_commit, no_worktree=no_worktree)
@@ -1308,7 +1310,7 @@ def create(
                     new_entries.append(IncludeEntry(path=resolved, mode=mode))
                     post_include_paths.add(resolved)
             if new_entries:
-                git.create_include_worktrees(new_entries, name)
+                git.create_include_worktrees(new_entries, name, generated_branch)
                 include_entries = include_entries + new_entries
                 cleanup_includes = list(include_entries)
 
@@ -1326,7 +1328,7 @@ def create(
                             git.delete_branch(repo, cleanup_branch)
                     if cleanup_includes:
                         git.remove_include_worktrees(cleanup_includes, name)
-                        git.delete_include_branches(cleanup_includes, name)
+                        git.delete_include_branches(cleanup_includes, name, generated_branch)
                     raise SessionCancelled()
             else:
                 write_task_file(_tasks_dir, name, branch, objective=objective)
@@ -1340,7 +1342,7 @@ def create(
                 git.delete_branch(repo, cleanup_branch)
         if cleanup_includes:
             git.remove_include_worktrees(cleanup_includes, name)
-            git.delete_include_branches(cleanup_includes, name)
+            git.delete_include_branches(cleanup_includes, name, generated_branch)
         raise
 
     meta = SessionMeta(
@@ -1351,6 +1353,7 @@ def create(
         type=type,
         status="in-progress",
         branch=branch,
+        branch_prefix=branch_prefix,
         branch_owned=branch_owned,
         created=promoted_from.created if promoted_from else datetime.now().isoformat(),
         session_id=promoted_from.session_id if promoted_from else session_id,
@@ -1380,6 +1383,7 @@ def promote_chat(
     backend: "AgentBackend",
     base: str | None = None,
     branch: str | None = None,
+    branch_prefix: str = branches.DEFAULT_BRANCH_PREFIX,
     no_worktree: bool = False,
     no_commit: bool = False,
     in_repo: bool = True,
@@ -1408,6 +1412,7 @@ def promote_chat(
         backend=backend,
         base=base,
         branch=branch,
+        branch_prefix=branch_prefix,
         no_worktree=no_worktree,
         no_commit=no_commit,
         in_repo=in_repo,

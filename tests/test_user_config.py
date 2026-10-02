@@ -17,6 +17,7 @@ class TestUserConfigModelDefaults:
             "default_agent": None,
             "open_editor": False,
             "auto_commit": True,
+            "branch_prefix": "hatchery/",
         }
 
 
@@ -138,6 +139,29 @@ class TestSetOpenEditor:
 
 
 # ---------------------------------------------------------------------------
+# branch_prefix
+# ---------------------------------------------------------------------------
+
+
+class TestBranchPrefix:
+    @pytest.mark.parametrize("value", ["agents-", ""])
+    def test_round_trip(self, tmp_path, value):
+        path = tmp_path / "config.yaml"
+        cfg = user_config.UserConfig.load(path)
+        cfg.set_branch_prefix(value)
+        cfg.save()
+        assert user_config.UserConfig.load(path).branch_prefix == value
+
+    @pytest.mark.parametrize(
+        "value",
+        ["/agents/", "-agents-", "agents//nested/", "../agents/", "agents/.hidden/", "agents branch/"],
+    )
+    def test_rejects_invalid_prefix(self, value):
+        with pytest.raises(ValueError, match="branch_prefix"):
+            user_config.UserConfigModel(branch_prefix=value)
+
+
+# ---------------------------------------------------------------------------
 # validate_config_file
 # ---------------------------------------------------------------------------
 
@@ -145,8 +169,15 @@ class TestSetOpenEditor:
 class TestValidateConfigFile:
     def test_valid_file(self, tmp_path):
         path = tmp_path / "config.yaml"
-        path.write_text("default_agent: null\n")
+        path.write_text('default_agent: null\nbranch_prefix: "agents"\n')
         assert user_config.validate_config_file(path) is None
+
+    def test_invalid_branch_prefix(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text("branch_prefix: /agents/\n")
+        result = user_config.validate_config_file(path)
+        assert result is not None
+        assert "branch_prefix" in result
 
     def test_invalid_yaml(self, tmp_path):
         path = tmp_path / "config.yaml"

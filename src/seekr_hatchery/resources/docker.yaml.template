@@ -35,7 +35,7 @@ volumes:
 # repo's root, or absolute. Merged with --include* flags passed to `hatchery new`.
 #
 # Three mount modes are supported (default: worktree):
-#   worktree  — git repos get a hatchery/<task> branch + worktree for isolation (read-write)
+#   worktree  — git repos get a configured-prefix branch + worktree for isolation (read-write)
 #   rw        — reference mount, read-write, no worktree created
 #   ro        — reference mount, read-only, no worktree created
 #

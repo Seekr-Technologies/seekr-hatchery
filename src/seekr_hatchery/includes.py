@@ -33,7 +33,7 @@ class IncludeEntry:
     """A resolved include path together with its mount mode.
 
     mode is one of:
-      "worktree" — read-write with branch isolation (creates a hatchery/<name> worktree)
+      "worktree" — read-write with branch isolation (creates a prefixed task worktree)
       "rw"       — reference mount, read-write, no worktree
       "ro"       — reference mount, read-only, no worktree
     """
