@@ -681,6 +681,8 @@ def docker_features(config: DockerConfig) -> list[str]:
             features.append(f"kubectl ({', '.join(context.display_name for context in contexts)})")
         else:
             features.append("kubectl")
+    if config.s3 is not None:
+        features.append("S3 proxy")
     return features
 
 
@@ -1432,6 +1434,7 @@ def _prepare_sidecars(
         endpoints = backend.proxy_endpoints()
         active_sidecars: list[sidecars.SandboxSidecar] = [
             *(sidecars.ApiProxySidecar(endpoint, proxy_token, backend) for endpoint in endpoints),
+            sidecars.S3Sidecar(config.s3, session_dir),
             sidecars.KubectlSidecar(config.kubernetes, session_dir, kubectl_proxy_token),
         ]
         sidecars.validate_sidecars(active_sidecars)
