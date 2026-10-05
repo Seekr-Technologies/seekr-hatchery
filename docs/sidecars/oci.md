@@ -97,7 +97,9 @@ object name is also denied because it cannot be safely matched to a prefix.
 
 ## Client compatibility
 
-The proxy supports content-length request bodies and reuses the
-`x-content-sha256` value produced by OCI clients when re-signing uploads.
-Chunked request bodies are rejected. The host API key may be unencrypted or use
-the `pass_phrase` setting in the OCI config.
+The proxy supports content-length request bodies. It always signs the generic
+OCI request headers. When a client supplies `x-content-sha256`, it also signs
+the content headers; streaming Object Storage uploads that intentionally omit a
+body hash remain unbuffered, matching the OCI SDK's signing strategy. Chunked
+request bodies are rejected. The host API key may be unencrypted or use the
+`pass_phrase` setting in the OCI config.

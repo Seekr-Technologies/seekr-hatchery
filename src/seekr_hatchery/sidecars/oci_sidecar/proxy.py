@@ -285,10 +285,10 @@ def _sign_request(
 ) -> dict[str, str]:
     """Sign an upstream request with the host profile's API key."""
     signed_names = ["date", "(request-target)", "host"]
-    if method in _BODY_METHODS:
-        for required in ("content-length", "content-type", "x-content-sha256"):
+    if method in _BODY_METHODS and _case_insensitive_value(headers, "x-content-sha256") is not None:
+        for required in ("content-length", "content-type"):
             if _case_insensitive_value(headers, required) is None:
-                raise RuntimeError(f"oci: request body is missing required signing header {required!r}")
+                raise RuntimeError(f"oci: hashed request body is missing signing header {required!r}")
         signed_names.extend(["content-length", "content-type", "x-content-sha256"])
 
     lines: list[str] = []

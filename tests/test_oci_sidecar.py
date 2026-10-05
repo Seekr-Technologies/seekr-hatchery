@@ -329,6 +329,40 @@ class TestOciSigning:
         )
         assert signed["Authorization"].startswith('Signature algorithm="rsa-sha256",')
 
+    def test_streaming_upload_without_hash_signs_only_generic_headers(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_run(command, **kwargs):
+            captured.update({"command": command, **kwargs})
+            return SimpleNamespace(returncode=0, stdout=b"signature")
+
+        monkeypatch.setattr(proxy.subprocess, "run", fake_run)
+        profile = _resolved_profile(tmp_path)
+        headers = {
+            "host": "objectstorage.us-ashburn-1.oraclecloud.com",
+            "date": "Mon, 05 Oct 2026 12:00:00 GMT",
+            "content-length": "66",
+            "content-type": "application/octet-stream",
+        }
+
+        signed = proxy._sign_request(
+            "PUT",
+            "/n/ns/b/bucket/o/object",
+            headers,
+            profile,
+        )
+
+        assert captured["input"] == (
+            b"date: Mon, 05 Oct 2026 12:00:00 GMT\n"
+            b"(request-target): put /n/ns/b/bucket/o/object\n"
+            b"host: objectstorage.us-ashburn-1.oraclecloud.com"
+        )
+        assert 'headers="date (request-target) host"' in signed["Authorization"]
+
 
 class TestOciProxy:
     def test_forwards_authenticated_allowed_request(self, tmp_path: Path, monkeypatch) -> None:
