@@ -59,6 +59,19 @@ class OciProfileConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     rules: list[OciRule] | None = None
+    endpoint: str | None = None
+
+    @field_validator("endpoint")
+    @classmethod
+    def _valid_endpoint(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parsed = urlsplit(value)
+        if parsed.scheme != "https" or not parsed.netloc or parsed.path not in {"", "/"}:
+            raise ValueError("must be an HTTPS origin without a path, query, or fragment")
+        if parsed.query or parsed.fragment or parsed.username or parsed.password:
+            raise ValueError("must be an HTTPS origin without credentials, a query, or a fragment")
+        return value.rstrip("/")
 
 
 class OciConfig(BaseModel):
