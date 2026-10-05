@@ -493,6 +493,9 @@ class OciServer:
             )
             if result.returncode != 0:
                 raise RuntimeError("oci: failed to generate a synthetic sandbox API key")
+            key_data = key_path.read_bytes()
+            separator = b"" if key_data.endswith(b"\n") else b"\n"
+            key_path.write_bytes(key_data + separator + b"OCI_API_KEY\n")
             key_path.chmod(0o600)
             lines.extend(
                 [

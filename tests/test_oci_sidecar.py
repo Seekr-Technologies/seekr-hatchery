@@ -423,7 +423,7 @@ class TestOciServerFiles:
             parser.read(directory / "config")
             assert parser["DEFAULT"]["region"] == "us-ashburn-1"
             assert parser["DEFAULT"]["key_file"] == (f"{CONTAINER_HOME}/.oci/{profile.synthetic.key_filename}")
-            assert (directory / profile.synthetic.key_filename).read_text() == "synthetic private key"
+            assert (directory / profile.synthetic.key_filename).read_text() == ("synthetic private key\nOCI_API_KEY\n")
             assert server.container_env("DEFAULT") == {
                 "OCI_CONFIG_FILE": "/home/hatchery/.oci/config",
                 "OCI_CLI_PROFILE": "DEFAULT",
