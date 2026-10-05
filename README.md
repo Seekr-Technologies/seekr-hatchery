@@ -279,13 +279,13 @@ uses.
 
 Pi sandbox sessions keep their own agent state in a per-task volume. Hatchery
 bind-mounts your host `settings.json`, `models-store.json`, installed npm
-modules, and global `extensions/` directory. Hatchery creates the extensions
-directory on the host if needed, then mounts it read-write: extensions are
-auto-discovered normally, session-authored changes persist on the host, and
-host edits can be hot-reloaded with `/reload`. Symlink targets within
-extensions are mounted too, so dotfiles-managed extensions and their
-dependencies load correctly. Authentication remains container-local and
-contains only the per-session proxy credentials.
+modules, and global `extensions/` and `skills/` directories. Hatchery creates
+the two directories on the host if needed, then mounts them read-write:
+extensions and skills are auto-discovered normally, session-authored changes
+persist on the host, and host edits can be hot-reloaded with `/reload`.
+Symlink targets within both directories are mounted too, so dotfiles-managed
+resources and their dependencies load correctly. Authentication remains
+container-local and contains only the per-session proxy credentials.
 
 ### Container runtime auto-detection
 
