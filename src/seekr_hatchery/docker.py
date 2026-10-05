@@ -1492,6 +1492,20 @@ def run_session(
         container_repo = str(meta.repo_path)
         build_root = meta.hatchery_dir
 
+    provider_context = sidecars.SessionProviderContext(
+        backend=backend,
+        endpoints=endpoints,
+        proxy_token=proxy_token,
+        kubernetes=config.kubernetes,
+        session_dir=session_dir,
+        kubectl_proxy_token=kubectl_proxy_token or "",
+    )
+    try:
+        sidecars.builtin_providers.validate_session(provider_context)
+    except RuntimeError as exc:
+        ui.error(str(exc))
+        sys.exit(1)
+
     if config.dind and not _dind_dockerfile_ok(build_root, backend):
         ui.warn("dind: true is set but the Dockerfile doesn't appear to install Podman.")
         ui.info(f"  Uncomment the '── Podman-in-Podman (DinD)' block in {dockerfile_path(build_root, backend).name}.")
@@ -1522,16 +1536,7 @@ def run_session(
 
     mode_label = "no-worktree mode" if meta.no_worktree else "worktree mode"
     logger.debug(f"Launching {runtime.binary} container for session '{meta.name}' ({mode_label})")
-    active_sidecars = sidecars.builtin_providers.session_sidecars(
-        sidecars.SessionProviderContext(
-            backend=backend,
-            endpoints=endpoints,
-            proxy_token=proxy_token,
-            kubernetes=config.kubernetes,
-            session_dir=session_dir,
-            kubectl_proxy_token=kubectl_proxy_token or "",
-        )
-    )
+    active_sidecars = sidecars.builtin_providers.session_sidecars(provider_context)
     with sidecars.run_sidecars(active_sidecars) as contrib:
         mounts.extend(contrib.mounts)
         spec = build_spec(
@@ -1549,6 +1554,13 @@ def run_session(
             cap_add=config.cap_add,
         )
         runtime.run(spec, paste_interceptor=_make_paste_interceptor(backend, session_dir, config))
+
+
+def _shell_kubectl_proxy_token(config: DockerConfig, supplied_token: str) -> str:
+    """Return a non-empty ephemeral token when the shell enables Kubernetes."""
+    if config.kubernetes is None:
+        return ""
+    return supplied_token or str(uuid.uuid4())
 
 
 def launch_sandbox_shell(
@@ -1579,27 +1591,31 @@ def launch_sandbox_shell(
     if hatchery_dir is None:
         hatchery_dir = repo / ".hatchery"
     _check_host_path_safe_for_mount(repo)
-    build_docker_image(repo, hatchery_dir, image_name, backend, runtime=runtime, no_cache=no_cache)
-    mounts: list[Mount] = [BindMount(src=str(repo), dst=str(repo), mode="RW")]
-    mounts.extend(_default_home_mounts())
-    mounts.extend(_construct_docker_mounts(config))
-    mounts.extend(_construct_volume_mounts(config))
-    mounts = _validate_mounts(mount_links.expand_link_mounts(mounts))
 
-    # Use a short-lived session dir under ~/.hatchery/ for the kubeconfig mount.
-    # tempfile.TemporaryDirectory() is not reliable on macOS because Python
-    # resolves to /var/folders/… which is outside Podman Machine's default
-    # virtio-fs share roots (only /Users/ and /private/tmp are shared).
+    # Use a short-lived session dir under ~/.hatchery/ for generated provider
+    # files. tempfile.TemporaryDirectory() is not reliable on macOS because
+    # /var/folders is outside Podman Machine's default shared roots.
     sandbox_session_dir = constants.HATCHERY_DIR / "sandbox-sessions" / str(uuid.uuid4())
     sandbox_session_dir.mkdir(parents=True, exist_ok=True)
-    active_sidecars = sidecars.builtin_providers.shell_sidecars(
-        sidecars.ShellProviderContext(
-            kubernetes=config.kubernetes,
-            session_dir=sandbox_session_dir,
-            kubectl_proxy_token=kubectl_proxy_token,
-        )
+    provider_context = sidecars.ShellProviderContext(
+        kubernetes=config.kubernetes,
+        session_dir=sandbox_session_dir,
+        kubectl_proxy_token=_shell_kubectl_proxy_token(config, kubectl_proxy_token),
     )
     try:
+        try:
+            sidecars.builtin_providers.validate_shell(provider_context)
+        except RuntimeError as exc:
+            ui.error(str(exc))
+            sys.exit(1)
+
+        build_docker_image(repo, hatchery_dir, image_name, backend, runtime=runtime, no_cache=no_cache)
+        mounts: list[Mount] = [BindMount(src=str(repo), dst=str(repo), mode="RW")]
+        mounts.extend(_default_home_mounts())
+        mounts.extend(_construct_docker_mounts(config))
+        mounts.extend(_construct_volume_mounts(config))
+        mounts = _validate_mounts(mount_links.expand_link_mounts(mounts))
+        active_sidecars = sidecars.builtin_providers.shell_sidecars(provider_context)
         with sidecars.run_sidecars(active_sidecars) as contrib:
             mounts = list(mounts) + contrib.mounts
             spec = build_spec(

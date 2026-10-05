@@ -44,6 +44,12 @@ class SandboxProvider(Protocol):
 
     name: str
 
+    def validate_session(self, context: SessionProviderContext) -> None:
+        """Validate host prerequisites before an agent sandbox is built."""
+
+    def validate_shell(self, context: ShellProviderContext) -> None:
+        """Validate host prerequisites before an interactive sandbox is built."""
+
     def session_sidecars(self, context: SessionProviderContext) -> list[SandboxSidecar]:
         """Return sidecars for an agent session."""
 
@@ -63,6 +69,16 @@ class SandboxProviderRegistry:
             raise ValueError(f"sandbox provider already registered: {provider.name}")
         self._providers.append(provider)
 
+    def validate_session(self, context: SessionProviderContext) -> None:
+        """Run every provider's session launch validation in registry order."""
+        for provider in self._providers:
+            provider.validate_session(context)
+
+    def validate_shell(self, context: ShellProviderContext) -> None:
+        """Run every provider's shell launch validation in registry order."""
+        for provider in self._providers:
+            provider.validate_shell(context)
+
     def session_sidecars(self, context: SessionProviderContext) -> list[SandboxSidecar]:
         """Return the ordered sidecars contributed to an agent session."""
         return [sidecar for provider in self._providers for sidecar in provider.session_sidecars(context)]
@@ -75,6 +91,12 @@ class SandboxProviderRegistry:
 class _ApiProxyProvider:
     name = "api-proxy"
 
+    def validate_session(self, context: SessionProviderContext) -> None:
+        pass
+
+    def validate_shell(self, context: ShellProviderContext) -> None:
+        pass
+
     def session_sidecars(self, context: SessionProviderContext) -> list[SandboxSidecar]:
         return [ApiProxySidecar(endpoint, context.proxy_token, context.backend) for endpoint in context.endpoints]
 
@@ -84,6 +106,12 @@ class _ApiProxyProvider:
 
 class _KubernetesProvider:
     name = "kubernetes"
+
+    def validate_session(self, context: SessionProviderContext) -> None:
+        pass
+
+    def validate_shell(self, context: ShellProviderContext) -> None:
+        pass
 
     def session_sidecars(self, context: SessionProviderContext) -> list[SandboxSidecar]:
         return [KubectlSidecar(context.kubernetes, context.session_dir, context.kubectl_proxy_token)]

@@ -124,6 +124,12 @@ class _Provider:
         self.name = name
         self._sidecars = sidecars
 
+    def validate_session(self, context: providers.SessionProviderContext) -> None:
+        pass
+
+    def validate_shell(self, context: providers.ShellProviderContext) -> None:
+        pass
+
     def session_sidecars(self, context: providers.SessionProviderContext) -> list[base.SandboxSidecar]:
         return self._sidecars
 
@@ -153,6 +159,38 @@ class TestProviderRegistry:
         )
         assert registry.session_sidecars(session_context) == [first, second]
         assert registry.shell_sidecars(shell_context) == [first, second]
+
+    def test_runs_launch_validation_in_registration_order(self) -> None:
+        log: list[str] = []
+
+        class _ValidatingProvider(_Provider):
+            def validate_session(self, context: providers.SessionProviderContext) -> None:
+                log.append(f"session:{self.name}")
+
+            def validate_shell(self, context: providers.ShellProviderContext) -> None:
+                log.append(f"shell:{self.name}")
+
+        registry = providers.SandboxProviderRegistry()
+        registry.register(_ValidatingProvider("one", []))
+        registry.register(_ValidatingProvider("two", []))
+        session_context = providers.SessionProviderContext(
+            backend=SimpleNamespace(),
+            endpoints=[],
+            proxy_token="token",
+            kubernetes=None,
+            session_dir=Path("/tmp/session"),
+            kubectl_proxy_token="kube-token",
+        )
+        shell_context = providers.ShellProviderContext(
+            kubernetes=None,
+            session_dir=Path("/tmp/session"),
+            kubectl_proxy_token="kube-token",
+        )
+
+        registry.validate_session(session_context)
+        registry.validate_shell(shell_context)
+
+        assert log == ["session:one", "session:two", "shell:one", "shell:two"]
 
     def test_rejects_duplicate_provider_names(self) -> None:
         registry = providers.SandboxProviderRegistry()
