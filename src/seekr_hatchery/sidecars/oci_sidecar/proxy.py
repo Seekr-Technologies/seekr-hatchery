@@ -17,6 +17,7 @@ import socket
 import ssl
 import subprocess
 import threading
+import time
 from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
@@ -106,7 +107,16 @@ class _LimitedBody:
 
     def __init__(self, source: Any, length: int) -> None:
         self._source = source
+        self._length = length
         self._remaining = length
+
+    @property
+    def length(self) -> int:
+        return self._length
+
+    @property
+    def bytes_read(self) -> int:
+        return self._length - self._remaining
 
     def read(self, amount: int = -1) -> bytes:
         if self._remaining == 0:
@@ -195,6 +205,24 @@ def _rules_allow(rules: list[OciRule] | None, targets: list[PolicyTarget] | None
         )
         for target in targets
     )
+
+
+def _sanitized_exception_message(exc: Exception) -> str:
+    """Return bounded diagnostics without query strings or credential values."""
+    message = " ".join(str(exc).split())
+    message = re.sub(r"(https?://[^?\s]+)\?[^\s]*", r"\1?<redacted>", message)
+    message = re.sub(
+        r"(?i)\b(authorization|signature|token|keyid)\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^,\s]+)",
+        r"\1=<redacted>",
+        message,
+    )
+    return message[:500] or "(no exception message)"
+
+
+def _safe_request_id(value: str | None) -> str:
+    if not value:
+        return "-"
+    return re.sub(r"[^A-Za-z0-9._:-]", "_", value)[:128]
 
 
 def _signature_key_id(value: str) -> str | None:
@@ -420,8 +448,48 @@ class _OciProxyHandler(http.server.BaseHTTPRequestHandler):
 
         parsed_endpoint = urlsplit(profile.resolved.endpoint_url)
         headers = _forward_headers(self.headers, parsed_endpoint.netloc)
+        request_id = _safe_request_id(self.headers.get("opc-client-request-id"))
+        logger.info(
+            "oci proxy: phase=prepare method=%s path=%s host=%s content_length=%d opc_client_request_id=%s",
+            self.command,
+            self._log_path(),
+            parsed_endpoint.netloc,
+            body.length,
+            request_id,
+        )
+        logger.debug(
+            "oci proxy: phase=prepare method=%s path=%s upstream_headers=%s",
+            self.command,
+            self._log_path(),
+            sorted(name.lower() for name in headers),
+        )
+
         try:
             signed_headers = _sign_request(self.command, self.path, headers, profile.resolved)
+        except Exception as exc:
+            logger.warning(
+                "oci proxy: phase=sign method=%s path=%s error_type=%s detail=%s "
+                "body_bytes=%d/%d opc_client_request_id=%s",
+                self.command,
+                self._log_path(),
+                type(exc).__name__,
+                _sanitized_exception_message(exc),
+                body.bytes_read,
+                body.length,
+                request_id,
+            )
+            logger.debug("oci proxy signing exception", exc_info=True)
+            self._error(502, "OCI upstream signing failed")
+            return
+
+        logger.debug(
+            "oci proxy: phase=signed method=%s path=%s signed_headers=%s",
+            self.command,
+            self._log_path(),
+            sorted(name.lower() for name in signed_headers),
+        )
+        upstream_started = time.monotonic()
+        try:
             response = self.pool.urlopen(
                 self.command,
                 f"{profile.resolved.endpoint_url}{self.path}",
@@ -434,10 +502,17 @@ class _OciProxyHandler(http.server.BaseHTTPRequestHandler):
             )
         except Exception as exc:
             logger.warning(
-                "oci proxy: upstream error for %s %s (%s)",
+                "oci proxy: phase=upstream method=%s path=%s host=%s elapsed=%.3fs "
+                "error_type=%s detail=%s body_bytes=%d/%d opc_client_request_id=%s",
                 self.command,
                 self._log_path(),
+                parsed_endpoint.netloc,
+                time.monotonic() - upstream_started,
                 type(exc).__name__,
+                _sanitized_exception_message(exc),
+                body.bytes_read,
+                body.length,
+                request_id,
             )
             logger.debug("oci proxy upstream exception", exc_info=True)
             self._error(502, "OCI upstream request failed")
@@ -451,7 +526,24 @@ class _OciProxyHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             while chunk := response.read(_STREAM_CHUNK_SIZE):
                 self.wfile.write(chunk)
-            logger.info("oci proxy: %s %s -> %s", self.command, self._log_path(), response.status)
+            upstream_request_id = _safe_request_id(
+                next(
+                    (value for name, value in response.headers.items() if name.lower() == "opc-request-id"),
+                    None,
+                )
+            )
+            logger.info(
+                "oci proxy: phase=complete method=%s path=%s status=%s elapsed=%.3fs "
+                "body_bytes=%d/%d opc_client_request_id=%s opc_request_id=%s",
+                self.command,
+                self._log_path(),
+                response.status,
+                time.monotonic() - upstream_started,
+                body.bytes_read,
+                body.length,
+                request_id,
+                upstream_request_id,
+            )
         except (BrokenPipeError, ConnectionError, OSError) as exc:
             logger.warning(
                 "oci proxy: response stream aborted for %s %s (%s)",

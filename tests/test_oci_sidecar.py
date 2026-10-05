@@ -422,6 +422,90 @@ class TestOciProxy:
         assert pool.calls[0]["body"] == b"test"
         assert all(name.lower() != "expect" for name in pool.calls[0]["headers"])
 
+    def test_reports_signing_phase_without_leaking_credentials(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+        caplog,
+    ) -> None:
+        resolved = _resolved_profile(tmp_path)
+        monkeypatch.setattr(
+            proxy,
+            "_sign_request",
+            lambda *args: (_ for _ in ()).throw(RuntimeError("missing body header token=secret-value")),
+        )
+        caplog.set_level("WARNING", logger=proxy.__name__)
+
+        with proxy.oci_server({"DEFAULT": (resolved, None)}, _pool=_Pool()) as server:
+            connection = http.client.HTTPConnection("127.0.0.1", server.port)
+            connection.request(
+                "GET",
+                "/n/my-ns/b/artifacts/o/file.txt",
+                headers={"Authorization": _auth_header(server.profiles["DEFAULT"])},
+            )
+            response = connection.getresponse()
+            assert (response.status, response.read()) == (
+                502,
+                b'{"error":"OCI upstream signing failed"}',
+            )
+            connection.close()
+
+        assert "phase=sign" in caplog.text
+        assert "RuntimeError" in caplog.text
+        assert "token=<redacted>" in caplog.text
+        assert "secret-value" not in caplog.text
+
+    def test_reports_upstream_phase_with_body_progress_and_redacted_query(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+        caplog,
+    ) -> None:
+        class _FailingPool:
+            def urlopen(self, *args, **kwargs):
+                body = kwargs["body"]
+                body.read()
+                raise RuntimeError(
+                    "failed https://objectstorage.example/object?token=secret-value Authorization=hidden"
+                )
+
+            def clear(self) -> None:
+                pass
+
+        resolved = _resolved_profile(tmp_path)
+        monkeypatch.setattr(
+            proxy,
+            "_sign_request",
+            lambda method, target, headers, profile: headers,
+        )
+        caplog.set_level("WARNING", logger=proxy.__name__)
+
+        with proxy.oci_server({"DEFAULT": (resolved, None)}, _pool=_FailingPool()) as server:
+            connection = http.client.HTTPConnection("127.0.0.1", server.port)
+            connection.request(
+                "PUT",
+                "/n/my-ns/b/artifacts/o/temp/file.txt",
+                body=b"test",
+                headers={
+                    "Authorization": _auth_header(server.profiles["DEFAULT"]),
+                    "Content-Type": "application/octet-stream",
+                    "x-content-sha256": "synthetic-hash",
+                },
+            )
+            response = connection.getresponse()
+            assert (response.status, response.read()) == (
+                502,
+                b'{"error":"OCI upstream request failed"}',
+            )
+            connection.close()
+
+        assert "phase=upstream" in caplog.text
+        assert "body_bytes=4/4" in caplog.text
+        assert "https://objectstorage.example/object?<redacted>" in caplog.text
+        assert "authorization=<redacted>" in caplog.text.lower()
+        assert "secret-value" not in caplog.text
+        assert "hidden" not in caplog.text
+
     def test_rejects_request_outside_policy(self, tmp_path: Path) -> None:
         pool = _Pool()
         resolved = _resolved_profile(tmp_path)
