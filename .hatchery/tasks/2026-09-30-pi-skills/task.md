@@ -10,11 +10,17 @@ Update the pi harness to link in (RW) ~/.pi/agent/skills
 
 ## Agreed Plan
 
-*(To be filled in after planning discussion)*
+1. Update `PiBackend.construct_mounts()` to create and bind-mount host `~/.pi/agent/skills` into the sandbox read-write, with symlink-target handling matching `extensions/`.
+2. Extend `tests/test_agent_pi.py` to verify the skills directory is created and mounted correctly alongside existing Pi state.
+3. Update `README.md` to document Pi skills sharing, then run focused tests plus Ruff checks.
+4. Finalize this task record as an ADR and mark the task complete.
 
 ## Progress Log
 
-*(Steps will appear here once the plan is agreed)*
+- [x] Create the read-write Pi skills mount.
+- [ ] Add mount coverage for Pi skills.
+- [ ] Document the behavior and run validation.
+- [ ] Finalize the task record.
 
 ## Summary
 
