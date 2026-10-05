@@ -54,6 +54,9 @@ class SandboxSidecar(ABC):
 
     name: str
 
+    def validate(self) -> None:
+        """Validate host prerequisites before the container image is built."""
+
     @abstractmethod
     def start(self) -> SidecarContribution | None:
         """Start host resource(s); return the contribution, or ``None`` if disabled."""
@@ -61,6 +64,12 @@ class SandboxSidecar(ABC):
     @abstractmethod
     def stop(self) -> None:
         """Tear down host resource(s).  Idempotent; safe after a failed/partial start."""
+
+
+def validate_sidecars(sidecars: list[SandboxSidecar]) -> None:
+    """Validate each sidecar in launch order before expensive image work."""
+    for sidecar in sidecars:
+        sidecar.validate()
 
 
 @contextmanager

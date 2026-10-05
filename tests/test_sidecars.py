@@ -74,6 +74,18 @@ class _RecordingSidecar(base.SandboxSidecar):
             raise self._stop_error
 
 
+class _ValidatingSidecar(_RecordingSidecar):
+    def validate(self) -> None:
+        self._log.append(("validate", self.name))
+
+
+class TestValidateSidecars:
+    def test_validates_in_launch_order(self) -> None:
+        log: list[tuple[str, str]] = []
+        base.validate_sidecars([_ValidatingSidecar("first", log), _ValidatingSidecar("second", log)])
+        assert log == [("validate", "first"), ("validate", "second")]
+
+
 class TestRunSidecars:
     def test_merges_contributions_and_stops_in_reverse_order(self) -> None:
         log: list[tuple[str, str]] = []
@@ -311,6 +323,22 @@ class TestKubectlSidecar:
         monkeypatch.setattr(rbac_proxy, "stop_rbac_proxy", lambda server: log.append(f"stop_rbac:{server.name}"))
         monkeypatch.setattr(kubectl_proc, "stop_kubectl_proxy_proc", lambda p: log.append(f"stop_proc:{p.name}"))
         return proc, rbac
+
+    def test_enabled_generates_proxy_token_when_not_supplied(self, tmp_path: Path, monkeypatch) -> None:
+        tokens: list[str] = []
+        self._patch_kubectl(monkeypatch, [])
+
+        def start_rbac(rules, token, kube_port, certificate=None):
+            tokens.append(token)
+            return SimpleNamespace(name="rbac"), 8443, b"cert-pem"
+
+        monkeypatch.setattr(rbac_proxy, "start_rbac_proxy", start_rbac)
+        sidecar = kubectl_sidecar.KubectlSidecar(KubectlConfig(context="my-ctx"), tmp_path, None)
+        sidecar.start()
+        sidecar.stop()
+
+        assert len(tokens) == 1
+        assert tokens[0]
 
     def test_enabled_writes_0600_kubeconfig_and_one_bind_mount(self, tmp_path: Path, monkeypatch) -> None:
         log: list[str] = []
