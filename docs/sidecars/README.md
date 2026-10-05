@@ -9,6 +9,7 @@ Built-in sidecars:
 
 - [API credential proxy](api-proxy.md)
 - [Kubernetes RBAC proxy](kubernetes.md)
+- [S3 credential proxy](s3.md)
 
 Configured sidecars are available in task sessions and in
 `hatchery sandbox shell`.
