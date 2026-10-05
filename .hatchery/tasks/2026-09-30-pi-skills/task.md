@@ -19,7 +19,7 @@ Update the pi harness to link in (RW) ~/.pi/agent/skills
 
 - [x] Create the read-write Pi skills mount.
 - [x] Add mount coverage for Pi skills.
-- [ ] Document the behavior and run validation.
+- [x] Document the behavior and run validation (42 focused tests pass; Ruff passes on changed Python files).
 - [ ] Finalize the task record.
 
 ## Summary
