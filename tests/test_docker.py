@@ -8,11 +8,16 @@ from unittest.mock import MagicMock
 import pytest
 
 import seekr_hatchery.agents as agent
+import seekr_hatchery.branches as branches
 import seekr_hatchery.constants as constants
 import seekr_hatchery.docker as docker
 import seekr_hatchery.mount as mount
 import seekr_hatchery.mount_links as mount_links
 from seekr_hatchery.models import KubectlConfig, KubectlContext, SessionMeta
+
+
+def _task_branch(name: str = "my-task", prefix: str = branches.DEFAULT_BRANCH_PREFIX) -> branches.BranchName:
+    return branches.BranchPrefix(prefix).task_branch(name)
 
 
 def _no_wt_meta(cwd):
@@ -904,7 +909,9 @@ class TestDockerMountsIncludes:
         session_dir = tmp_path / "session"
         session_dir.mkdir()
 
-        mounts = docker._docker_mounts_includes([self._entry(plain)], "my-task", session_dir, no_worktree=False)
+        mounts = docker._docker_mounts_includes(
+            [self._entry(plain)], "my-task", session_dir, no_worktree=False, branch=_task_branch()
+        )
 
         assert mount.BindMount(src=str(plain), dst=str(plain), mode="RW") in mounts
 
@@ -916,7 +923,9 @@ class TestDockerMountsIncludes:
         session_dir = tmp_path / "session"
         session_dir.mkdir()
 
-        mounts = docker._docker_mounts_includes([self._entry(repo)], "my-task", session_dir, no_worktree=False)
+        mounts = docker._docker_mounts_includes(
+            [self._entry(repo)], "my-task", session_dir, no_worktree=False, branch=_task_branch()
+        )
 
         assert mount.BindMount(src=str(repo), dst=str(repo), mode="RW") in mounts
         assert not any("git_ptr" in str(m.src or "") for m in mounts)
@@ -934,7 +943,9 @@ class TestDockerMountsIncludes:
         session_dir = tmp_path / "session"
         session_dir.mkdir()
 
-        mounts = docker._docker_mounts_includes([self._entry(repo)], "my-task", session_dir, no_worktree=False)
+        mounts = docker._docker_mounts_includes(
+            [self._entry(repo)], "my-task", session_dir, no_worktree=False, branch=_task_branch()
+        )
 
         assert mount.BindMount(src=str(repo), dst=str(repo), mode="RO") in mounts
         assert mount.BindMount(src=str(git_dir), dst=f"{repo}/.git", mode="RW") in mounts
@@ -944,6 +955,24 @@ class TestDockerMountsIncludes:
         # existing .git file already resolves correctly inside the container.
         assert not any("git_ptr" in str(m.src or "") for m in mounts)
         assert mount.BindMount(src=str(repo), dst=str(repo), mode="RW") not in mounts
+
+    def test_git_repo_uses_custom_branch_ref_namespace(self, tmp_path):
+        repo = tmp_path / "repo-b"
+        git_dir = repo / ".git"
+        branch_refs = git_dir / "refs" / "heads" / "agents"
+        branch_refs.mkdir(parents=True)
+        (git_dir / "objects").mkdir()
+        (repo / constants.WORKTREES_SUBDIR / "my-task").mkdir(parents=True)
+
+        mounts = docker._docker_mounts_includes(
+            [self._entry(repo)],
+            "my-task",
+            tmp_path / "session",
+            no_worktree=False,
+            branch=_task_branch(prefix="agents/"),
+        )
+
+        assert mount.BindMount(src=str(branch_refs), dst=f"{repo}/.git/refs/heads/agents", mode="RW") in mounts
 
     def test_no_worktree_skips_layered_mounts(self, tmp_path):
         """In no-worktree mode, worktree-mode git repos get a simple rw mount."""
@@ -956,13 +985,15 @@ class TestDockerMountsIncludes:
         session_dir = tmp_path / "session"
         session_dir.mkdir()
 
-        mounts = docker._docker_mounts_includes([self._entry(repo)], "my-task", session_dir, no_worktree=True)
+        mounts = docker._docker_mounts_includes(
+            [self._entry(repo)], "my-task", session_dir, no_worktree=True, branch=_task_branch()
+        )
 
         assert mount.BindMount(src=str(repo), dst=str(repo), mode="RW") in mounts
         assert not any("git_ptr" in str(m.src or "") for m in mounts)
 
     def test_empty_list_returns_empty(self, tmp_path):
-        mounts = docker._docker_mounts_includes([], "task", tmp_path, no_worktree=False)
+        mounts = docker._docker_mounts_includes([], "task", tmp_path, no_worktree=False, branch=_task_branch("task"))
         assert mounts == []
 
     # ── reference mode tests ─────────────────────────────────────────────────
@@ -975,7 +1006,11 @@ class TestDockerMountsIncludes:
         session_dir.mkdir()
 
         mounts = docker._docker_mounts_includes(
-            [self._entry(plain, mode="rw")], "my-task", session_dir, no_worktree=False
+            [self._entry(plain, mode="rw")],
+            "my-task",
+            session_dir,
+            no_worktree=False,
+            branch=_task_branch(),
         )
 
         assert mount.BindMount(src=str(plain), dst=str(plain), mode="RW") in mounts
@@ -988,7 +1023,11 @@ class TestDockerMountsIncludes:
         session_dir.mkdir()
 
         mounts = docker._docker_mounts_includes(
-            [self._entry(plain, mode="ro")], "my-task", session_dir, no_worktree=False
+            [self._entry(plain, mode="ro")],
+            "my-task",
+            session_dir,
+            no_worktree=False,
+            branch=_task_branch(),
         )
 
         assert mount.BindMount(src=str(plain), dst=str(plain), mode="RO") in mounts
@@ -1009,7 +1048,11 @@ class TestDockerMountsIncludes:
         session_dir.mkdir()
 
         mounts = docker._docker_mounts_includes(
-            [self._entry(repo, mode="ro")], "my-task", session_dir, no_worktree=False
+            [self._entry(repo, mode="ro")],
+            "my-task",
+            session_dir,
+            no_worktree=False,
+            branch=_task_branch(),
         )
 
         assert mount.BindMount(src=str(repo), dst=str(repo), mode="RO") in mounts
@@ -1030,7 +1073,11 @@ class TestDockerMountsIncludes:
         session_dir.mkdir()
 
         mounts = docker._docker_mounts_includes(
-            [self._entry(repo, mode="rw")], "my-task", session_dir, no_worktree=False
+            [self._entry(repo, mode="rw")],
+            "my-task",
+            session_dir,
+            no_worktree=False,
+            branch=_task_branch(),
         )
 
         assert mount.BindMount(src=str(repo), dst=str(repo), mode="RW") in mounts
@@ -1054,7 +1101,9 @@ class TestDockerMountsIncludes:
             IncludeEntry(path=wt_repo, mode="worktree"),
             IncludeEntry(path=ro_dir, mode="ro"),
         ]
-        mounts = docker._docker_mounts_includes(entries, "my-task", session_dir, no_worktree=False)
+        mounts = docker._docker_mounts_includes(
+            entries, "my-task", session_dir, no_worktree=False, branch=_task_branch()
+        )
 
         # worktree entry without an actual worktree → rw fallback
         assert mount.BindMount(src=str(wt_repo), dst=str(wt_repo), mode="RW") in mounts
@@ -1259,6 +1308,44 @@ class TestBuildMountsIncludesVolumes:
             name="hatchery-uv-cache", dst="/home/hatchery/.cache/uv", mode="RW", task_scoped=False
         )
         assert expected in mounts
+
+
+class TestBuildMountsBranchPrefix:
+    def test_mounts_configured_branch_namespace(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(docker, "_default_home_mounts", lambda: [])
+        repo = tmp_path / "repo"
+        worktree = repo / ".hatchery" / "worktrees" / "task"
+        branch_refs = repo / ".git" / "refs" / "heads" / "team" / "agents"
+        branch_refs.mkdir(parents=True)
+        worktree.mkdir(parents=True)
+        backend = MagicMock()
+        backend.construct_mounts.return_value = []
+        meta = SessionMeta(
+            name="task",
+            repo=str(repo),
+            worktree=str(worktree),
+            branch="team/agents/task",
+            branch_prefix="team/agents/",
+        )
+
+        mounts = docker.build_mounts(meta, backend, tmp_path / "session", docker.DockerConfig())
+
+        assert (
+            mount.BindMount(
+                src=str(branch_refs),
+                dst=f"{repo}/.git/refs/heads/team/agents",
+                mode="RW",
+            )
+            in mounts
+        )
+        assert (
+            mount.BindMount(
+                src=str(repo / ".git" / "refs" / "heads" / "hatchery"),
+                dst=f"{repo}/.git/refs/heads/hatchery",
+                mode="RW",
+            )
+            not in mounts
+        )
 
 
 # ---------------------------------------------------------------------------

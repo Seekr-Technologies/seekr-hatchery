@@ -13,7 +13,7 @@ Task orchestration CLI for AI coding agents. Each task gets an isolated git work
 
 **Sandboxing** *(on by default)* — each task runs in full isolation:
 - 🐳 **Docker sandbox**: the agent runs inside a container with carefully scoped filesystem access — read-only repo, write-access only to its own worktree
-- 🌿 **Isolated worktree**: each task gets its own `hatchery/<name>` git branch and worktree, so parallel work never conflicts
+- 🌿 **Isolated worktree**: each task gets its own prefixed git branch and worktree (`hatchery/<name>` by default), so parallel work never conflicts
 
 **Task management** — structured workflow with persistent records:
 - 📋 **Plan-first workflow**: plan → approval → implement → commit; enforced by task files the agent must follow
@@ -72,7 +72,7 @@ hatchery list
 
 ## How it works
 
-`hatchery new <name>` creates a git worktree on a `hatchery/<name>` branch, drops a task file there for you to fill in, commits it, then launches an agent session pointed at that worktree. The agent runs inside a Docker sandbox by default — a starter Dockerfile is created automatically on first use. The agent plans, implements, commits, and marks the task complete — all inside the isolated branch. When you're satisfied, `hatchery done <name>` cleans up the worktree and leaves the branch ready to merge.
+`hatchery new <name>` creates a git worktree on a prefixed branch (`hatchery/<name>` by default), drops a task file there for you to fill in, commits it, then launches an agent session pointed at that worktree. The agent runs inside a Docker sandbox by default — a starter Dockerfile is created automatically on first use. The agent plans, implements, commits, and marks the task complete — all inside the isolated branch. When you're satisfied, `hatchery done <name>` cleans up the worktree and leaves the branch ready to merge.
 
 For exploratory work, `hatchery chat [name]` starts a free-form session in the current repository without a worktree or task file. Unnamed chats receive the next available `chat-N` name. After exiting the agent, use `hatchery rename <chat> <new-name>` to give the chat a clearer name, or `hatchery promote <chat> [task-name]` to create task scaffolding while preserving the conversation and sandbox state. A task name is required when promoting an auto-generated `chat-N`; a custom chat name is reused when the task name is omitted.
 
@@ -117,6 +117,7 @@ All `new` / `resume` commands accept:
 
 `new` also accepts:
 - `--from <ref>` — fork from a specific branch or commit (default: `HEAD`)
+- `--branch <branch>` — use an explicit primary-repository branch instead of the configured prefix. Included repositories still use the configured prefix.
 - `--editor / --no-editor` — force editor or prompt mode for the task objective. By default, hatchery prompts in the terminal; set `open_editor: true` in `~/.hatchery/config.yaml` to default to `$EDITOR`. If the editor is opened and the file is unchanged on close, the task is cancelled.
 - `--commit / --no-commit` — control whether hatchery auto-commits its scaffolding (task file, Docker configuration). Default: from a repo-local `.hatchery/config.yaml` (`auto_commit: true/false`) if present, else the global config (`auto_commit: true`). Use `--no-commit` to keep all hatchery files out of the tracked repo — task records and Docker files stay at `<repo>/.hatchery/` but are hidden from git via `.git/info/exclude` instead of being committed. Set `auto_commit: false` in `~/.hatchery/config.yaml` to make no-commit the default everywhere, or in a repo's `.hatchery/config.yaml` to make it the default for just that repo.
 - `--agent <name>` — choose the AI agent (auto-detected from installed agents)
@@ -124,6 +125,24 @@ All `new` / `resume` commands accept:
 `promote` resolves current repository/global configuration when creating the task and supports `--from`, `--branch`, `--no-worktree`, `--editor/--no-editor`, and `--commit/--no-commit`, matching the corresponding `new` behavior. Promotion must be run after exiting the chat because an active agent process cannot safely switch into a newly created worktree.
 
 The chosen agent is stored in task metadata and re-used automatically on `resume`.
+
+### Branch prefix configuration
+
+Task branches use `hatchery/` by default. Set `branch_prefix` in the global config to change it everywhere:
+
+```yaml
+# ~/.hatchery/config.yaml
+branch_prefix: "agents/"
+```
+
+A repository can override the global value:
+
+```yaml
+# <repo>/.hatchery/config.yaml
+branch_prefix: "team/tasks/"
+```
+
+The prefix is concatenated with the task name exactly as configured and does not need to end in `/`: for example, `agent-` creates `agent-my-task`, while `agents` creates `agentsmy-task`. Set it to an empty string (`branch_prefix: ""`) to use the task name directly. The resulting name must be a valid relative Git branch name. Repo-local configuration takes precedence over global configuration. Hatchery stores the selected prefix in task metadata so included-repository branches can still be resumed or deleted after configuration changes.
 
 ## Docker sandbox
 
@@ -133,7 +152,7 @@ The container receives:
 
 - Full repo mounted read-only (for context)
 - `.git/objects` and `.git/logs` read-write (so commits work)
-- `.git/refs/heads/hatchery/` read-write (own branch ref)
+- The task branch's `.git/refs/heads/<namespace>/` directory read-write (branch ref updates)
 - The task worktree read-write (the only place edits land)
 - `~/.codex` and a per-task auth config — Codex only
 - `~/.gitconfig` read-only (commit identity)
@@ -337,7 +356,7 @@ Then output `"$top\n$hatchery_line\n$bottom"` when `$hatchery_line` is non-empty
 ```
 <repo>/
   .hatchery/
-    config.yaml            # optional repo-local config override (auto_commit)
+    config.yaml            # optional repo-local config overrides
     Dockerfile             # optional sandbox definition
     docker.yaml            # optional Docker config (custom mounts, etc.)
     tasks/                 # task records: <date>-<name>/task.md
@@ -349,7 +368,7 @@ Then output `"$top\n$hatchery_line\n$bottom"` when `$hatchery_line` is non-empty
                            #   (never committed, never edits the tracked .gitignore)
 
 ~/.hatchery/
-  config.yaml              # user config (default_agent, open_editor, auto_commit)
+  config.yaml              # user config (agent, editor, commits, branch prefix)
   meta.json                # DB schema version
   hatchery.log             # always-on rotating log file (5 MB × 3 backups)
   tasks/                   # all per-task state, namespaced by repository

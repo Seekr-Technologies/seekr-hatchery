@@ -23,6 +23,7 @@ class TestRepoConfigModelDefaults:
             "default_agent": None,
             "open_editor": None,
             "auto_commit": None,
+            "branch_prefix": None,
         }
 
 
@@ -50,6 +51,19 @@ class TestLoadRepoConfig:
         _write_config(tmp_path, "auto_commit: false\n")
         cfg = repo_config.load_repo_config(tmp_path)
         assert cfg.auto_commit is False
+
+    @pytest.mark.parametrize("value", ["agents-", ""])
+    def test_valid_file_with_branch_prefix(self, tmp_path, value):
+        _write_config(tmp_path, f'branch_prefix: "{value}"\n')
+        cfg = repo_config.load_repo_config(tmp_path)
+        assert cfg.branch_prefix == value
+
+    def test_invalid_branch_prefix_exits(self, tmp_path, capsys):
+        _write_config(tmp_path, "branch_prefix: /agents/\n")
+        with pytest.raises(SystemExit) as exc_info:
+            repo_config.load_repo_config(tmp_path)
+        assert exc_info.value.code == 1
+        assert "branch_prefix" in capsys.readouterr().err
 
     def test_legacy_schema_version_is_stripped(self, tmp_path):
         _write_config(tmp_path, "schema_version: '1'\nauto_commit: false\n")
@@ -116,15 +130,20 @@ class TestLoadEffectiveConfig:
         cfg = repo_config.load_effective_config(tmp_path)
         assert cfg.auto_commit is True  # global default
         assert cfg.open_editor is False
+        assert cfg.branch_prefix == "hatchery/"
 
     def test_repo_overrides_layer_over_global(self, tmp_path, monkeypatch):
         monkeypatch.setattr(user_config.UserConfig, "CONFIG_PATH", tmp_path / "global.yaml")
         user_config.UserConfig.load().save()
-        _write_config(tmp_path, "default_agent: CLAUDE\nopen_editor: true\nauto_commit: false\n")
+        _write_config(
+            tmp_path,
+            'default_agent: CLAUDE\nopen_editor: true\nauto_commit: false\nbranch_prefix: "agents/"\n',
+        )
         cfg = repo_config.load_effective_config(tmp_path)
         assert cfg.default_agent == "CLAUDE"
         assert cfg.open_editor is True
         assert cfg.auto_commit is False
+        assert cfg.branch_prefix == "agents/"
 
     def test_unset_repo_fields_inherit_global(self, tmp_path, monkeypatch):
         monkeypatch.setattr(user_config.UserConfig, "CONFIG_PATH", tmp_path / "global.yaml")

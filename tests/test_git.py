@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import seekr_hatchery.branches as branches
 import seekr_hatchery.constants as constants
 import seekr_hatchery.git as git
 import seekr_hatchery.utils as utils
@@ -23,6 +24,10 @@ def _git_repo(path: Path) -> Path:
     utils.run(["git", "add", "README"], cwd=path)
     utils.run(["git", "-c", "user.email=t@t.com", "-c", "user.name=T", "commit", "-m", "init"], cwd=path)
     return path
+
+
+def _task_branch(name: str = "my-task", prefix: str = branches.DEFAULT_BRANCH_PREFIX) -> branches.BranchName:
+    return branches.BranchPrefix(prefix).task_branch(name)
 
 
 def _bare_remote(path: Path) -> Path:
@@ -105,28 +110,39 @@ class TestIncludeWorktreeHelpers:
         """A plain directory with no .git is silently skipped."""
         plain = tmp_path / "plain"
         plain.mkdir()
-        git.create_include_worktrees([_entry(plain)], "my-task", "HEAD")
+        git.create_include_worktrees([_entry(plain)], "my-task", _task_branch(), "HEAD")
         assert not (plain / constants.WORKTREES_SUBDIR).exists()
 
     def test_create_skips_reference_mode_entries(self, tmp_path):
         """reference mode entries (ro/rw) are skipped even if they are git repos."""
         repo = _git_repo(tmp_path / "repo-b")
-        git.create_include_worktrees([_entry(repo, mode="ro")], "my-task", "HEAD")
-        git.create_include_worktrees([_entry(repo, mode="rw")], "my-task", "HEAD")
+        git.create_include_worktrees([_entry(repo, mode="ro")], "my-task", _task_branch(), "HEAD")
+        git.create_include_worktrees([_entry(repo, mode="rw")], "my-task", _task_branch(), "HEAD")
         assert not (repo / constants.WORKTREES_SUBDIR).exists()
 
     def test_create_calls_create_worktree_for_git_repo(self, tmp_path):
         """A directory with .git gets a worktree at the expected path."""
         repo = _git_repo(tmp_path / "repo-b")
-        git.create_include_worktrees([_entry(repo)], "my-task", "main")
+        git.create_include_worktrees([_entry(repo)], "my-task", _task_branch(), "main")
         assert (repo / constants.WORKTREES_SUBDIR / "my-task").exists()
+
+    def test_create_and_delete_use_custom_branch_prefix(self, tmp_path):
+        repo = _git_repo(tmp_path / "repo-b")
+        entries = [_entry(repo)]
+
+        git.create_include_worktrees(entries, "my-task", _task_branch(prefix="agents/"), "main")
+
+        assert utils.run(["git", "rev-parse", "--verify", "agents/my-task"], cwd=repo, check=False).returncode == 0
+        git.remove_include_worktrees(entries, "my-task")
+        git.delete_include_branches(entries, "my-task", _task_branch(prefix="agents/"))
+        assert utils.run(["git", "rev-parse", "--verify", "agents/my-task"], cwd=repo, check=False).returncode != 0
 
     def test_create_skips_non_git_passes_git(self, tmp_path):
         """Mixed list: git repo gets a worktree, plain dir is skipped."""
         repo = _git_repo(tmp_path / "repo-b")
         plain = tmp_path / "data"
         plain.mkdir()
-        git.create_include_worktrees([_entry(repo), _entry(plain)], "t", "main")
+        git.create_include_worktrees([_entry(repo), _entry(plain)], "t", _task_branch("t"), "main")
         assert (repo / constants.WORKTREES_SUBDIR / "t").exists()
         assert not (plain / constants.WORKTREES_SUBDIR).exists()
 
@@ -154,20 +170,20 @@ class TestIncludeWorktreeHelpers:
     def test_delete_branches_skips_non_git_dir(self, tmp_path):
         plain = tmp_path / "plain"
         plain.mkdir()
-        git.delete_include_branches([_entry(plain)], "my-task")  # should not raise
+        git.delete_include_branches([_entry(plain)], "my-task", _task_branch())  # should not raise
 
     def test_delete_branches_skips_reference_mode_entries(self, tmp_path):
         """reference mode entries don't have branches to delete."""
         repo = _git_repo(tmp_path / "repo-b")
         utils.run(["git", "branch", "hatchery/my-task"], cwd=repo)
-        git.delete_include_branches([_entry(repo, mode="ro")], "my-task")
+        git.delete_include_branches([_entry(repo, mode="ro")], "my-task", _task_branch())
         r = utils.run(["git", "rev-parse", "--verify", "hatchery/my-task"], cwd=repo, check=False)
         assert r.returncode == 0  # branch still exists
 
     def test_delete_branches_calls_delete_branch_for_git_repo(self, tmp_path):
         repo = _git_repo(tmp_path / "repo-b")
         utils.run(["git", "branch", "hatchery/my-task"], cwd=repo)
-        git.delete_include_branches([_entry(repo)], "my-task")
+        git.delete_include_branches([_entry(repo)], "my-task", _task_branch())
         r = utils.run(["git", "rev-parse", "--verify", "hatchery/my-task"], cwd=repo, check=False)
         assert r.returncode != 0  # branch deleted
 
@@ -182,7 +198,7 @@ class TestIncludeWorktreeHelpers:
         utils.run(["git", "-c", "user.email=t@t.com", "-c", "user.name=T", "commit", "-m", "init"], cwd=local)
         utils.run(["git", "push", "origin", "main"], cwd=local)
 
-        git.create_include_worktrees([_entry(local)], "my-task")
+        git.create_include_worktrees([_entry(local)], "my-task", _task_branch())
 
         worktree = local / constants.WORKTREES_SUBDIR / "my-task"
         assert worktree.exists()
@@ -193,13 +209,13 @@ class TestIncludeWorktreeHelpers:
     def test_create_falls_back_to_local_default_when_no_remote(self, tmp_path):
         """If there's no remote, create_include_worktrees falls back to the local branch."""
         repo = _git_repo(tmp_path / "repo")
-        git.create_include_worktrees([_entry(repo)], "my-task")
+        git.create_include_worktrees([_entry(repo)], "my-task", _task_branch())
         assert (repo / constants.WORKTREES_SUBDIR / "my-task").exists()
 
     def test_create_uses_explicit_base_without_fetching(self, tmp_path):
         """An explicit base is passed through directly with no fetch."""
         repo = _git_repo(tmp_path / "repo")
-        git.create_include_worktrees([_entry(repo)], "my-task", base="main")
+        git.create_include_worktrees([_entry(repo)], "my-task", _task_branch(), base="main")
         assert (repo / constants.WORKTREES_SUBDIR / "my-task").exists()
 
     def test_create_preserves_existing_include_branch(self, tmp_path):
@@ -220,7 +236,7 @@ class TestIncludeWorktreeHelpers:
         utils.run(["git", "checkout", "main"], cwd=repo)
 
         # Now create the include worktree — the branch should NOT be reset.
-        git.create_include_worktrees([_entry(repo)], "my-task", base="main")
+        git.create_include_worktrees([_entry(repo)], "my-task", _task_branch(), base="main")
 
         after = utils.run(["git", "rev-parse", "hatchery/my-task"], cwd=repo).stdout.strip()
         assert after == task_branch_sha, "hatchery/<name> branch must not be force-reset"
@@ -236,7 +252,7 @@ class TestIncludeWorktreeHelpers:
         utils.run(["git", "worktree", "add", "-b", "hatchery/my-task", str(worktree), "main"], cwd=repo)
         (worktree / "scratch.txt").write_text("uncommitted work")
 
-        git.create_include_worktrees([_entry(repo)], "my-task", base="main")
+        git.create_include_worktrees([_entry(repo)], "my-task", _task_branch(), base="main")
 
         assert (worktree / "scratch.txt").exists(), "existing worktree (and its uncommitted work) must survive"
         assert (worktree / "scratch.txt").read_text() == "uncommitted work"

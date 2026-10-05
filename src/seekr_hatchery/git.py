@@ -6,6 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import seekr_hatchery.branches as branches
 import seekr_hatchery.ui as ui
 from seekr_hatchery.constants import WORKTREES_SUBDIR
 from seekr_hatchery.includes import IncludeEntry
@@ -193,8 +194,13 @@ def _fetch_if_remote(ref: str, cwd: Path) -> None:
         logger.warning("git fetch %s failed for %s", remote, cwd)
 
 
-def create_include_worktrees(includes: list[IncludeEntry], name: str, base: str | None = None) -> None:
-    """Create a hatchery/<name> worktree inside each included git repo with mode="worktree".
+def create_include_worktrees(
+    includes: list[IncludeEntry],
+    name: str,
+    branch: branches.BranchName,
+    base: str | None = None,
+) -> None:
+    """Create *branch* worktrees in included git repos with mode="worktree".
 
     Entries with mode="ro" or mode="rw" and non-git directories are silently skipped.
 
@@ -203,8 +209,8 @@ def create_include_worktrees(includes: list[IncludeEntry], name: str, base: str 
     is supplied, ``_fetch_if_remote`` fetches the owning remote first if the ref
     is a remote-tracking branch (e.g. ``origin/main``).
 
-    Safety: if an include already has a local ``hatchery/<name>`` branch from a
-    prior task run, attach the worktree to that branch *without* ``-B`` so any
+    Safety: if an include already has the prefixed task branch from a prior
+    task run, attach the worktree to that branch *without* ``-B`` so any
     unmerged include-side work is preserved. Only fresh branches are seeded
     from *base*. If the worktree directory is already present, it's left
     entirely alone — it may hold uncommitted work, so we never
@@ -214,22 +220,22 @@ def create_include_worktrees(includes: list[IncludeEntry], name: str, base: str 
     touches bookkeeping for worktrees whose directories no longer exist)
     before a plain ``add``.
     """
-    branch = f"hatchery/{name}"
+    branch_value = branch.value
     for entry in includes:
         if entry.mode != "worktree":
             continue
         path = entry.path
         if (path / ".git").exists():
             worktree = path / WORKTREES_SUBDIR / name
-            if branch_exists(path, branch):
+            if branch_exists(path, branch_value):
                 if worktree.exists():
                     # Already attached — may hold uncommitted work, leave it.
-                    logger.debug("Include worktree already present for %s at %s", branch, worktree)
+                    logger.debug("Include worktree already present for %s at %s", branch_value, worktree)
                     continue
                 # Pre-existing branch, missing worktree dir — attach, don't reset.
                 run(["git", "worktree", "prune"], cwd=path, check=False)
-                run(["git", "worktree", "add", str(worktree), branch], cwd=path)
-                logger.debug("Include worktree attached to existing %s at %s", branch, worktree)
+                run(["git", "worktree", "add", str(worktree), branch_value], cwd=path)
+                logger.debug("Include worktree attached to existing %s at %s", branch_value, worktree)
                 continue
             if base is not None:
                 repo_base = base
@@ -243,12 +249,12 @@ def create_include_worktrees(includes: list[IncludeEntry], name: str, base: str 
                     repo_base = default
                 else:
                     repo_base = f"origin/{default}"
-            create_worktree(path, branch, worktree, repo_base)
+            create_worktree(path, branch_value, worktree, repo_base)
             logger.debug("Include worktree created at %s", worktree)
 
 
 def remove_include_worktrees(includes: list[IncludeEntry], name: str) -> None:
-    """Remove the hatchery/<name> worktree from included git repos with mode="worktree".
+    """Remove the task worktree from included git repos with mode="worktree".
 
     Reference-mode entries (ro/rw), non-git directories, and missing worktrees
     are silently skipped.
@@ -262,18 +268,17 @@ def remove_include_worktrees(includes: list[IncludeEntry], name: str) -> None:
             remove_worktree(path, worktree, force=True)
 
 
-def delete_include_branches(includes: list[IncludeEntry], name: str) -> None:
-    """Delete the hatchery/<name> branch from included git repos with mode="worktree".
+def delete_include_branches(includes: list[IncludeEntry], name: str, branch: branches.BranchName) -> None:
+    """Delete *branch* from included git repos with mode="worktree".
 
     Reference-mode entries (ro/rw) and non-git directories are silently skipped.
     """
-    branch = f"hatchery/{name}"
     for entry in includes:
         if entry.mode != "worktree":
             continue
         path = entry.path
         if (path / ".git").exists():
-            delete_branch(path, branch)
+            delete_branch(path, branch.value)
 
 
 def branch_exists(repo: Path, branch: str) -> bool:

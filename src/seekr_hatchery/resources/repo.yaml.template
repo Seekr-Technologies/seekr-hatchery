@@ -9,3 +9,4 @@
 # default_agent: CODEX
 # open_editor: false
 # auto_commit: false
+# branch_prefix: "hatchery/"

@@ -19,9 +19,10 @@ from pathlib import Path
 from typing import ClassVar
 
 import yaml
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, field_validator
 
 import seekr_hatchery.agents as agent
+import seekr_hatchery.branches as branches
 import seekr_hatchery.ui as ui
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,9 @@ class UserConfigModel(BaseModel):
     default_agent: str | None = None
     open_editor: bool = False
     auto_commit: bool = True
+    branch_prefix: str = branches.DEFAULT_BRANCH_PREFIX
+
+    _validate_branch_prefix = field_validator("branch_prefix")(branches.validate_branch_prefix)
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +196,14 @@ class UserConfig:
     def set_auto_commit(self, value: bool) -> None:
         """Set the auto_commit preference in memory.  Call :meth:`save` to persist."""
         self._model = self._model.model_copy(update={"auto_commit": value})
+
+    @property
+    def branch_prefix(self) -> str:
+        return self._model.branch_prefix
+
+    def set_branch_prefix(self, value: str) -> None:
+        """Set the branch_prefix preference in memory. Call :meth:`save` to persist."""
+        self._model = UserConfigModel.model_validate({**self._model.model_dump(), "branch_prefix": value})
 
     # ── Domain methods ────────────────────────────────────────────────────────
 
