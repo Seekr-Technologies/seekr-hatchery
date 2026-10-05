@@ -1918,19 +1918,6 @@ class TestValidateDockerConfigFile:
         assert "Invalid YAML" in docker.validate_docker_config_file(path)
 
 
-class TestShellKubectlProxyToken:
-    def test_mints_token_when_kubernetes_is_enabled(self) -> None:
-        config = docker.DockerConfig(kubernetes=KubectlConfig(context="dev"))
-        assert docker._shell_kubectl_proxy_token(config, "")
-
-    def test_preserves_supplied_token(self) -> None:
-        config = docker.DockerConfig(kubernetes=KubectlConfig(context="dev"))
-        assert docker._shell_kubectl_proxy_token(config, "existing") == "existing"
-
-    def test_omits_token_when_kubernetes_is_disabled(self) -> None:
-        assert docker._shell_kubectl_proxy_token(docker.DockerConfig(), "existing") == ""
-
-
 class TestDockerFeatures:
     def test_lists_context_names_when_multiple_kubernetes_contexts_are_configured(self) -> None:
         config = docker.DockerConfig(
