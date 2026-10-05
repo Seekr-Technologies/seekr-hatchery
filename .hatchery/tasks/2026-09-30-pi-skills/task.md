@@ -18,7 +18,7 @@ Update the pi harness to link in (RW) ~/.pi/agent/skills
 ## Progress Log
 
 - [x] Create the read-write Pi skills mount.
-- [ ] Add mount coverage for Pi skills.
+- [x] Add mount coverage for Pi skills.
 - [ ] Document the behavior and run validation.
 - [ ] Finalize the task record.
 

@@ -406,24 +406,32 @@ class TestContainerEnv:
 
 
 class TestConstructMounts:
-    def test_creates_and_mounts_extensions_when_no_host_config(self, home, tmp_path):
+    def test_creates_and_mounts_global_resources_when_no_host_config(self, home, tmp_path):
         # autouse ``home`` fixture points Path.home() at an empty temp dir,
         # so neither settings.json nor models-store.json exists.
-        vol, ext = agent.PI.construct_mounts(tmp_path)
+        vol, ext, skills = agent.PI.construct_mounts(tmp_path)
 
-        assert (vol.name, vol.dst, vol.mode, vol.seed) == (
-            "pi-dir",
-            f"{agent.CONTAINER_HOME}/.pi/agent",
-            "RW",
-            None,
-        )
-        assert (ext.src, ext.dst, ext.mode, ext.follow_links) == (
-            home / ".pi" / "agent" / "extensions",
-            f"{agent.CONTAINER_HOME}/.pi/agent/extensions",
-            "RW",
-            True,
-        )
+        assert [
+            (vol.name, vol.dst, vol.mode, vol.seed),
+            (ext.src, ext.dst, ext.mode, ext.follow_links),
+            (skills.src, skills.dst, skills.mode, skills.follow_links),
+        ] == [
+            ("pi-dir", f"{agent.CONTAINER_HOME}/.pi/agent", "RW", None),
+            (
+                home / ".pi" / "agent" / "extensions",
+                f"{agent.CONTAINER_HOME}/.pi/agent/extensions",
+                "RW",
+                True,
+            ),
+            (
+                home / ".pi" / "agent" / "skills",
+                f"{agent.CONTAINER_HOME}/.pi/agent/skills",
+                "RW",
+                True,
+            ),
+        ]
         assert ext.src.is_dir()
+        assert skills.src.is_dir()
 
     def test_layers_host_config_binds_over_volume(self, home, tmp_path):
         agent_dir = home / ".pi" / "agent"
@@ -434,32 +442,27 @@ class TestConstructMounts:
         node_modules.mkdir(parents=True)
         extensions = agent_dir / "extensions"
         extensions.mkdir()
+        skills = agent_dir / "skills"
+        skills.mkdir()
 
-        vol, settings, store, nm, ext = agent.PI.construct_mounts(tmp_path)
+        vol, settings, store, nm, ext, skill_mount = agent.PI.construct_mounts(tmp_path)
 
         assert isinstance(vol, mount.VolumeMount)
-        assert vol.dst == f"{agent.CONTAINER_HOME}/.pi/agent"
-        assert (settings.src, settings.dst, settings.mode) == (
-            agent_dir / "settings.json",
-            f"{agent.CONTAINER_HOME}/.pi/agent/settings.json",
-            "RW",
-        )
-        assert (store.src, store.dst, store.mode) == (
-            agent_dir / "models-store.json",
-            f"{agent.CONTAINER_HOME}/.pi/agent/models-store.json",
-            "RO",
-        )
-        assert (nm.src, nm.dst, nm.mode) == (
-            node_modules,
-            f"{agent.CONTAINER_HOME}/.pi/agent/npm/node_modules",
-            "RO",
-        )
-        assert (ext.src, ext.dst, ext.mode, ext.follow_links) == (
-            extensions,
-            f"{agent.CONTAINER_HOME}/.pi/agent/extensions",
-            "RW",
-            True,
-        )
+        assert [
+            (vol.dst, vol.mode),
+            (settings.src, settings.dst, settings.mode),
+            (store.src, store.dst, store.mode),
+            (nm.src, nm.dst, nm.mode),
+            (ext.src, ext.dst, ext.mode, ext.follow_links),
+            (skill_mount.src, skill_mount.dst, skill_mount.mode, skill_mount.follow_links),
+        ] == [
+            (f"{agent.CONTAINER_HOME}/.pi/agent", "RW"),
+            (agent_dir / "settings.json", f"{agent.CONTAINER_HOME}/.pi/agent/settings.json", "RW"),
+            (agent_dir / "models-store.json", f"{agent.CONTAINER_HOME}/.pi/agent/models-store.json", "RO"),
+            (node_modules, f"{agent.CONTAINER_HOME}/.pi/agent/npm/node_modules", "RO"),
+            (extensions, f"{agent.CONTAINER_HOME}/.pi/agent/extensions", "RW", True),
+            (skills, f"{agent.CONTAINER_HOME}/.pi/agent/skills", "RW", True),
+        ]
 
     def test_never_binds_the_real_auth_json(self, home, tmp_path):
         agent_dir = home / ".pi" / "agent"
