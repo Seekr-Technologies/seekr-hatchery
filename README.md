@@ -210,19 +210,13 @@ The volume is auto-created on first launch as `hatchery-<name>` and re-used afte
 
 Press **Ctrl-V** in the agent's TUI to attach an image from your host clipboard to the next prompt. Works on macOS, and on Linux with `wl-paste` or `xclip` installed — terminal-agnostic. Enabled by default; set `clipboard_images: false` in `.hatchery/docker.yaml` to disable.
 
-### API key security
+### Sandbox sidecars
 
-The real API key never enters the container. Hatchery starts a lightweight **host-side HTTP reverse proxy** on an ephemeral port immediately before launching the container.
+Hatchery uses host-side services to expose selected capabilities without
+placing host credentials in the sandbox. See the sidecar documentation:
 
-**Codex (OpenAI):**
-- `OPENAI_API_KEY` — a random per-task proxy token
-- `OPENAI_BASE_URL` — pointing to the host proxy (`http://host.docker.internal:<port>`)
-
-The SDK inside the container uses these transparently. The proxy validates the inbound token, strips whatever credentials the container sends, injects the real API key in the correct format (`Authorization: Bearer` for OpenAI), and forwards the request over HTTPS. The real key never leaves the host process.
-
-This means a jailbroken or adversarially-prompted agent that reads its API key env var or attempts to exfiltrate it gets only the proxy token — which is worthless outside the session.
-
-The proxy token is stable per-task (persisted across container restarts) so cached credentials stay valid on subsequent `resume` launches.
+- [API credential proxy](docs/sidecars/api-proxy.md)
+- [Kubernetes RBAC proxy](docs/sidecars/kubernetes.md)
 
 ### The container's `~/.codex`
 
@@ -252,28 +246,6 @@ so those cross task boundaries and stay in sync with the host;
 `model-catalog.json` is mounted read-only. The three directories resolve
 symlinked entries — see [Symlinked
 directories](#symlinked-directories).
-
-### Custom Codex providers
-
-If `~/.codex/config.toml` configures a custom provider via
-`experimental_bearer_token` (any non-OpenAI provider with a static
-bearer), hatchery routes the host-side proxy at that provider instead of
-OpenAI. Detection is automatic — there is no flag to set. The bearer
-token stays on the host: the container only ever sees the per-task proxy
-token, in the scrubbed `config.toml` described above.
-
-TLS verification uses the OS native trust store via
-[`truststore`](https://truststore.readthedocs.io/) — macOS Keychain,
-Linux `/etc/ssl/certs`, Windows cert store. Any CA already installed
-system-wide (public or corporate) is trusted automatically. If the
-upstream presents a certificate signed by a private CA that's not yet
-in your OS trust store, install it there (the same way you'd install
-it for `curl`, your browser, or any other tool) — no hatchery-specific
-config required.
-
-There is no automatic token refresh — when the host bearer rotates,
-update `config.toml` on the host through whatever workflow your setup
-uses.
 
 ### The container's `~/.pi/agent`
 
