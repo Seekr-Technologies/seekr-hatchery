@@ -32,7 +32,7 @@ from seekr_hatchery.constants import (
     WORKTREES_SUBDIR,
 )
 from seekr_hatchery.includes import IncludeEntry, IncludeItem
-from seekr_hatchery.models import KubectlConfig, SessionMeta
+from seekr_hatchery.models import SessionMeta
 from seekr_hatchery.mount import (
     BindMount,
     Mount,
@@ -419,7 +419,7 @@ class CacheVolume(BaseModel):
         return v
 
 
-class DockerConfig(BaseModel):
+class DockerConfig(sidecars.SidecarConfig):
     """Schema for .hatchery/docker.yaml."""
 
     model_config = ConfigDict(extra="forbid")
@@ -432,7 +432,6 @@ class DockerConfig(BaseModel):
     clipboard_images: bool = True
     cap_add: list[str] = []
     environment: list[str] = []
-    kubernetes: KubectlConfig | None = None
 
     @field_validator("cap_add", mode="before")
     @classmethod

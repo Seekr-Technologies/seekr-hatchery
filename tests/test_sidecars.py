@@ -11,10 +11,19 @@ import pytest
 from seekr_hatchery.agents import CONTAINER_HOME, ProxyEndpoint
 from seekr_hatchery.models import KubectlConfig, KubectlContext
 from seekr_hatchery.mount import BindMount
-from seekr_hatchery.sidecars import base
+from seekr_hatchery.sidecars import SidecarConfig, base
 from seekr_hatchery.sidecars.api_sidecar import sidecar as api_sidecar
 from seekr_hatchery.sidecars.kubectl_sidecar import kubeconfig, kubectl_proc, rbac_proxy
 from seekr_hatchery.sidecars.kubectl_sidecar import sidecar as kubectl_sidecar
+
+# ── Sidecar configuration ────────────────────────────────────────────────────
+
+
+class TestSidecarConfig:
+    def test_parses_kubernetes_config(self) -> None:
+        config = SidecarConfig(kubernetes={"context": "development"})
+        assert config == SidecarConfig(kubernetes=KubectlConfig(context="development"))
+
 
 # ── SidecarContribution.merge ─────────────────────────────────────────────────
 
