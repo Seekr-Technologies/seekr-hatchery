@@ -1420,6 +1420,28 @@ def _make_paste_interceptor(
     )
 
 
+def _prepare_sidecars(
+    backend: agent.AgentBackend,
+    config: DockerConfig,
+    session_dir: Path,
+    *,
+    proxy_token: str,
+    kubectl_proxy_token: str | None,
+) -> list[sidecars.SandboxSidecar]:
+    """Construct and validate the sidecars for one container launch."""
+    try:
+        endpoints = backend.proxy_endpoints()
+        active_sidecars: list[sidecars.SandboxSidecar] = [
+            *(sidecars.ApiProxySidecar(endpoint, proxy_token, backend) for endpoint in endpoints),
+            sidecars.KubectlSidecar(config.kubernetes, session_dir, kubectl_proxy_token),
+        ]
+        sidecars.validate_sidecars(active_sidecars)
+    except RuntimeError as exc:
+        ui.error(str(exc))
+        sys.exit(1)
+    return active_sidecars
+
+
 def run_session(
     meta: SessionMeta,
     backend: agent.AgentBackend,
@@ -1457,12 +1479,6 @@ def run_session(
     owns.
     """
     runtime = runtime or DockerRuntime()
-    try:
-        endpoints = backend.proxy_endpoints()
-    except RuntimeError as e:
-        ui.error(str(e))
-        sys.exit(1)
-
     session_dir = meta.session_dir
     session_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1492,15 +1508,13 @@ def run_session(
         container_repo = str(meta.repo_path)
         build_root = meta.hatchery_dir
 
-    active_sidecars: list[sidecars.SandboxSidecar] = [
-        *(sidecars.ApiProxySidecar(endpoint, proxy_token, backend) for endpoint in endpoints),
-        sidecars.KubectlSidecar(config.kubernetes, session_dir, kubectl_proxy_token),
-    ]
-    try:
-        sidecars.validate_sidecars(active_sidecars)
-    except RuntimeError as exc:
-        ui.error(str(exc))
-        sys.exit(1)
+    active_sidecars = _prepare_sidecars(
+        backend,
+        config,
+        session_dir,
+        proxy_token=proxy_token,
+        kubectl_proxy_token=kubectl_proxy_token,
+    )
 
     if config.dind and not _dind_dockerfile_ok(build_root, backend):
         ui.warn("dind: true is set but the Dockerfile doesn't appear to install Podman.")
@@ -1565,9 +1579,10 @@ def launch_sandbox_shell(
 ) -> None:
     """Drop the user into an interactive shell inside the sandbox container.
 
-    Builds the same image agents use but skips all agent/proxy/session setup.
-    The repo is mounted RW at its host path (so the sandbox shell sees the
-    same paths a native shell would).
+    Builds the same image agents use and starts its configured sidecars so
+    their capabilities can be inspected interactively. The repo is mounted RW
+    at its host path (so the sandbox shell sees the same paths a native shell
+    would).
 
     *hatchery_dir* is the directory holding the Dockerfile
     — defaults to *repo* / ``.hatchery`` (committed mode). In not-committed
@@ -1585,16 +1600,14 @@ def launch_sandbox_shell(
     # /var/folders is outside Podman Machine's default shared roots.
     sandbox_session_dir = constants.HATCHERY_DIR / "sandbox-sessions" / str(uuid.uuid4())
     sandbox_session_dir.mkdir(parents=True, exist_ok=True)
-    active_sidecars: list[sidecars.SandboxSidecar] = [
-        sidecars.KubectlSidecar(config.kubernetes, sandbox_session_dir, kubectl_proxy_token)
-    ]
     try:
-        try:
-            sidecars.validate_sidecars(active_sidecars)
-        except RuntimeError as exc:
-            ui.error(str(exc))
-            sys.exit(1)
-
+        active_sidecars = _prepare_sidecars(
+            backend,
+            config,
+            sandbox_session_dir,
+            proxy_token=str(uuid.uuid4()),
+            kubectl_proxy_token=kubectl_proxy_token or None,
+        )
         build_docker_image(repo, hatchery_dir, image_name, backend, runtime=runtime, no_cache=no_cache)
         mounts: list[Mount] = [BindMount(src=str(repo), dst=str(repo), mode="RW")]
         mounts.extend(_default_home_mounts())
