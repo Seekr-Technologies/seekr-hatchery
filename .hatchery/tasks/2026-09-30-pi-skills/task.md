@@ -1,6 +1,6 @@
 # Task: pi-skills
 
-**Status**: in-progress
+**Status**: complete
 **Branch**: hatchery/pi-skills
 **Created**: 2026-09-30 14:52
 
@@ -8,22 +8,25 @@
 
 Update the pi harness to link in (RW) ~/.pi/agent/skills
 
-## Agreed Plan
+## Context
 
-1. Update `PiBackend.construct_mounts()` to create and bind-mount host `~/.pi/agent/skills` into the sandbox read-write, with symlink-target handling matching `extensions/`.
-2. Extend `tests/test_agent_pi.py` to verify the skills directory is created and mounted correctly alongside existing Pi state.
-3. Update `README.md` to document Pi skills sharing, then run focused tests plus Ruff checks.
-4. Finalize this task record as an ADR and mark the task complete.
-
-## Progress Log
-
-- [x] Create the read-write Pi skills mount.
-- [x] Add mount coverage for Pi skills.
-- [x] Document the behavior and run validation (42 focused tests pass; Ruff passes on changed Python files).
-- [ ] Finalize the task record.
+Pi sandbox sessions already shared host-global extensions read-write, but global
+skills remained trapped in the per-task agent volume. This prevented skills
+installed or authored under `~/.pi/agent/skills` from being consistently
+available on the host and across sandbox tasks.
 
 ## Summary
 
-*(Fill in on completion — then remove Agreed Plan and Progress Log above.
-Cover: key decisions made, patterns established, files changed, gotchas,
-and anything a future agent working in this repo should know.)*
+`PiBackend.construct_mounts()` now treats `skills/` like `extensions/`: it
+creates the host directory when absent, bind-mounts it read-write at the same
+path in the container, and enables symlink-target mounts for dotfiles-managed
+skills. Pi's authentication files remain isolated in the per-task volume.
+
+Mount tests cover both empty-host setup and fully populated host configuration,
+including mount ordering, access mode, and symlink handling. The README now
+documents shared Pi extensions and skills.
+
+Validation completed with all 42 tests in `tests/test_agent_pi.py` passing and
+Ruff lint/format checks passing for the changed Python files. The full suite was
+also attempted, but the sandbox Python process exited on an illegal instruction
+while importing `cryptography` in the unrelated kubectl sidecar tests.
