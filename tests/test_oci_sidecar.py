@@ -5,6 +5,7 @@ from __future__ import annotations
 import configparser
 import http.client
 import io
+import socket
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -372,6 +373,54 @@ class TestOciProxy:
             }
         ]
         assert "Authorization" not in pool.calls[0]["headers"]
+
+    def test_consumes_expect_header_before_streaming_upload(self, tmp_path: Path, monkeypatch) -> None:
+        pool = _Pool()
+        resolved = _resolved_profile(tmp_path)
+        rules = (
+            OciConfig(
+                profiles={
+                    "DEFAULT": {
+                        "rules": [
+                            {
+                                "path": "oci://my-ns/artifacts/temp/",
+                                "permissions": ["WRITE"],
+                            }
+                        ]
+                    }
+                }
+            )
+            .profiles["DEFAULT"]
+            .rules
+        )
+        monkeypatch.setattr(proxy, "_sign_request", lambda method, target, headers, profile: headers)
+
+        with proxy.oci_server({"DEFAULT": (resolved, rules)}, _pool=pool) as server:
+            authorization = _auth_header(server.profiles["DEFAULT"])
+            connection = socket.create_connection(("127.0.0.1", server.port), timeout=2)
+            request_headers = (
+                "PUT /n/my-ns/b/artifacts/o/temp/upload.txt HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{server.port}\r\n"
+                f"Authorization: {authorization}\r\n"
+                "Content-Type: application/octet-stream\r\n"
+                "Content-Length: 4\r\n"
+                "x-content-sha256: synthetic-hash\r\n"
+                "Expect: 100-continue\r\n"
+                "\r\n"
+            )
+            connection.sendall(request_headers.encode())
+            interim = connection.recv(4096)
+            assert interim == b"HTTP/1.1 100 Continue\r\n\r\n"
+
+            connection.sendall(b"test")
+            final = b""
+            while chunk := connection.recv(4096):
+                final += chunk
+            connection.close()
+
+        assert b"HTTP/1.1 200 OK" in final
+        assert pool.calls[0]["body"] == b"test"
+        assert all(name.lower() != "expect" for name in pool.calls[0]["headers"])
 
     def test_rejects_request_outside_policy(self, tmp_path: Path) -> None:
         pool = _Pool()

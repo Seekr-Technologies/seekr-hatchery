@@ -41,6 +41,9 @@ _HOP_BY_HOP_HEADERS = frozenset(
         "trailer",
         "transfer-encoding",
         "upgrade",
+        # This proxy completes the client-facing 100-continue handshake. The
+        # upstream connection must negotiate its own body transfer.
+        "expect",
     }
 )
 _SIGNATURE_PARAMETER_RE = re.compile(r'(\w+)="([^"]*)"')
@@ -436,6 +439,7 @@ class _OciProxyHandler(http.server.BaseHTTPRequestHandler):
                 self._log_path(),
                 type(exc).__name__,
             )
+            logger.debug("oci proxy upstream exception", exc_info=True)
             self._error(502, "OCI upstream request failed")
             return
 
