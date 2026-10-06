@@ -5,7 +5,7 @@ from pathlib import Path
 from seekr_hatchery.agents import CONTAINER_HOME
 from seekr_hatchery.mount import BindMount
 from seekr_hatchery.sidecars import base
-from seekr_hatchery.sidecars.oci_sidecar import proxy
+from seekr_hatchery.sidecars.oci_sidecar import credentials, proxy
 from seekr_hatchery.sidecars.oci_sidecar.config import OciConfig
 
 
@@ -22,14 +22,14 @@ class OciSidecar(base.SandboxSidecar):
     def validate(self) -> None:
         """Verify configured host API-key profiles before the image is built."""
         if self._config is not None:
-            proxy.validate_host_profiles_exist(self._config)
+            credentials.validate_host_profiles_exist(self._config)
 
     def start(self) -> base.SidecarContribution | None:
         if self._config is None:
             return None
         resolved = {
             profile_name: (
-                proxy.resolve_oci_profile(self._config, profile_name, profile),
+                credentials.resolve_oci_profile(self._config, profile_name, profile),
                 profile.rules,
             )
             for profile_name, profile in self._config.profiles.items()

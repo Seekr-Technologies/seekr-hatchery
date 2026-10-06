@@ -2,17 +2,12 @@
 
 from __future__ import annotations
 
-import base64
-import configparser
 import contextlib
 import email.utils
 import hmac
 import http.server
 import logging
-import os
 import re
-import secrets
-import shutil
 import socket
 import ssl
 import subprocess
@@ -22,13 +17,15 @@ from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import urlsplit
 
 import truststore
 import urllib3
 
+import seekr_hatchery.sidecars.oci_sidecar.credentials as credentials
+import seekr_hatchery.sidecars.oci_sidecar.policy as policy
 from seekr_hatchery.sidecars.http_server import ThreadingHTTPServer
-from seekr_hatchery.sidecars.oci_sidecar.config import OciConfig, OciPermission, OciProfileConfig, OciRule
+from seekr_hatchery.sidecars.oci_sidecar.config import OciRule
 
 logger = logging.getLogger(__name__)
 
@@ -51,35 +48,6 @@ _SIGNATURE_PARAMETER_RE = re.compile(r'(\w+)="([^"]*)"')
 _STREAM_CHUNK_SIZE = 64 * 1024
 _CLIENT_TIMEOUT_SECONDS = 60
 _UPSTREAM_TIMEOUT = urllib3.Timeout(connect=10, read=60)
-_BODY_METHODS = frozenset({"PUT", "POST", "PATCH"})
-_REQUIRED_PROFILE_FIELDS = ("tenancy", "user", "fingerprint", "key_file", "region")
-
-
-@dataclass(frozen=True)
-class ResolvedOciProfile:
-    """Host API-key identity and regional Object Storage endpoint."""
-
-    profile_name: str
-    key_id: str
-    key_file: Path
-    pass_phrase: str | None
-    region: str
-    endpoint_url: str
-
-
-@dataclass(frozen=True)
-class SyntheticIdentity:
-    """Random OCI identity accepted only by one proxy instance."""
-
-    key_id: str
-    key_filename: str
-
-    @classmethod
-    def create(cls, index: int) -> "SyntheticIdentity":
-        tenancy = f"ocid1.tenancy.oc1..hatchery{secrets.token_hex(24)}"
-        user = f"ocid1.user.oc1..hatchery{secrets.token_hex(24)}"
-        fingerprint = ":".join(f"{byte:02x}" for byte in secrets.token_bytes(16))
-        return cls(f"{tenancy}/{user}/{fingerprint}", f"profile-{index}.pem")
 
 
 @dataclass(frozen=True)
@@ -87,19 +55,9 @@ class ProxyProfile:
     """One sandbox profile bound to a host identity and optional rules."""
 
     name: str
-    resolved: ResolvedOciProfile
+    resolved: credentials.ResolvedOciProfile
     rules: list[OciRule] | None
-    synthetic: SyntheticIdentity
-
-
-@dataclass(frozen=True)
-class PolicyTarget:
-    """One permission check derived from an Object Storage request."""
-
-    permission: OciPermission
-    namespace: str
-    bucket: str
-    object_name: str
+    synthetic: credentials.SyntheticIdentity
 
 
 class _LimitedBody:
@@ -126,85 +84,6 @@ class _LimitedBody:
         data = self._source.read(amount)
         self._remaining -= len(data)
         return data
-
-
-def _policy_targets(method: str, request_target: str) -> list[PolicyTarget] | None:
-    """Classify supported OCI Object Storage data-plane requests."""
-    parsed = urlsplit(request_target)
-    parts = parsed.path.lstrip("/").split("/")
-    if len(parts) < 4 or parts[0] != "n" or parts[2] != "b":
-        return None
-    namespace = unquote(parts[1])
-    bucket = unquote(parts[3])
-    if not namespace or not bucket:
-        return None
-
-    tail = parts[4:]
-    query = parse_qs(parsed.query, keep_blank_values=True)
-    if not tail:
-        if method in {"GET", "HEAD"}:
-            return [PolicyTarget("LIST", namespace, bucket, "")]
-        return None
-
-    collection = tail[0]
-    object_name = unquote("/".join(tail[1:])) if len(tail) > 1 else ""
-    if collection == "o":
-        if not object_name:
-            if method != "GET":
-                return None
-            prefixes = query.get("prefix", [""])
-            if len(prefixes) != 1:
-                return None
-            allowed_query = {
-                "prefix",
-                "start",
-                "end",
-                "limit",
-                "delimiter",
-                "fields",
-                "startAfter",
-            }
-            if not set(query) <= allowed_query:
-                return None
-            return [PolicyTarget("LIST", namespace, bucket, prefixes[0])]
-        if method in {"GET", "HEAD"}:
-            return [PolicyTarget("READ", namespace, bucket, object_name)]
-        if method == "PUT":
-            return [PolicyTarget("WRITE", namespace, bucket, object_name)]
-        if method == "DELETE":
-            return [PolicyTarget("DELETE", namespace, bucket, object_name)]
-        return None
-
-    if collection == "u":
-        if not object_name:
-            if method == "GET":
-                prefixes = query.get("prefix", [""])
-                if len(prefixes) == 1:
-                    return [PolicyTarget("LIST", namespace, bucket, prefixes[0])]
-            return None
-        if method in {"GET", "PUT", "POST", "DELETE"}:
-            return [PolicyTarget("WRITE", namespace, bucket, object_name)]
-        return None
-
-    return None
-
-
-def _rules_allow(rules: list[OciRule] | None, targets: list[PolicyTarget] | None) -> bool:
-    """Return whether every target is covered; omitted rules preserve host access."""
-    if rules is None:
-        return True
-    if targets is None:
-        return False
-    return all(
-        any(
-            target.permission in rule.permissions
-            and target.namespace == rule.namespace
-            and target.bucket == rule.bucket
-            and target.object_name.startswith(rule.prefix)
-            for rule in rules
-        )
-        for target in targets
-    )
 
 
 def _sanitized_exception_message(exc: Exception) -> str:
@@ -271,58 +150,6 @@ def _safe_response_headers(headers: Any) -> list[tuple[str, str]]:
             continue
         result.append((name, value))
     return result
-
-
-def _case_insensitive_value(headers: dict[str, str], name: str) -> str | None:
-    return next((value for key, value in headers.items() if key.lower() == name.lower()), None)
-
-
-def _sign_request(
-    method: str,
-    request_target: str,
-    headers: dict[str, str],
-    profile: ResolvedOciProfile,
-) -> dict[str, str]:
-    """Sign an upstream request with the host profile's API key."""
-    signed_names = ["date", "(request-target)", "host"]
-    if method in _BODY_METHODS and _case_insensitive_value(headers, "x-content-sha256") is not None:
-        for required in ("content-length", "content-type"):
-            if _case_insensitive_value(headers, required) is None:
-                raise RuntimeError(f"oci: hashed request body is missing signing header {required!r}")
-        signed_names.extend(["content-length", "content-type", "x-content-sha256"])
-
-    lines: list[str] = []
-    for name in signed_names:
-        if name == "(request-target)":
-            value = f"{method.lower()} {request_target}"
-        else:
-            value = _case_insensitive_value(headers, name)
-            if value is None:
-                raise RuntimeError(f"oci: request is missing signing header {name!r}")
-        lines.append(f"{name}: {value}")
-
-    env = os.environ.copy()
-    command = ["openssl", "dgst", "-sha256", "-sign", str(profile.key_file)]
-    if profile.pass_phrase is not None:
-        env["HATCHERY_OCI_KEY_PASSPHRASE"] = profile.pass_phrase
-        command.extend(["-passin", "env:HATCHERY_OCI_KEY_PASSPHRASE"])
-    result = subprocess.run(
-        command,
-        input="\n".join(lines).encode(),
-        capture_output=True,
-        check=False,
-        env=env,
-    )
-    if result.returncode != 0:
-        raise RuntimeError("oci: failed to sign request with the configured API key")
-    signature = base64.b64encode(result.stdout).decode()
-    headers["Authorization"] = (
-        'Signature algorithm="rsa-sha256",'
-        f'headers="{" ".join(signed_names)}",'
-        f'keyId="{profile.key_id}",'
-        f'signature="{signature}",version="1"'
-    )
-    return headers
 
 
 class _OciHTTPServer(ThreadingHTTPServer):
@@ -437,8 +264,8 @@ class _OciProxyHandler(http.server.BaseHTTPRequestHandler):
             logger.info("oci proxy: %s %s rejected synthetic credentials", self.command, self._log_path())
             self._error(403, "invalid synthetic OCI credentials")
             return
-        targets = _policy_targets(self.command, self.path)
-        if not _rules_allow(profile.rules, targets):
+        targets = policy.policy_targets(self.command, self.path)
+        if not policy.rules_allow(profile.rules, targets):
             logger.info("oci proxy: %s %s denied by profile policy", self.command, self._log_path())
             self._error(403, "OCI proxy policy denied request")
             return
@@ -465,7 +292,7 @@ class _OciProxyHandler(http.server.BaseHTTPRequestHandler):
         )
 
         try:
-            signed_headers = _sign_request(self.command, self.path, headers, profile.resolved)
+            signed_headers = credentials.sign_request(self.command, self.path, headers, profile.resolved)
         except Exception as exc:
             logger.warning(
                 "oci proxy: phase=sign method=%s path=%s error_type=%s detail=%s "
@@ -619,76 +446,15 @@ class OciServer:
             clear()
 
 
-def _load_config(config: OciConfig) -> tuple[configparser.ConfigParser, Path]:
-    path = Path(os.path.expandvars(os.path.expanduser(config.config_file)))
-    parser = configparser.ConfigParser(interpolation=None)
-    if not parser.read(path):
-        raise RuntimeError(f"oci: config file not found: {path}")
-    return parser, path
-
-
-def _available_profiles(parser: configparser.ConfigParser) -> list[str]:
-    profiles = list(parser.sections())
-    if parser.defaults():
-        profiles.insert(0, "DEFAULT")
-    return profiles
-
-
-def _profile_values(parser: configparser.ConfigParser, profile_name: str) -> dict[str, str]:
-    if profile_name == "DEFAULT":
-        return dict(parser.defaults())
-    return dict(parser[profile_name])
-
-
-def validate_host_profiles_exist(config: OciConfig) -> None:
-    """Verify profiles, API-key fields, key files, and OpenSSL before build."""
-    if shutil.which("openssl") is None:
-        raise RuntimeError("oci: openssl is required to isolate and sign API-key credentials")
-    parser, _ = _load_config(config)
-    available = _available_profiles(parser)
-    for profile_name in config.profiles:
-        if profile_name not in available:
-            existing = ", ".join(sorted(available)) if available else "(none)"
-            raise RuntimeError(f"oci: profile {profile_name!r} not found; existing profiles: {existing}")
-        values = _profile_values(parser, profile_name)
-        missing = [field for field in _REQUIRED_PROFILE_FIELDS if not values.get(field)]
-        if missing:
-            raise RuntimeError(f"oci: profile {profile_name!r} is missing required fields: {', '.join(missing)}")
-        key_file = Path(os.path.expandvars(os.path.expanduser(values["key_file"])))
-        if not key_file.is_file():
-            raise RuntimeError(f"oci: key file for profile {profile_name!r} not found: {key_file}")
-
-
-def resolve_oci_profile(
-    config: OciConfig,
-    profile_name: str,
-    profile_config: OciProfileConfig,
-) -> ResolvedOciProfile:
-    """Resolve one validated standard OCI API-key profile."""
-    parser, _ = _load_config(config)
-    values = _profile_values(parser, profile_name)
-    region = values["region"]
-    endpoint = profile_config.endpoint or f"https://objectstorage.{region}.oraclecloud.com"
-    key_file = Path(os.path.expandvars(os.path.expanduser(values["key_file"])))
-    return ResolvedOciProfile(
-        profile_name=profile_name,
-        key_id=f"{values['tenancy']}/{values['user']}/{values['fingerprint']}",
-        key_file=key_file,
-        pass_phrase=values.get("pass_phrase"),
-        region=region,
-        endpoint_url=endpoint.rstrip("/"),
-    )
-
-
 @contextlib.contextmanager
 def oci_server(
-    resolved_profiles: dict[str, tuple[ResolvedOciProfile, list[OciRule] | None]],
+    resolved_profiles: dict[str, tuple[credentials.ResolvedOciProfile, list[OciRule] | None]],
     *,
     _pool: Any | None = None,
 ) -> Generator[OciServer, None, None]:
     """Start a container-reachable OCI proxy and stop it after launch."""
     profiles = {
-        name: ProxyProfile(name, resolved, rules, SyntheticIdentity.create(index))
+        name: ProxyProfile(name, resolved, rules, credentials.SyntheticIdentity.create(index))
         for index, (name, (resolved, rules)) in enumerate(resolved_profiles.items())
     }
     profiles_by_key_id = {profile.synthetic.key_id: profile for profile in profiles.values()}
