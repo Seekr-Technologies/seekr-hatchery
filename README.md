@@ -217,6 +217,7 @@ placing host credentials in the sandbox. See the sidecar documentation:
 
 - [API credential proxy](docs/sidecars/api-proxy.md)
 - [Kubernetes RBAC proxy](docs/sidecars/kubernetes.md)
+- [S3 credential proxy](docs/sidecars/s3.md)
 
 ### The container's `~/.codex`
 

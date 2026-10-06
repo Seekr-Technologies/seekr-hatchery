@@ -1919,6 +1919,10 @@ class TestValidateDockerConfigFile:
 
 
 class TestDockerFeatures:
+    def test_lists_s3_proxy_when_configured(self) -> None:
+        config = docker.DockerConfig(s3={"profiles": {"development": {}}})
+        assert docker.docker_features(config) == ["S3 proxy"]
+
     def test_lists_context_names_when_multiple_kubernetes_contexts_are_configured(self) -> None:
         config = docker.DockerConfig(
             kubernetes=KubectlConfig(contexts=[KubectlContext(context="dev"), KubectlContext(context="prd")])

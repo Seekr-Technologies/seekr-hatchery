@@ -12,8 +12,6 @@ mounts:
   # Uncomment for k8s access (oci required)
   # - "~/.kube:/home/hatchery/.kube:ro"
   # - "~/.oci:/home/hatchery/.oci:ro"
-  # Uncomment for s3 access
-  # - "~/.aws:/home/hatchery/.aws:ro"
   # DANGEROUS: Uncomment for ssh access
   # - "~/.ssh:/home/hatchery/.ssh:ro"
 
@@ -94,6 +92,26 @@ follow_symlinks: false
 # environment:
 #   - "MY_FLAG=1"
 #   - "EVAR_PASSTHROUGH"
+
+# s3: expose named host AWS profiles through a credential-isolating SigV4
+# proxy. Sandbox profiles contain only random credentials. `default` is required
+# with multiple profiles and inferred when exactly one is configured.
+# Rules are optional; omitted means the host profile's full S3 permissions,
+# while [] denies everything. Each rule has one literal s3://bucket[/prefix]
+# path. Allowed permissions: read, list, write, delete.
+# Unmatched and unsupported requests fail closed when rules are configured.
+# s3:
+#   default: development
+#   profiles:
+#     development:
+#       # region: us-west-2  # optional; defaults to the host profile region
+#       rules:
+#         - path: s3://project-artifacts/team-a/
+#           permissions: [READ, LIST, WRITE]
+#     production-readonly:
+#       rules:
+#         - path: s3://production-artifacts/published/
+#           permissions: [READ, LIST]
 
 # kubernetes: give the agent a kubectl command with virtual RBAC filtering.
 #
