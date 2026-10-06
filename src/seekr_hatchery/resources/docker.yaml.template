@@ -98,7 +98,7 @@ follow_symlinks: false
 # with multiple profiles and inferred when exactly one is configured.
 # Rules are optional; omitted means the host profile's full S3 permissions,
 # while [] denies everything. Each rule has one literal s3://bucket[/prefix]
-# path. Allowed permissions: read, list, write, delete.
+# path. Allowed permissions: READ, LIST, WRITE, DELETE.
 # Unmatched and unsupported requests fail closed when rules are configured.
 # s3:
 #   default: development
@@ -111,6 +111,24 @@ follow_symlinks: false
 #     production-readonly:
 #       rules:
 #         - path: s3://production-artifacts/published/
+#           permissions: [READ, LIST]
+
+# oci: expose standard API-key profiles from ~/.oci/config without mounting
+# host configuration or private keys. Profile names are used directly inside
+# the sandbox. `default` is required with multiple profiles and inferred for
+# one. Rules use literal oci://namespace/bucket[/prefix] paths and the
+# permissions READ, LIST, WRITE, and DELETE. Omitted rules preserve all host
+# profile permissions; [] denies everything.
+# oci:
+#   default: DEFAULT
+#   profiles:
+#     DEFAULT:
+#       rules:
+#         - path: oci://my-namespace/project-artifacts/team-a/
+#           permissions: [READ, LIST, WRITE]
+#     PRODUCTION:
+#       rules:
+#         - path: oci://my-namespace/production-artifacts/published/
 #           permissions: [READ, LIST]
 
 # kubernetes: give the agent a kubectl command with virtual RBAC filtering.

@@ -683,6 +683,8 @@ def docker_features(config: DockerConfig) -> list[str]:
             features.append("kubectl")
     if config.s3 is not None:
         features.append("S3 proxy")
+    if config.oci is not None:
+        features.append("OCI proxy")
     return features
 
 
@@ -1435,6 +1437,7 @@ def _prepare_sidecars(
         active_sidecars: list[sidecars.SandboxSidecar] = [
             *(sidecars.ApiProxySidecar(endpoint, proxy_token, backend) for endpoint in endpoints),
             sidecars.S3Sidecar(config.s3, session_dir),
+            sidecars.OciSidecar(config.oci, session_dir),
             sidecars.KubectlSidecar(config.kubernetes, session_dir, kubectl_proxy_token),
         ]
         sidecars.validate_sidecars(active_sidecars)
