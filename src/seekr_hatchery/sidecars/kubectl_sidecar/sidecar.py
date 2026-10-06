@@ -1,6 +1,7 @@
 """Lifecycle wrapper around kubectl proxy and RBAC proxy pairs."""
 
 import logging
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,11 +39,11 @@ class KubectlSidecar(base.SandboxSidecar):
         self,
         kube_config: KubectlConfig | None,
         session_dir: Path,
-        proxy_token: str,
+        proxy_token: str | None,
     ) -> None:
         self._config = kube_config
         self._session_dir = session_dir
-        self._proxy_token = proxy_token
+        self._proxy_token = proxy_token or (str(uuid.uuid4()) if kube_config is not None else "")
         self._proxies: list[_ContextProxy] = []
 
     def start(self) -> base.SidecarContribution | None:

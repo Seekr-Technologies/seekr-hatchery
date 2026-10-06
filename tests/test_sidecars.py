@@ -11,10 +11,19 @@ import pytest
 from seekr_hatchery.agents import CONTAINER_HOME, ProxyEndpoint
 from seekr_hatchery.models import KubectlConfig, KubectlContext
 from seekr_hatchery.mount import BindMount
-from seekr_hatchery.sidecars import base
+from seekr_hatchery.sidecars import SidecarConfig, base
 from seekr_hatchery.sidecars.api_sidecar import sidecar as api_sidecar
 from seekr_hatchery.sidecars.kubectl_sidecar import kubeconfig, kubectl_proc, rbac_proxy
 from seekr_hatchery.sidecars.kubectl_sidecar import sidecar as kubectl_sidecar
+
+# ── Sidecar configuration ────────────────────────────────────────────────────
+
+
+class TestSidecarConfig:
+    def test_parses_kubernetes_config(self) -> None:
+        config = SidecarConfig(kubernetes={"context": "development"})
+        assert config == SidecarConfig(kubernetes=KubectlConfig(context="development"))
+
 
 # ── SidecarContribution.merge ─────────────────────────────────────────────────
 
@@ -72,6 +81,18 @@ class _RecordingSidecar(base.SandboxSidecar):
         self._log.append(("stop", self.name))
         if self._stop_error is not None:
             raise self._stop_error
+
+
+class _ValidatingSidecar(_RecordingSidecar):
+    def validate(self) -> None:
+        self._log.append(("validate", self.name))
+
+
+class TestValidateSidecars:
+    def test_validates_in_launch_order(self) -> None:
+        log: list[tuple[str, str]] = []
+        base.validate_sidecars([_ValidatingSidecar("first", log), _ValidatingSidecar("second", log)])
+        assert log == [("validate", "first"), ("validate", "second")]
 
 
 class TestRunSidecars:
@@ -228,6 +249,22 @@ class TestKubectlSidecar:
         monkeypatch.setattr(rbac_proxy, "stop_rbac_proxy", lambda server: log.append(f"stop_rbac:{server.name}"))
         monkeypatch.setattr(kubectl_proc, "stop_kubectl_proxy_proc", lambda p: log.append(f"stop_proc:{p.name}"))
         return proc, rbac
+
+    def test_enabled_generates_proxy_token_when_not_supplied(self, tmp_path: Path, monkeypatch) -> None:
+        tokens: list[str] = []
+        self._patch_kubectl(monkeypatch, [])
+
+        def start_rbac(rules, token, kube_port, certificate=None):
+            tokens.append(token)
+            return SimpleNamespace(name="rbac"), 8443, b"cert-pem"
+
+        monkeypatch.setattr(rbac_proxy, "start_rbac_proxy", start_rbac)
+        sidecar = kubectl_sidecar.KubectlSidecar(KubectlConfig(context="my-ctx"), tmp_path, None)
+        sidecar.start()
+        sidecar.stop()
+
+        assert len(tokens) == 1
+        assert tokens[0]
 
     def test_enabled_writes_0600_kubeconfig_and_one_bind_mount(self, tmp_path: Path, monkeypatch) -> None:
         log: list[str] = []
