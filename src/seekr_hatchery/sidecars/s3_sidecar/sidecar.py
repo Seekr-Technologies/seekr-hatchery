@@ -5,7 +5,7 @@ from pathlib import Path
 from seekr_hatchery.agents import CONTAINER_HOME
 from seekr_hatchery.mount import BindMount
 from seekr_hatchery.sidecars import base
-from seekr_hatchery.sidecars.s3_sidecar import proxy
+from seekr_hatchery.sidecars.s3_sidecar import credentials, proxy
 from seekr_hatchery.sidecars.s3_sidecar.config import S3Config
 
 
@@ -22,13 +22,13 @@ class S3Sidecar(base.SandboxSidecar):
     def validate(self) -> None:
         """Verify configured profiles exist in the host AWS config before build."""
         if self._config is not None:
-            proxy.validate_host_profiles_exist(self._config)
+            credentials.validate_host_profiles_exist(self._config)
 
     def start(self) -> base.SidecarContribution | None:
         if self._config is None:
             return None
         resolved = {
-            alias: (proxy.resolve_aws_profile(alias, profile), profile.rules)
+            alias: (credentials.resolve_aws_profile(alias, profile), profile.rules)
             for alias, profile in self._config.profiles.items()
         }
         self._cm = proxy.s3_server(resolved)
