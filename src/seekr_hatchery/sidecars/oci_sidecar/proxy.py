@@ -44,7 +44,10 @@ _HOP_BY_HOP_HEADERS = frozenset(
         "expect",
     }
 )
-_SIGNATURE_PARAMETER_RE = re.compile(r'(\w+)="([^"]*)"')
+_SIGNATURE_PREFIX = "Signature "
+_SIGNATURE_PARAMETER_NAMES = frozenset({"algorithm", "headers", "keyId", "signature", "version"})
+_MAX_SIGNATURE_HEADER_LENGTH = 8 * 1024
+_MAX_SIGNATURE_PARAMETERS = len(_SIGNATURE_PARAMETER_NAMES)
 _STREAM_CHUNK_SIZE = 64 * 1024
 _CLIENT_TIMEOUT_SECONDS = 60
 _UPSTREAM_TIMEOUT = urllib3.Timeout(connect=10, read=60)
@@ -105,9 +108,53 @@ def _safe_request_id(value: str | None) -> str:
 
 
 def _signature_key_id(value: str) -> str | None:
-    if not value.startswith("Signature "):
+    """Extract a synthetic key ID with bounded, linear-time parsing."""
+    if len(value) > _MAX_SIGNATURE_HEADER_LENGTH or not value.startswith(_SIGNATURE_PREFIX):
         return None
-    parameters = dict(_SIGNATURE_PARAMETER_RE.findall(value[len("Signature ") :]))
+
+    parameters: dict[str, str] = {}
+    position = len(_SIGNATURE_PREFIX)
+    while position < len(value):
+        while position < len(value) and value[position] in " \t":
+            position += 1
+
+        name_start = position
+        while position < len(value):
+            character = value[position]
+            if not character.isascii() or not (character.isalnum() or character in "_-"):
+                break
+            position += 1
+        name = value[name_start:position]
+        if (
+            not name
+            or name not in _SIGNATURE_PARAMETER_NAMES
+            or name in parameters
+            or len(parameters) >= _MAX_SIGNATURE_PARAMETERS
+            or position >= len(value)
+            or value[position] != "="
+        ):
+            return None
+
+        position += 1
+        if position >= len(value) or value[position] != '"':
+            return None
+        position += 1
+        value_end = value.find('"', position)
+        if value_end < 0:
+            return None
+        parameters[name] = value[position:value_end]
+        position = value_end + 1
+
+        while position < len(value) and value[position] in " \t":
+            position += 1
+        if position == len(value):
+            break
+        if value[position] != ",":
+            return None
+        position += 1
+        if position == len(value):
+            return None
+
     if parameters.get("algorithm") != "rsa-sha256":
         return None
     return parameters.get("keyId")

@@ -106,6 +106,32 @@ class TestOciProxy:
         ]
         assert "Authorization" not in pool.calls[0]["headers"]
 
+    def test_rejects_malformed_and_oversized_signature_parameters(self, tmp_path: Path) -> None:
+        pool = _Pool()
+        resolved = _resolved_profile(tmp_path)
+        with proxy.oci_server({"DEFAULT": (resolved, None)}, _pool=pool) as server:
+            key_id = server.profiles["DEFAULT"].synthetic.key_id
+            authorizations = [
+                f'Signature algorithm="rsa-sha256",keyId="{key_id}",keyId="{key_id}"',
+                f'Signature algorithm="rsa-sha256",keyId="{key_id}",unsupported="value"',
+                f'Signature algorithm="rsa-sha256",keyId="{key_id}",',
+                (f'Signature algorithm="rsa-sha256",keyId="{key_id}",signature="{"a" * (8 * 1024)}"'),
+            ]
+            responses: list[tuple[int, bytes]] = []
+            for authorization in authorizations:
+                connection = http.client.HTTPConnection("127.0.0.1", server.port)
+                connection.request(
+                    "GET",
+                    "/n/my-ns/b/artifacts/o/file.txt",
+                    headers={"Authorization": authorization},
+                )
+                response = connection.getresponse()
+                responses.append((response.status, response.read()))
+                connection.close()
+
+        assert responses == [(403, b'{"error":"invalid synthetic OCI credentials"}')] * 4
+        assert pool.calls == []
+
     def test_consumes_expect_header_before_streaming_upload(self, tmp_path: Path, monkeypatch) -> None:
         pool = _Pool()
         resolved = _resolved_profile(tmp_path)
