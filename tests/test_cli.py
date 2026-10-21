@@ -14,6 +14,7 @@ from click.testing import CliRunner
 import seekr_hatchery.branches as branches
 import seekr_hatchery.docker as docker
 import seekr_hatchery.sessions as sessions
+import seekr_hatchery.system_prompt as system_prompt
 import seekr_hatchery.utils as utils
 from seekr_hatchery.cli import (
     TaskNameType,
@@ -479,6 +480,25 @@ class TestCmdConfigEdit:
         assert result.exit_code == 0
         assert not config_path.with_suffix(".yaml.bak").exists()
 
+    def test_scope_flag_edits_global_config(self, home):
+        with patch("seekr_hatchery.utils.common.open_for_editing"):
+            result = CliRunner().invoke(cli, ["config", "edit", "--global"])
+
+        assert result.exit_code == 0
+        assert (home / ".hatchery" / "config.yaml").exists()
+
+    def test_requires_exactly_one_scope(self):
+        result = CliRunner().invoke(cli, ["config", "edit"])
+
+        assert result.exit_code == 1
+        assert "exactly one of --global or --local" in result.output
+
+    def test_rejects_both_scopes(self):
+        result = CliRunner().invoke(cli, ["config", "edit", "--global", "--local"])
+
+        assert result.exit_code == 1
+        assert "exactly one of --global or --local" in result.output
+
 
 class TestCmdConfigEditLocal:
     """`config edit local` — the repo's .hatchery/config.yaml."""
@@ -514,11 +534,56 @@ class TestCmdConfigEditLocal:
         assert "Invalid config" in result.output
         assert config_path.read_text() == original
 
-    def test_bare_edit_does_nothing(self, tmp_path):
-        """`config edit` with no target edits nothing — shows subcommand help."""
-        result = self._run(tmp_path, ["config", "edit"])
-        assert not (tmp_path / ".hatchery" / "config.yaml").exists()
-        assert "global" in result.output and "local" in result.output
+    def test_scope_flag_edits_local_config(self, tmp_path):
+        result = self._run(tmp_path, ["config", "edit", "--local"])
+
+        assert result.exit_code == 0
+        assert (tmp_path / ".hatchery" / "config.yaml").exists()
+
+
+class TestCmdConfigSystemPrompt:
+    def test_edit_global_seeds_and_opens_prompt(self, home):
+        with patch("seekr_hatchery.system_prompt.open_for_editing") as editor:
+            result = CliRunner().invoke(cli, ["config", "edit", "system-prompt", "--global"])
+
+        path = home / ".hatchery" / "system-prompt.md"
+        assert result.exit_code == 0
+        assert path.exists()
+        editor.assert_called_once_with(path)
+
+    def test_edit_local_seeds_from_global_prompt(self, tmp_path):
+        global_path = system_prompt.global_path()
+        global_path.parent.mkdir(parents=True)
+        global_path.write_text("custom global\n")
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(tmp_path, True)),
+            patch("seekr_hatchery.system_prompt.open_for_editing"),
+        ):
+            result = CliRunner().invoke(cli, ["config", "edit", "system-prompt", "--local"])
+
+        assert result.exit_code == 0
+        assert (tmp_path / ".hatchery" / "system-prompt.md").read_text() == "custom global\n"
+
+    def test_reset_global_overwrites_prompt(self, home):
+        path = home / ".hatchery" / "system-prompt.md"
+        path.parent.mkdir(parents=True)
+        path.write_text("old\n")
+
+        result = CliRunner().invoke(cli, ["config", "reset", "system-prompt", "--global"])
+
+        assert result.exit_code == 0
+        assert path.read_text() == system_prompt.default_text()
+        assert f"Reset {path}" in result.output
+
+    def test_reset_local_overwrites_prompt(self, tmp_path):
+        path = tmp_path / ".hatchery" / "system-prompt.md"
+        path.parent.mkdir(parents=True)
+        path.write_text("old\n")
+        with patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(tmp_path, True)):
+            result = CliRunner().invoke(cli, ["config", "reset", "system-prompt", "--local"])
+
+        assert result.exit_code == 0
+        assert path.read_text() == system_prompt.default_text()
 
 
 def _git_log(repo: Path) -> str:
@@ -1820,7 +1885,7 @@ class TestLaunchHooks:
         return [
             patch("seekr_hatchery.sessions.task_session_dir", return_value=Path("/session")),
             patch("seekr_hatchery.sessions.sandbox_context", return_value="ctx"),
-            patch("seekr_hatchery.sessions._SESSION_SYSTEM", "sys"),
+            patch("seekr_hatchery.sessions.system_prompt.render", return_value="sys"),
             patch("seekr_hatchery.sessions.session_prompt", return_value="prompt"),
             patch("seekr_hatchery.sessions.subprocess.run"),
             patch(
@@ -2015,7 +2080,7 @@ class TestRunningState:
         with (
             patch("seekr_hatchery.sessions.task_session_dir", return_value=Path("/session")),
             patch("seekr_hatchery.sessions.sandbox_context", return_value="ctx"),
-            patch("seekr_hatchery.sessions._SESSION_SYSTEM", "sys"),
+            patch("seekr_hatchery.sessions.system_prompt.render", return_value="sys"),
             patch("seekr_hatchery.sessions.session_prompt", return_value="prompt"),
             patch("seekr_hatchery.sessions.subprocess.run"),
             patch("seekr_hatchery.sessions.load_task", side_effect=fake_load_task),

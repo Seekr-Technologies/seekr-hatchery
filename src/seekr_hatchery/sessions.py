@@ -25,6 +25,7 @@ import seekr_hatchery.constants as constants
 import seekr_hatchery.docker as docker
 import seekr_hatchery.git as git
 import seekr_hatchery.repo_config as repo_config
+import seekr_hatchery.system_prompt as system_prompt
 import seekr_hatchery.ui as ui
 import seekr_hatchery.user_config as user_config
 from seekr_hatchery.constants import (
@@ -56,66 +57,6 @@ __all__ = [
 
 _TASKS_DB_DIR = constants.HATCHERY_DIR / "tasks"
 _DB_SCHEMA_VERSION = 2
-
-# Appended to the agent's default system prompt (preserving its built-in
-# tool knowledge and workspace awareness). Edit here — single source of truth.
-_SESSION_SYSTEM = """\
-You are working on a task. The task file is at `.hatchery/tasks/<date>-<name>/task.md`
-(the exact path is in your session prompt). This single file serves as brief,
-plan, progress log, and final notes — update it in place as you work.
-
-Your workflow:
-
-1. PLAN FIRST: Read the task file, ask any clarifying questions, then propose
-   a concrete numbered implementation plan. Do not write any code until the
-   user approves the plan.
-
-2. ON APPROVAL: Update the "Agreed Plan" section of the task file with the
-   final plan, then proceed to implement it step by step.
-
-3. WHILE EXECUTING: After each step, tick the checkbox in the Progress Log
-   and make a descriptive git commit.
-
-4. IF BLOCKED: If you hit something that would materially change the plan,
-   stop and discuss before proceeding.
-
-5. ON COMPLETION: Mark Status as "complete". Add a "## Summary" section
-   covering key decisions, patterns established, gotchas, and anything a
-   future agent should know. Then remove the "## Agreed Plan" and
-   "## Progress Log" sections — they are working scaffolding, not permanent
-   record. The final file should read as a clean ADR:
-   Status/Branch/Created → Objective → Context → Summary.
-   This file will be merged into main as the permanent record of this task.
-"""
-
-_SESSION_SYSTEM_NOCOMMIT = """You are working on a task. The task file is at the path given in your session
-prompt. This single file serves as brief, plan, progress log, and final notes —
-update it in place as you work.
-
-Your workflow:
-
-1. PLAN FIRST: Read the task file, ask any clarifying questions, then propose
-   a concrete numbered implementation plan. Do not write any code until the
-   user approves the plan.
-
-2. ON APPROVAL: Update the "Agreed Plan" section of the task file with the
-   final plan, then proceed to implement it step by step.
-
-3. WHILE EXECUTING: After each step, tick the checkbox in the Progress Log
-   and make a descriptive git commit.
-
-4. IF BLOCKED: If you hit something that would materially change the plan,
-   stop and discuss before proceeding.
-
-5. ON COMPLETION: Mark Status as "complete". Add a "## Summary" section
-   covering key decisions, patterns established, gotchas, and anything a
-   future agent should know. Then remove the "## Agreed Plan" and
-   "## Progress Log" sections — they are working scaffolding, not permanent
-   record. The final file should read as a clean ADR:
-   Status/Branch/Created → Objective → Context → Summary.
-   This file is your local hatchery record (stored outside the repo, not
-   committed) — future sessions can read sibling records in the same directory.
-"""
 
 _WRAP_UP_PROMPT = (
     "The user has indicated they believe this task is complete. "
@@ -1698,7 +1639,7 @@ def launch(
         backend.on_before_launch(meta.worktree_path)
 
     if is_chat:
-        system_prompt = ""
+        system_prompt_text = ""
         initial_prompt = ""
     else:
         env_ctx = sandbox_context(
@@ -1713,10 +1654,8 @@ def launch(
             no_commit=meta.no_commit,
             hatchery_dir=meta.hatchery_dir if meta.no_commit else None,
         )
-        if meta.no_commit:
-            system_prompt = _SESSION_SYSTEM_NOCOMMIT + "\n" + env_ctx
-        else:
-            system_prompt = _SESSION_SYSTEM + "\n" + env_ctx
+        configured_prompt = system_prompt.render(meta.repo_path, no_commit=meta.no_commit)
+        system_prompt_text = configured_prompt.rstrip() + "\n\n" + env_ctx
         initial_prompt = "" if kind == "finalize" else session_prompt(meta, prompt_note)
 
     config, features, container_workdir = docker.launch_context(meta, runtime)
@@ -1724,16 +1663,16 @@ def launch(
     docker_flag = bool(runtime)
     if kind == "new":
         agent_cmd = backend.build_new_command(
-            session_id, system_prompt, initial_prompt, docker=docker_flag, workdir=container_workdir
+            session_id, system_prompt_text, initial_prompt, docker=docker_flag, workdir=container_workdir
         )
     elif kind == "resume":
         agent_cmd = backend.build_resume_command(
-            session_id, system_prompt, initial_prompt, docker=docker_flag, workdir=container_workdir
+            session_id, system_prompt_text, initial_prompt, docker=docker_flag, workdir=container_workdir
         )
     else:  # finalize
         wrap_up = f"{prompt_note}\n\n{_WRAP_UP_PROMPT}" if prompt_note else _WRAP_UP_PROMPT
         agent_cmd = backend.build_finalize_command(
-            session_id, system_prompt, wrap_up, docker=docker_flag, workdir=container_workdir
+            session_id, system_prompt_text, wrap_up, docker=docker_flag, workdir=container_workdir
         )
 
     hatchery_dir = _repo_relative_path(meta.hatchery_dir, meta.repo_path) if runtime else None
