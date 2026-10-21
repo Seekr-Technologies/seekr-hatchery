@@ -80,11 +80,10 @@ For exploratory work, `hatchery chat [name]` starts a free-form session in the c
 
 When the agent starts a new task it is given a task file at `.hatchery/tasks/YYYY-MM-DD-<name>.md`. The expected workflow:
 
-1. **Plan first** — read the task file, ask clarifying questions, propose a numbered implementation plan. No code until the plan is approved.
-2. **On approval** — update the "Agreed Plan" section, then implement step by step.
-3. **While executing** — tick checkboxes in the Progress Log after each step, make a descriptive git commit.
-4. **If blocked** — stop and discuss before proceeding.
-5. **On completion** — mark Status as "complete", add a `## Summary` section. The task file is merged into main as the permanent record.
+1. **Plan first** — at the beginning of a task, read the task file, inspect the repository, ask relevant questions, and propose a numbered plan. Repeat this for materially different or new work, not routine adjustments or bounded follow-ups.
+2. **Execute the approved plan** — record the plan, implement it step by step, keep the task file current, and group related work into coherent commits.
+3. **Discuss material changes** — discuss blockers or discoveries that materially affect the agreed scope or approach; handle routine implementation decisions independently.
+4. **Complete the record** — mark the task complete and convert its file into a concise ADR containing the outcome and rationale rather than the working plan.
 
 ## Commands
 

@@ -1,7 +1,7 @@
 # Task: configurable-prompt
 
 **Status**: complete
-**Branch**: configurable-prompt
+**Branch**: update-prompt
 **Created**: 2026-10-21 09:05
 
 ## Objective
@@ -30,10 +30,11 @@ scope is the current repository or a specific task rather than global/local.
 
 ## Summary
 
-- Added a packaged, configurable shared workflow body without changing either
-  existing rendered session prompt. Commit and no-commit modes retain their
-  original introductions and task-record endings as fixed framing around that
-  shared body; exact regression tests protect both complete strings.
+- The base `configurable-prompt` branch adds a packaged, configurable shared
+  workflow body without changing either existing rendered session prompt.
+  Commit and no-commit modes retain their original introductions and
+  task-record endings as fixed framing around that shared body; exact
+  regression tests protect both complete strings.
 - Global workflow prompts live at `~/.hatchery/system-prompt.md` and seed from
   the packaged default. An optional `<repo>/.hatchery/system-prompt.md`
   completely overrides the global body.
@@ -49,5 +50,7 @@ scope is the current repository or a specific task rather than global/local.
   1,303 non-kubectl tests (22 skipped). The container's cryptography build still
   terminates with an illegal-instruction error in the existing kubectl
   certificate tests.
-- The stacked `update-prompt` branch changes only the shared prompt wording
-  and its corresponding documentation/tests.
+- The stacked `update-prompt` branch changes only the shared body and its
+  corresponding documentation/tests. The revised workflow requires approval
+  for the initial task and materially different or new work, while routine
+  adjustments and bounded follow-ups do not require a new plan.
