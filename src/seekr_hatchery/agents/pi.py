@@ -2,11 +2,11 @@
 
 pi (``@earendil-works/pi-coding-agent``) talks to any number of model
 providers at once. Rather than hard-code each, hatchery discovers the user's
-configured providers from pi's own fetched catalog
-(``~/.pi/agent/models-store.json``) and delegates *credential resolution* to
-pi's ``auth`` CLI — so env vars, config-value grammar (``$ENV`` / ``!cmd``),
-``models.json`` keys, ``auth.json`` entries, and OAuth refresh are all handled
-by pi, not reimplemented here.
+configured providers from pi's fetched catalog
+(``~/.pi/agent/models-store.json``) plus custom ``models.json`` entries, and
+delegates *credential resolution* to pi's ``auth`` CLI — so env vars,
+config-value grammar (``$ENV`` / ``!cmd``), ``models.json`` keys, ``auth.json``
+entries, and OAuth refresh are all handled by pi, not reimplemented here.
 
 What stays in this module is bounded and does not grow per provider:
 
@@ -36,8 +36,10 @@ key/token on the way out.
 
 import base64
 import binascii
+import copy
 import json
 import logging
+import re
 import subprocess
 import uuid
 from collections.abc import Callable
@@ -62,6 +64,7 @@ logger = logging.getLogger(__name__)
 _NPM_PACKAGE = "@earendil-works/pi-coding-agent"
 
 _OPENAI_CODEX = "openai-codex"
+_HOST_MODELS_FILENAME = "hatchery-host-models.json"
 
 # JWT claim path pi-ai's extractAccountId() (openai-codex-responses.js) reads
 # the ChatGPT account id from: payload["https://api.openai.com/auth"].chatgpt_account_id
@@ -74,25 +77,65 @@ _CHATGPT_JWT_CLAIM_PATH = "https://api.openai.com/auth"
 _DOCKER_WRAPPER: str = (Path(__file__).parent.parent / "resources" / "pi_wrapper.sh").read_text()
 
 
-def _store_providers() -> dict[str, tuple[str, str]]:
-    """Map provider id → ``(api, baseUrl)`` from ``~/.pi/agent/models-store.json``.
+def _read_models_config() -> dict:
+    """Read Pi's host ``models.json``, accepting its JSONC-style syntax."""
+    path = Path.home() / ".pi" / "agent" / "models.json"
+    try:
+        text = path.read_text()
+    except OSError:
+        return {}
 
-    pi's fetched catalog is ``{provider: {"models": [{"api","baseUrl",...}], ...}}``.
-    All of a provider's models share one api + baseUrl, so we read the first.
-    Returns an empty dict if the store is missing or unparseable.
+    # Match Pi's parser: remove // comments and trailing commas while leaving
+    # quoted strings untouched. Pi does not accept block comments.
+    text = re.sub(
+        r'"(?:\\.|[^"\\])*"|//[^\n]*',
+        lambda match: match.group(0) if match.group(0).startswith('"') else "",
+        text,
+    )
+    text = re.sub(
+        r'"(?:\\.|[^"\\])*"|,(\s*[}\]])',
+        lambda match: match.group(0) if match.group(0).startswith('"') else match.group(1),
+        text,
+    )
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _store_providers() -> dict[str, tuple[str, str]]:
+    """Map provider id → ``(api, baseUrl)`` from Pi's host configuration.
+
+    The fetched ``models-store.json`` supplies the built-in catalog. User
+    entries from ``models.json`` are layered over it so provider overrides and
+    entirely custom providers resolve to the same Hatchery proxy path.
     """
     store = Path.home() / ".pi" / "agent" / "models-store.json"
     try:
         data = json.loads(store.read_text())
     except (json.JSONDecodeError, OSError):
-        return {}
+        data = {}
     out: dict[str, tuple[str, str]] = {}
-    for pid, entry in data.items():
-        models = entry.get("models") if isinstance(entry, dict) else None
-        if not models:
+    if isinstance(data, dict):
+        for pid, entry in data.items():
+            models = entry.get("models") if isinstance(entry, dict) else None
+            if not models or not isinstance(models[0], dict):
+                continue
+            api, base_url = models[0].get("api"), models[0].get("baseUrl")
+            if isinstance(api, str) and isinstance(base_url, str) and api and base_url:
+                out[pid] = (api, base_url)
+
+    providers = _read_models_config().get("providers", {})
+    if not isinstance(providers, dict):
+        return out
+    for pid, entry in providers.items():
+        if not isinstance(pid, str) or not isinstance(entry, dict):
             continue
-        api, base_url = models[0].get("api"), models[0].get("baseUrl")
-        if api and base_url:
+        inherited_api, inherited_base_url = out.get(pid, ("", ""))
+        api = entry.get("api", inherited_api)
+        base_url = entry.get("baseUrl", inherited_base_url)
+        if isinstance(api, str) and isinstance(base_url, str) and api and base_url:
             out[pid] = (api, base_url)
     return out
 
@@ -298,9 +341,10 @@ class PiBackend(AgentBackend):
 
         No seed: auth.json / models.json are synthesised by
         ``_DOCKER_WRAPPER`` at exec time from the per-launch proxy token and
-        port, which aren't known until then. The host's real
-        ``~/.pi/agent/auth.json`` (containing real keys/OAuth tokens) is
-        never mounted or read into the container.
+        port, which aren't known until then. A sanitized copy of host
+        ``models.json`` supplies custom model metadata. The host's real
+        ``~/.pi/agent/auth.json`` and model API keys are never mounted or read
+        into the container.
 
         Host paths layered on top of the volume. Optional files and npm modules
         are ``.exists()``-guarded. ``extensions/`` and ``skills/`` are created
@@ -310,6 +354,9 @@ class PiBackend(AgentBackend):
         - ``settings.json`` RW — user config, flows both ways.
         - ``models-store.json`` RO — pi's model catalogue; RO keeps upstream
           target resolution host-authoritative.
+        - ``hatchery-host-models.json`` RO — a per-launch sanitized copy of the
+          host's custom model configuration, merged into the generated
+          ``models.json`` by the wrapper.
         - ``npm/node_modules`` RO — pi's installed packages/plugins (subagents
           etc.). ``PI_OFFLINE=1`` means the container can't install them
           itself, so it takes the host's; RO stops per-task installs from
@@ -331,6 +378,9 @@ class PiBackend(AgentBackend):
         store = agent_dir / "models-store.json"
         if store.exists():
             mounts.append(BindMount(src=store, dst=f"{agent_dst}/models-store.json", mode="RO"))
+        host_models = session_dir / _HOST_MODELS_FILENAME
+        if host_models.exists():
+            mounts.append(BindMount(src=host_models, dst=f"{agent_dst}/{_HOST_MODELS_FILENAME}", mode="RO"))
         node_modules = agent_dir / "npm" / "node_modules"
         if node_modules.exists():
             mounts.append(BindMount(src=node_modules, dst=f"{agent_dst}/npm/node_modules", mode="RO"))
@@ -344,11 +394,12 @@ class PiBackend(AgentBackend):
     def proxy_endpoints() -> list[ProxyEndpoint]:
         """One ``ProxyEndpoint`` per configured provider.
 
-        Candidates are exactly the providers in ``~/.pi/agent/models-store.json``
-        — a ChatGPT login makes pi's catalog refresh add openai-codex there like
-        any other provider, so it needs no special-casing in discovery. Each is
-        probed with ``pi auth check``; only those that resolve to a ready
-        credential become endpoints. Every provider uses the same
+        Candidates come from ``~/.pi/agent/models-store.json`` plus custom or
+        overridden providers in ``models.json``. A ChatGPT login makes pi's
+        catalog refresh add openai-codex like any other provider, so it needs no
+        special-casing in discovery. Each candidate is probed with
+        ``pi auth check``; only those that resolve to a ready credential become
+        endpoints. Every provider uses the same
         provider-agnostic injection mutator: pi shapes the wire headers itself,
         we only swap in the real secret. openai-codex additionally gets a
         ``container_token`` carrying the real ChatGPT account id, since pi reads
@@ -423,7 +474,49 @@ class PiBackend(AgentBackend):
         proxy_token: str,
         workdir: str,
     ) -> None:
-        pass  # ~/.pi/agent/{auth,models}.json are written by _DOCKER_WRAPPER at exec time
+        """Materialize host model metadata without exposing its API keys.
+
+        The wrapper needs a normal file beside the generated ``models.json`` so
+        it can preserve custom models and provider options while replacing
+        routing and authentication. A per-task copy avoids mounting the host's
+        credential-bearing file into the sandbox.
+        """
+        destination = session_dir / _HOST_MODELS_FILENAME
+        config = _read_models_config()
+        providers = config.get("providers")
+        if not isinstance(providers, dict):
+            destination.unlink(missing_ok=True)
+            return
+
+        sanitized = copy.deepcopy(config)
+        sanitized_providers = sanitized["providers"]
+        for entry in sanitized_providers.values():
+            if not isinstance(entry, dict):
+                continue
+            entry.pop("apiKey", None)
+            PiBackend._sanitize_auth_headers(entry, proxy_token)
+            for key in ("models", "modelOverrides"):
+                models = entry.get(key)
+                values = models.values() if isinstance(models, dict) else models if isinstance(models, list) else []
+                for model in values:
+                    if isinstance(model, dict):
+                        PiBackend._sanitize_auth_headers(model, proxy_token)
+
+        session_dir.mkdir(parents=True, exist_ok=True)
+        destination.write_text(json.dumps(sanitized))
+
+    @staticmethod
+    def _sanitize_auth_headers(entry: dict, proxy_token: str) -> None:
+        """Replace common credential headers while retaining other options."""
+        headers = entry.get("headers")
+        if not isinstance(headers, dict):
+            return
+        for name in list(headers):
+            lower = name.lower()
+            if lower == "x-api-key":
+                headers[name] = proxy_token
+            elif lower == "authorization":
+                headers[name] = f"Bearer {proxy_token}"
 
     dockerfile_install: str = f"""\
 # ── pi coding agent ─────────────────────────────────────────────────────────
