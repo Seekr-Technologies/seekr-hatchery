@@ -277,8 +277,16 @@ the two directories on the host if needed, then mounts them read-write:
 extensions and skills are auto-discovered normally, session-authored changes
 persist on the host, and host edits can be hot-reloaded with `/reload`.
 Symlink targets within both directories are mounted too, so dotfiles-managed
-resources and their dependencies load correctly. Authentication remains
-container-local and contains only the per-session proxy credentials.
+resources and their dependencies load correctly.
+
+Host `models.json` custom providers, model definitions, and overrides are also
+available in the sandbox. Before every launch, Hatchery creates a sanitized
+per-task copy and mounts it read-only. Pi's container wrapper merges that copy
+with the generated proxy configuration, replacing upstream URLs and API keys
+with per-session proxy values. Host changes therefore take effect on the next
+launch or resume without exposing the host model API keys to the container.
+Authentication remains container-local and contains only the per-session proxy
+credentials.
 
 ### Container runtime auto-detection
 
