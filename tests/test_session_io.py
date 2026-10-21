@@ -1425,6 +1425,31 @@ class TestSessionLaunch:
         _, _sid, _system, initial, _docker, _wd = build
         assert initial.startswith("HELLO-NOTE")
 
+    def test_launch_uses_local_prompt_and_appends_environment_context(
+        self, spy_backend, fake_tasks_db, tmp_path, no_input
+    ):
+        meta = self._meta(tmp_path)
+        task_dir = meta.worktree_path / ".hatchery" / "tasks" / sessions.task_dir_name(meta.name)
+        task_dir.mkdir(parents=True, exist_ok=True)
+        (task_dir / sessions.TASK_FILENAME).write_text("body\n")
+        prompt_path = tmp_path / ".hatchery" / "system-prompt.md"
+        prompt_path.parent.mkdir(parents=True, exist_ok=True)
+        prompt_path.write_text("repository instructions\n")
+
+        self._drive(meta, kind="new", backend=spy_backend)
+
+        build = next(c for c in spy_backend.calls if c[0] == "build_new_command")
+        _, _sid, system, _initial, _docker, _workdir = build
+        assert "repository instructions\n" in system
+        assert system.endswith(
+            f"# Sandbox Environment\n\nYou are running in a **native git worktree** (no Docker isolation)."
+            f"\n\n**Working directory:** `{meta.worktree_path}`"
+            f"\n**Repository root:** `{meta.repo_path}`"
+            "\n**Your branch:** `hatchery/t`"
+            "\n**Target branch for PRs:** `main`"
+            "\n\nWhen creating commits or pull requests, target `main`. You may push to `hatchery/t` only."
+        )
+
     def test_chat_uses_empty_prompts(self, spy_backend, fake_tasks_db, tmp_path, no_input):
         meta = self._meta(tmp_path, is_chat=True, no_worktree=True)
         self._drive(meta, kind="new", backend=spy_backend)

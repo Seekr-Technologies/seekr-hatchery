@@ -24,6 +24,7 @@ import seekr_hatchery.logging_ as logging_
 import seekr_hatchery.repo_config as repo_config
 import seekr_hatchery.seeded_volumes as seeded_volumes
 import seekr_hatchery.sessions as sessions
+import seekr_hatchery.system_prompt as system_prompt
 import seekr_hatchery.ui as ui
 import seekr_hatchery.utils as utils
 from seekr_hatchery.constants import DEFAULT_BASE
@@ -1235,22 +1236,63 @@ def cmd_config() -> None:
     """View and edit hatchery configuration."""
 
 
-@cmd_config.group("edit")
-def cmd_config_edit() -> None:
-    """Open a hatchery config file in $EDITOR with validation."""
+def _require_config_scope(global_: bool, local: bool) -> bool:
+    """Validate config scope flags and return whether global scope was selected."""
+    if global_ == local:
+        ui.error("Specify exactly one of --global or --local.")
+        sys.exit(1)
+    return global_
 
 
-@cmd_config_edit.command("global")
-def cmd_config_edit_global() -> None:
-    """Edit the global config (~/.hatchery/config.yaml)."""
-    sessions.edit_global_config()
+@cmd_config.command("edit")
+@click.argument("target", required=False, metavar="[system-prompt]")
+@click.option("--global", "global_", is_flag=True, help="Edit user-wide configuration.")
+@click.option("--local", is_flag=True, help="Edit configuration for the current repository.")
+def cmd_config_edit(target: str | None, global_: bool, local: bool) -> None:
+    """Edit config.yaml or the system-prompt override for one scope."""
+    # Backward compatibility for the former `config edit global|local`
+    # subcommands. New invocations express scope with flags, like git config.
+    if target in {"global", "local"}:
+        if global_ or local:
+            ui.error("Do not combine the legacy scope argument with --global or --local.")
+            sys.exit(1)
+        global_ = target == "global"
+        local = target == "local"
+        target = None
+    if target not in {None, "system-prompt"}:
+        ui.error(f"Unknown config target: {target}")
+        sys.exit(1)
+
+    use_global = _require_config_scope(global_, local)
+    if target is None:
+        if use_global:
+            sessions.edit_global_config()
+        else:
+            repo, _ = git.git_root_or_cwd()
+            sessions.edit_repo_config(repo)
+        return
+
+    repo = Path.cwd()
+    if not use_global:
+        repo, _ = git.git_root_or_cwd()
+    system_prompt.edit(repo, global_=use_global)
 
 
-@cmd_config_edit.command("local")
-def cmd_config_edit_local() -> None:
-    """Edit this repo's config (<repo>/.hatchery/config.yaml)."""
-    repo, _ = git.git_root_or_cwd()
-    sessions.edit_repo_config(repo)
+@cmd_config.command("reset")
+@click.argument("target", type=click.Choice(["system-prompt"]))
+@click.option("--global", "global_", is_flag=True, help="Reset user-wide configuration.")
+@click.option("--local", is_flag=True, help="Reset configuration for the current repository.")
+def cmd_config_reset(target: str, global_: bool, local: bool) -> None:
+    """Overwrite a configurable resource with Hatchery's packaged default."""
+    use_global = _require_config_scope(global_, local)
+    if target == "system-prompt":
+        if use_global:
+            path = system_prompt.global_path()
+        else:
+            repo, _ = git.git_root_or_cwd()
+            path = system_prompt.local_path(repo)
+        system_prompt.reset(path)
+        ui.success(f"Reset {path}")
 
 
 # ---------------------------------------------------------------------------

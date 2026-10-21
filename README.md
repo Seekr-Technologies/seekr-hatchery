@@ -101,8 +101,10 @@ When the agent starts a new task it is given a task file at `.hatchery/tasks/YYY
 | `list` | List chats and tasks with type and worktree-isolation status |
 | `status <name>` | Show task metadata and the full task file |
 | `self update` | Upgrade hatchery to the latest release |
-| `config edit global` | Edit the global config (`~/.hatchery/config.yaml`) in `$EDITOR` with validation |
-| `config edit local` | Edit this repo's config (`<repo>/.hatchery/config.yaml`) in `$EDITOR` with validation |
+| `config edit --global` | Edit the global config (`~/.hatchery/config.yaml`) in `$EDITOR` with validation |
+| `config edit --local` | Edit this repo's config (`<repo>/.hatchery/config.yaml`) in `$EDITOR` with validation |
+| `config edit system-prompt --global/--local` | Edit the system prompt for the selected scope |
+| `config reset system-prompt --global/--local` | Replace the selected system prompt with the packaged default |
 | `sandbox edit` | Edit the sandbox runtime config (`docker.yaml`) in `$EDITOR` with validation |
 | `sandbox harness edit --agent <name>` | Edit an agent's harness `Dockerfile.<agent>` in `$EDITOR` |
 | `sandbox harness update --agent <name>` | Bump the agent harness pin to its latest release, rebuild to verify, and commit |
@@ -125,6 +127,24 @@ All `new` / `resume` commands accept:
 `promote` resolves current repository/global configuration when creating the task and supports `--from`, `--branch`, `--no-worktree`, `--editor/--no-editor`, and `--commit/--no-commit`, matching the corresponding `new` behavior. Promotion must be run after exiting the chat because an active agent process cannot safely switch into a newly created worktree.
 
 The chosen agent is stored in task metadata and re-used automatically on `resume`.
+
+### System prompt configuration
+
+Task agents receive a configurable shared workflow prompt, mode-specific task-record framing, and Hatchery's dynamically generated sandbox context. The framing preserves the distinct commit and no-commit instructions. The global workflow prompt is stored at `~/.hatchery/system-prompt.md` and is created from Hatchery's packaged default on first use:
+
+```bash
+hatchery config edit system-prompt --global
+```
+
+A repository can provide `<repo>/.hatchery/system-prompt.md` as a complete local override. Editing a missing local prompt starts it with the effective global content:
+
+```bash
+hatchery config edit system-prompt --local
+```
+
+The local prompt takes precedence when present; prompts are not concatenated. To overwrite either scope with the default shipped by the currently installed Hatchery version, run `hatchery config reset system-prompt --global` or `--local`.
+
+The general YAML configuration follows the same explicit scope convention: `hatchery config edit --global` or `hatchery config edit --local`. The older `hatchery config edit global/local` forms remain accepted for compatibility. Sandbox-specific files remain under `hatchery sandbox` because they use repository/task scope rather than global/local scope.
 
 ### Branch prefix configuration
 
