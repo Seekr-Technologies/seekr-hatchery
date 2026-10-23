@@ -1,0 +1,14 @@
+# .hatchery/docker.local.yaml — uncommitted settings for this user.
+#
+# This file is layered over docker.yaml. Mappings merge recursively, lists are
+# appended, and scalar values here override repository values. Any docker.yaml
+# option is valid here.
+
+schema_version: "1"
+
+# mounts:
+#   - "~/.aws:/home/hatchery/.aws:ro"
+
+# environment:
+#   - "MY_LOCAL_TOKEN"
+#   - "MY_LOCAL_FLAG=1"

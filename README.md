@@ -104,13 +104,14 @@ When the agent starts a new task it is given a task file at `.hatchery/tasks/YYY
 | `config edit --local` | Edit this repo's config (`<repo>/.hatchery/config.yaml`) in `$EDITOR` with validation |
 | `config edit system-prompt --global/--local` | Edit the system prompt for the selected scope |
 | `config reset system-prompt --global/--local` | Replace the selected system prompt with the packaged default |
-| `sandbox edit` | Edit the sandbox runtime config (`docker.yaml`) in `$EDITOR` with validation |
+| `sandbox edit` | Edit the shared sandbox runtime config (`docker.yaml`) in `$EDITOR` with validation |
+| `sandbox edit --local` | Edit the uncommitted user overlay (`docker.local.yaml`) |
 | `sandbox harness edit --agent <name>` | Edit an agent's harness `Dockerfile.<agent>` in `$EDITOR` |
 | `sandbox harness update --agent <name>` | Bump the agent harness pin to its latest release, rebuild to verify, and commit |
 | `sandbox shell` | Build the sandbox image and drop into an interactive shell |
 | `logs` | View or follow the hatchery log file (`~/.hatchery/hatchery.log`) |
 
-`sandbox edit` and `sandbox harness edit/update` accept `--task <name>` to target a live task's build copy (its worktree, else the repo root), and `--commit/--no-commit` to control the auto-commit of the edited file (default from repo/global config; committed only when tracked). Without `--task`, they resolve the nearest `.hatchery/` from the current directory up to the repo root.
+`sandbox edit` and `sandbox harness edit/update` accept `--task <name>` to target a live task's build copy (its worktree, else the repo root), and `--commit/--no-commit` to control the auto-commit of the edited file (default from repo/global config; committed only when tracked). Without `--task`, they resolve the nearest `.hatchery/` from the current directory up to the repo root. `sandbox edit --local` instead edits the main checkout's uncommitted overlay and cannot be combined with `--task` or `--commit`.
 
 All `new` / `resume` commands accept:
 - `--no-docker` — skip the container even if a Dockerfile is present
@@ -198,6 +199,14 @@ Mount format: `"host_path:container_path[:mode]"` — identical to Docker's own 
 - Invalid entries are a hard error. Paths that do not exist on the host are silently skipped.
 
 The file is tracked in git so every developer on the project gets the same mount configuration. Changes take effect on the next `new` or `resume`.
+
+For machine- or user-specific settings, run:
+
+```bash
+hatchery sandbox edit --local
+```
+
+This creates `.hatchery/docker.local.yaml` in the main checkout and adds it to the repository-local `.git/info/exclude`, so it remains uncommitted and applies to sandbox shells and every task worktree. The local file accepts the same options as `docker.yaml`: mappings merge recursively, lists such as `mounts` and `environment` append to shared values, and local scalar values override shared values. Within `environment`, later local entries for the same variable take precedence.
 
 ### Symlinked directories
 

@@ -369,6 +369,58 @@ class TestLoadDockerConfig:
         result = docker.load_docker_config(fake_repo)
         assert result.mounts == ["/host:/container:ro"]
 
+    def test_merges_local_lists_mappings_and_scalars(self, fake_repo):
+        self._write_config(
+            fake_repo,
+            "schema_version: 1\n"
+            "mounts: ['/shared:/shared:ro']\n"
+            "environment: ['MODE=shared']\n"
+            "follow_symlinks: false\n"
+            "s3:\n  default: development\n  profiles:\n    development: {}\n",
+        )
+        (fake_repo / "docker.local.yaml").write_text(
+            "schema_version: 1\n"
+            "mounts: ['/local:/local:rw']\n"
+            "environment: ['MODE=local', 'TOKEN']\n"
+            "follow_symlinks: true\n"
+            "s3:\n  profiles:\n    production: {}\n"
+        )
+
+        result = docker.load_docker_config(fake_repo)
+
+        assert (
+            result.model_dump()
+            == docker.DockerConfig(
+                mounts=["/shared:/shared:ro", "/local:/local:rw"],
+                environment=["MODE=shared", "MODE=local", "TOKEN"],
+                follow_symlinks=True,
+                s3={
+                    "default": "development",
+                    "profiles": {"development": {}, "production": {}},
+                },
+            ).model_dump()
+        )
+
+    def test_loads_local_overlay_from_main_checkout(self, fake_repo, tmp_path):
+        self._write_config(fake_repo, "schema_version: 1\nmounts: ['/shared:/shared']\n")
+        main_hatchery = tmp_path / "main-hatchery"
+        main_hatchery.mkdir()
+        (main_hatchery / "docker.local.yaml").write_text("schema_version: 1\nmounts: ['/local:/local']\n")
+
+        result = docker.load_docker_config(fake_repo, local_hatchery_dir=main_hatchery)
+
+        assert result.mounts == ["/shared:/shared", "/local:/local"]
+
+    def test_invalid_local_overlay_reports_local_path(self, fake_repo, capsys):
+        self._write_config(fake_repo, "schema_version: 1\n")
+        local = fake_repo / "docker.local.yaml"
+        local.write_text("unknown: true\n")
+
+        with pytest.raises(SystemExit):
+            docker.load_docker_config(fake_repo)
+
+        assert str(local) in capsys.readouterr().err
+
     def test_exits_on_invalid_yaml(self, fake_repo):
         self._write_config(fake_repo, "[unclosed\n")
         with pytest.raises(SystemExit):

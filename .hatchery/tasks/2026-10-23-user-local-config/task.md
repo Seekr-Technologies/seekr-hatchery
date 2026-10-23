@@ -1,30 +1,51 @@
 # Task: user-local-config
 
-**Status**: in-progress
+**Status**: complete
 **Branch**: user-local-config
 **Created**: 2026-10-23 08:26
+**Completed**: 2026-10-23
 
 ## Objective
 
-Current standard pattern is to commit the docker.yaml.
-
-However, a user may have local config:
-- local mounts
-- local evars
-- etc
-
-We should provide a way for a user to have a repo docker.yaml and local, uncommitted docker.yaml, where they can store user-specific settings
-
-## Agreed Plan
-
-*(To be filled in after planning discussion)*
-
-## Progress Log
-
-*(Steps will appear here once the plan is agreed)*
+Allow repositories to keep a shared, committed Docker sandbox configuration
+while each user can add machine-specific mounts, environment variables, and
+other settings without committing them.
 
 ## Summary
 
-*(Fill in on completion — then remove Agreed Plan and Progress Log above.
-Cover: key decisions made, patterns established, files changed, gotchas,
-and anything a future agent working in this repo should know.)*
+Hatchery now supports a main-checkout `.hatchery/docker.local.yaml` overlay on
+the committed `.hatchery/docker.yaml`. The overlay uses the same schema:
+mappings merge recursively, lists append, and local scalar values override
+shared values. List ordering makes later local environment entries win when
+the same variable is declared more than once.
+
+`hatchery sandbox edit --local` creates the overlay from a minimal template,
+validates it together with the shared config, and adds its exact path to the
+repository-local `.git/info/exclude`. It cannot be combined with `--task` or
+`--commit`; one local file applies to sandbox shells and every task worktree.
+Normal commit-mode task and sandbox setup also preserves this exclusion. In
+no-commit mode the existing exclusion of the whole `.hatchery/` directory is
+sufficient.
+
+Task launches explicitly load the shared config from the task checkout and the
+local overlay from the main checkout. Initial include processing reads the
+effective main-checkout configuration, while the post-worktree reload remains
+checkout-relative to avoid resolving local relative paths against a task
+worktree.
+
+Key files:
+- `src/seekr_hatchery/docker.py` — layered parsing, merging, validation, and
+  local-template creation.
+- `src/seekr_hatchery/sessions.py` / `cli.py` — exclusion, edit command, and
+  task-worktree integration.
+- `src/seekr_hatchery/resources/docker.local.yaml.template` — minimal local
+  overlay template.
+- `README.md` and `docker.yaml.template` — user-facing behavior and usage.
+- Tests cover merge precedence, alternate main-checkout overlays, invalid local
+  config attribution, edit constraints, and Git exclusion.
+
+Validation: Ruff formatting and linting pass; all 577 directly affected module
+tests pass, and focused follow-up tests pass. The full 1,411-test run reached
+the unrelated kubectl RBAC integration tests before the container's
+`cryptography` extension terminated with an illegal-instruction error.
+Package build succeeds and includes the new template resource.

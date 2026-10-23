@@ -1,4 +1,6 @@
 # .hatchery/docker.yaml — Docker sandbox configuration for this repo.
+# User-specific settings belong in the uncommitted docker.local.yaml overlay;
+# create or edit it with `hatchery sandbox edit --local`.
 
 schema_version: "1"
 
