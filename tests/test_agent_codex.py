@@ -439,6 +439,11 @@ class TestOnBeforeLaunch:
 class TestDockerfileInstall:
     def test_dockerfile_install(self):
         snippet = agent.CODEX.dockerfile_install
+        assert (
+            "COPY --from=node:22.23.4-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d /usr/local/ /usr/local/"
+            in snippet
+        )
+        assert "curl" not in snippet
         assert "npm" in snippet
         assert "@openai/codex" in snippet
 

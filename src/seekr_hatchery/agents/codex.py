@@ -849,8 +849,9 @@ class CodexBackend(AgentBackend):
     dockerfile_install: str = f"""\
 # ── OpenAI Codex CLI ──────────────────────────────────────────────────────────
 USER root
-RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm \\
-    && rm -rf /var/lib/apt/lists/*
+# eMudhra mitigation: Debian trixie's nodejs is still Node 20; use patched Node 22.23.4.
+# Return to apt-get install nodejs npm once trixie ships Node >=22.23.4.
+COPY --from=node:22.23.4-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d /usr/local/ /usr/local/
 USER hatchery
 RUN npm config set prefix '{CONTAINER_HOME}/.npm-global' \\
     && npm install -g {_NPM_PACKAGE}"""

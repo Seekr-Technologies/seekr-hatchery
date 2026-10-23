@@ -549,8 +549,13 @@ class TestEnsureDockerfile:
         content = docker.dockerfile_path(fake_repo, agent.CODEX).read_text()
         assert "{{AGENT_INSTALL}}" not in content
         assert "{{DIND}}" not in content
+        assert "debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad" in content
         assert "# USER root" in content
         assert "fuse-overlayfs" in content
+        assert (
+            "ghcr.io/astral-sh/uv:0.13.5@sha256:32a7bb39b496babbd997b0a39a4d66c126bdaf5661b302bf6f06abda8deca6ff"
+            in content
+        )
 
     def test_pins_harness_to_latest_at_generation(self, fake_repo, monkeypatch):
         self._prep(fake_repo)

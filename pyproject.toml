@@ -47,6 +47,7 @@ source = "uv-dynamic-versioning"
 enable = true
 
 [tool.uv]
+required-version = ">=0.13.5"
 cache-keys = [
   { file = "pyproject.toml" },
   { git = { commit = true, tags = true } },
