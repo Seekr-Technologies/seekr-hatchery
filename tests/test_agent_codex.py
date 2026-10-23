@@ -439,6 +439,7 @@ class TestOnBeforeLaunch:
 class TestDockerfileInstall:
     def test_dockerfile_install(self):
         snippet = agent.CODEX.dockerfile_install
+        assert "nodesource" in snippet.lower()
         assert "npm" in snippet
         assert "@openai/codex" in snippet
 

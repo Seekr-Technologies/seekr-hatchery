@@ -40,7 +40,7 @@ RUN npm config set prefix '/home/hatchery/.npm-global' \
 # =============================================================================
 
 # ── Python / uv ───────────────────────────────────────────────────────────────
-COPY --from=ghcr.io/astral-sh/uv:0.10.7 /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.13.5 /uv /uvx /bin/
 ENV UV_PROJECT_ENVIRONMENT=/home/hatchery/.venv
 
 # ── Go ────────────────────────────────────────────────────────────────────────
