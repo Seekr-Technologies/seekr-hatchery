@@ -41,6 +41,9 @@ Decisions and changes:
   changes to this repository's own sandbox definitions.
 - `tests/test_agent_codex.py` and `tests/test_filesystem.py`: cover the
   NodeSource installation path and fixed uv template pin.
+- `pyproject.toml`: require uv 0.13.5 or newer so local development cannot
+  proceed with uv's affected bundled trust store. CI's pinned `setup-uv` action
+  resolves this constraint to the latest compatible uv and runs on Node 24.
 
 Existing generated Dockerfiles are user-owned copies and are not migrated
 automatically. They should receive equivalent edits, then be rebuilt with
@@ -49,6 +52,7 @@ reused.
 
 Validation:
 
+- uv 0.13.5 `lock --check`: passed; uv 0.10.7 is rejected by the configured floor.
 - Ruff formatting for changed Python files and `ruff check .`: passed.
 - Focused tests: 229 passed.
 - Suite excluding kubectl cryptography tests: 1,310 passed, 22 skipped.
