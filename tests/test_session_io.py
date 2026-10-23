@@ -892,9 +892,10 @@ class TestSessionCreateTask:
 
         sessions.create(name="committed", repo=git_repo, type="task", backend=agent.CODEX, objective="x")
 
-        exclude = (git_repo / ".git" / "info" / "exclude").read_text()
+        exclude = (git_repo / ".git" / "info" / "exclude").read_text().splitlines()
         worktree = git_repo / ".hatchery" / "worktrees" / "committed"
         assert ".hatchery/" not in exclude
+        assert ".hatchery/docker.local.yaml" in exclude
         assert "hatchery Docker configuration" in _git(worktree, "log", "--oneline").stdout
 
     def test_commit_mode_rejects_ignored_hatchery_dir(self, git_repo, fake_tasks_db, no_input, capsys):

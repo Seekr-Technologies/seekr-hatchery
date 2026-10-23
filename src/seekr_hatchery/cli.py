@@ -985,11 +985,23 @@ _COMMIT_EDIT_HELP = (
 
 @cmd_sandbox.command("edit")
 @click.option("--task", "task_name", default=None, help=_TASK_EDIT_HELP)
+@click.option(
+    "--local",
+    "local_config",
+    is_flag=True,
+    help="Edit the uncommitted docker.local.yaml overlay that applies to every task.",
+)
 @click.option("--commit/--no-commit", "commit", default=None, help=_COMMIT_EDIT_HELP)
-def cmd_sandbox_edit(task_name: str | None, commit: bool | None) -> None:
-    """Edit the sandbox runtime config (docker.yaml)."""
+def cmd_sandbox_edit(task_name: str | None, local_config: bool, commit: bool | None) -> None:
+    """Edit the sandbox runtime configuration."""
     main_repo, in_repo = git.git_root_or_cwd()
-    sessions.edit_docker_config(main_repo, task_name=task_name, commit=commit, in_repo=in_repo)
+    sessions.edit_docker_config(
+        main_repo,
+        task_name=task_name,
+        commit=commit,
+        in_repo=in_repo,
+        local=local_config,
+    )
 
 
 @cmd_sandbox.group("harness")

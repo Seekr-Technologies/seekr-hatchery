@@ -21,8 +21,9 @@ DEFAULT_BASE = "HEAD"
 # creating per-task worktrees and by docker when mounting them.
 WORKTREES_SUBDIR = Path(".hatchery") / "worktrees"
 
-# Docker config file name (relative to a hatchery_dir).
+# Docker config file names (relative to a hatchery_dir).
 DOCKER_CONFIG = "docker.yaml"
+LOCAL_DOCKER_CONFIG = "docker.local.yaml"
 
 # Repo-local hatchery config file name (relative to the repo root — not
 # hatchery_dir, so it stays trackable even when .hatchery/ itself is

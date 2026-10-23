@@ -31,6 +31,7 @@ import seekr_hatchery.user_config as user_config
 from seekr_hatchery.constants import (
     DEFAULT_BASE,
     DOCKER_CONFIG,
+    LOCAL_DOCKER_CONFIG,
     WORKTREES_SUBDIR,
 )
 from seekr_hatchery.includes import IncludeEntry, load_include_entries, serialize_include_entries
@@ -1165,6 +1166,9 @@ def create(
     # id during the first launch.
     session_id = str(uuid.uuid4()) if backend.session_id_pre_generated else None
 
+    if in_repo and not no_commit:
+        ensure_git_exclude(repo, str(Path(".hatchery") / LOCAL_DOCKER_CONFIG))
+
     if is_chat:
         no_worktree = True
         worktree = repo
@@ -1378,6 +1382,9 @@ def prepare_sandbox(
     mode, ensures the Dockerfile and ``docker.yaml`` exist there, and (commit
     mode only) commits any newly created scaffolding. Returns the hatchery dir.
     """
+    if in_repo and not no_commit:
+        ensure_git_exclude(repo, str(Path(".hatchery") / LOCAL_DOCKER_CONFIG))
+
     if no_commit:
         hdir = repo / ".hatchery"
         hdir.mkdir(exist_ok=True)
@@ -1558,8 +1565,33 @@ def _apply_hint(task_name: str | None) -> None:
         ui.info(f"Run `hatchery resume {task_name} --rebuild-sandbox` to apply.")
 
 
-def edit_docker_config(main_repo: Path, *, task_name: str | None, commit: bool | None, in_repo: bool) -> None:
-    """Edit the sandbox runtime config (docker.yaml) for the resolved checkout."""
+def edit_docker_config(
+    main_repo: Path,
+    *,
+    task_name: str | None,
+    commit: bool | None,
+    in_repo: bool,
+    local: bool = False,
+) -> None:
+    """Edit the shared Docker config or the main-checkout local overlay."""
+    if local:
+        if task_name is not None:
+            ui.error("--local cannot be combined with --task; the local config applies to every task.")
+            sys.exit(1)
+        if commit is True:
+            ui.error("--local cannot be combined with --commit; local config is never committed.")
+            sys.exit(1)
+        hdir = main_repo / ".hatchery"
+        path = hdir / constants.LOCAL_DOCKER_CONFIG
+        if in_repo:
+            ensure_git_exclude(main_repo, str(Path(".hatchery") / LOCAL_DOCKER_CONFIG))
+        edit_with_validation(
+            path,
+            lambda candidate: docker.validate_docker_config_file(candidate, base_path=hdir / constants.DOCKER_CONFIG),
+            seed=lambda: docker.ensure_local_docker_config(hdir),
+        )
+        return
+
     root = docker_config_root(main_repo, task_name)
     hdir = root / ".hatchery"
     path = hdir / constants.DOCKER_CONFIG

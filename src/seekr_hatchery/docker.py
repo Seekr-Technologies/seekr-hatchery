@@ -29,6 +29,7 @@ import seekr_hatchery.stream_interceptor.interceptors.clipboard_image as clipboa
 import seekr_hatchery.ui as ui
 from seekr_hatchery.constants import (
     DOCKER_CONFIG,
+    LOCAL_DOCKER_CONFIG,
     WORKTREES_SUBDIR,
 )
 from seekr_hatchery.includes import IncludeEntry, IncludeItem
@@ -307,6 +308,7 @@ def _render_devices(spec: ContainerSpec) -> list[str]:
 _RESOURCES = Path(__file__).parent / "resources"
 _DOCKERFILE_TEMPLATE = _RESOURCES / "Dockerfile.template"
 _DOCKER_CONFIG_TEMPLATE = _RESOURCES / "docker.yaml.template"
+_LOCAL_DOCKER_CONFIG_TEMPLATE = _RESOURCES / "docker.local.yaml.template"
 _SECCOMP = _RESOURCES / "seccomp.json"
 
 # The uncommented DinD Dockerfile instructions — single source of truth for the
@@ -651,6 +653,17 @@ def ensure_docker_config(hatchery_dir: Path, *, prompt: bool = True) -> bool:
     return True
 
 
+def ensure_local_docker_config(hatchery_dir: Path) -> bool:
+    """Write an uncommitted local overlay template when it does not exist."""
+    config_file = hatchery_dir / LOCAL_DOCKER_CONFIG
+    if config_file.exists():
+        return False
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    config_file.write_text(_LOCAL_DOCKER_CONFIG_TEMPLATE.read_text())
+    ui.info(f"  Created {LOCAL_DOCKER_CONFIG}")
+    return True
+
+
 # ── DinD helpers ──────────────────────────────────────────────────────────────
 
 
@@ -691,40 +704,84 @@ def docker_features(config: DockerConfig) -> list[str]:
 # ── Mount construction ────────────────────────────────────────────────────────
 
 
-def validate_docker_config_file(path: Path) -> str | None:
-    """Validate a docker.yaml file against the schema.
+def _read_docker_config(path: Path) -> dict:
+    """Parse one Docker config file and return its migrated mapping."""
+    raw = yaml.safe_load(path.read_text()) or {}
+    if not isinstance(raw, dict):
+        raise ValueError("expected a YAML mapping at the document root")
+    return _migrate_docker_config(raw)
+
+
+def _merge_docker_config(base: object, overlay: object) -> object:
+    """Recursively layer raw Docker config values.
+
+    Mappings merge, lists append, and all other overlay values replace their
+    base value. A null overlay on a list is treated like an empty list because
+    commented-out YAML sections parse as null.
+    """
+    if isinstance(base, dict) and isinstance(overlay, dict):
+        result = dict(base)
+        for key, value in overlay.items():
+            result[key] = _merge_docker_config(result[key], value) if key in result else value
+        return result
+    if isinstance(base, list) and overlay is None:
+        return list(base)
+    if isinstance(base, list) and isinstance(overlay, list):
+        return [*base, *overlay]
+    return overlay
+
+
+def validate_docker_config_file(path: Path, *, base_path: Path | None = None) -> str | None:
+    """Validate a Docker config, optionally as an overlay on *base_path*.
 
     Returns ``None`` on success or an error message string on failure — the
     string form (rather than a hard exit) lets the interactive edit loop
     re-prompt the user.
     """
     try:
-        raw = yaml.safe_load(path.read_text()) or {}
+        raw = _read_docker_config(path)
+        if base_path is not None and base_path.exists():
+            base = _read_docker_config(base_path)
+            DockerConfig.model_validate(base)
+            raw = _merge_docker_config(base, raw)
+        DockerConfig.model_validate(raw)
     except yaml.YAMLError as exc:
         return f"Invalid YAML: {exc}"
-    try:
-        DockerConfig.model_validate(_migrate_docker_config(raw))
     except Exception as exc:
         return str(exc)
     return None
 
 
-def load_docker_config(hatchery_dir: Path) -> DockerConfig:
-    """Read and parse hatchery_dir/docker.yaml into a DockerConfig.
+def load_docker_config(hatchery_dir: Path, *, local_hatchery_dir: Path | None = None) -> DockerConfig:
+    """Load ``docker.yaml`` with an optional ``docker.local.yaml`` overlay.
 
-    Returns an empty DockerConfig if the file does not exist. Exits with an
-    error message if the file cannot be parsed or fails validation — an
-    invalid config is always a user mistake that must be fixed before launching.
+    The local file defaults to *hatchery_dir*. Task worktrees pass the main
+    checkout's Hatchery directory explicitly so one user-local file applies to
+    every task. Missing files produce an empty config; either invalid file is a
+    hard user error naming the file that must be fixed.
     """
     config_file = hatchery_dir / DOCKER_CONFIG
-    if not config_file.exists():
-        return DockerConfig()
+    local_file = (local_hatchery_dir or hatchery_dir) / LOCAL_DOCKER_CONFIG
+    raw: dict = {}
+    if config_file.exists():
+        try:
+            raw = _read_docker_config(config_file)
+            DockerConfig.model_validate(raw)
+        except Exception as exc:
+            ui.error(f"invalid docker config {config_file}: {exc}")
+            sys.exit(1)
+    if local_file.exists():
+        try:
+            overlay = _read_docker_config(local_file)
+            raw = _merge_docker_config(raw, overlay)
+        except Exception as exc:
+            ui.error(f"invalid docker config {local_file}: {exc}")
+            sys.exit(1)
     try:
-        raw = yaml.safe_load(config_file.read_text()) or {}
-        raw = _migrate_docker_config(raw)
         return DockerConfig.model_validate(raw)
     except Exception as exc:
-        ui.error(f"invalid docker config {config_file}: {exc}")
+        source = local_file if local_file.exists() else config_file
+        ui.error(f"invalid docker config {source}: {exc}")
         sys.exit(1)
 
 
@@ -749,7 +806,7 @@ def launch_context(
     """
     if runtime is None:
         return None, [], ""
-    config = load_docker_config(meta.hatchery_dir)
+    config = load_docker_config(meta.hatchery_dir, local_hatchery_dir=meta.repo_path / ".hatchery")
     features = docker_features(config)
     _check_host_path_safe_for_mount(meta.repo_path)
     container_workdir = str(meta.worktree_path)

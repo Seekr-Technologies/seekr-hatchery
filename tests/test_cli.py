@@ -636,6 +636,26 @@ class TestSandboxEdit:
         assert result.exit_code == 1
         assert config_path.read_text() == original
 
+    def test_local_edit_creates_uncommitted_excluded_overlay(self, git_repo):
+        repo = git_repo
+        before = _git_log(repo)
+        with (
+            patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
+            patch("seekr_hatchery.utils.common.open_for_editing", side_effect=lambda path: None),
+        ):
+            result = CliRunner().invoke(cli, ["sandbox", "edit", "--local"])
+
+        path = repo / ".hatchery" / "docker.local.yaml"
+        assert result.exit_code == 0, result.output
+        assert path.exists()
+        assert _porcelain(repo, ".hatchery/docker.local.yaml") == ""
+        assert _git_log(repo) == before
+
+    def test_local_edit_rejects_task_scope(self, tmp_path):
+        result = self._run(tmp_path / "repo", ["sandbox", "edit", "--local", "--task", "my-task"])
+        assert result.exit_code == 1
+        assert "--local cannot be combined with --task" in result.output
+
     def test_task_edits_worktree_copy(self, tmp_path):
         """--task routes the edit to that task's worktree copy, not the repo template."""
         repo = tmp_path / "repo"
