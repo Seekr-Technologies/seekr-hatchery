@@ -525,8 +525,8 @@ USER root
 # stops pi from downloading its own copies into ~/.pi/agent/bin at first run
 # (that dir is a fresh per-task volume, so it would re-download every task).
 # pi accepts either "fd" or "fdfind" on PATH (tools-manager.ts systemBinaryNames).
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \\
-    && apt-get install -y --no-install-recommends nodejs ripgrep fd-find \\
+COPY --from=node:22.23.4-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d /usr/local/ /usr/local/
+RUN apt-get update && apt-get install -y --no-install-recommends ripgrep fd-find \\
     && rm -rf /var/lib/apt/lists/*
 USER hatchery
 RUN npm config set prefix '{CONTAINER_HOME}/.npm-global' \\

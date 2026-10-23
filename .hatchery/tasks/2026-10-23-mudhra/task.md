@@ -32,15 +32,18 @@ embedding incident-specific version assertions in the starter Dockerfile.
 
 Decisions and changes:
 
-- `src/seekr_hatchery/agents/codex.py`: install Codex's Node runtime from the
-  same NodeSource 22 channel used by Pi. Current Node 22 releases include the
-  eMudhra distrust fix; this also avoids Debian's older bundled Node trust data.
+- `src/seekr_hatchery/agents/codex.py` and `src/seekr_hatchery/agents/pi.py`:
+  copy Node 22.23.4 from the digest-pinned official Node image. This version
+  includes the eMudhra distrust fix and avoids both Debian's older bundled Node
+  trust data and an unpinned `curl | bash` installer.
 - `src/seekr_hatchery/resources/Dockerfile.template`: update the optional uv
-  image from vulnerable `0.10.7` to fixed `0.13.5`.
+  image from vulnerable `0.10.7` to fixed `0.13.5` and pin its multi-platform
+  image digest.
 - `.hatchery/Dockerfile.codex` and `.hatchery/Dockerfile.pi`: apply the same
   changes to this repository's own sandbox definitions.
-- `tests/test_agent_codex.py` and `tests/test_filesystem.py`: cover the
-  NodeSource installation path and fixed uv template pin.
+- `tests/test_agent_codex.py`, `tests/test_agent_pi.py`, and
+  `tests/test_filesystem.py`: cover the digest-pinned Node image, absence of
+  remote installer scripts, and fixed uv template pin.
 - `pyproject.toml`: require uv 0.13.5 or newer so local development cannot
   proceed with uv's affected bundled trust store. CI's pinned `setup-uv` action
   resolves this constraint to the latest compatible uv and runs on Node 24.
@@ -53,6 +56,8 @@ reused.
 Validation:
 
 - uv 0.13.5 `lock --check`: passed; uv 0.10.7 is rejected by the configured floor.
+- The updated Codex Dockerfile builds successfully on arm64 with the pinned
+  Node and uv image digests.
 - Ruff formatting for changed Python files and `ruff check .`: passed.
 - Focused tests: 229 passed.
 - Suite excluding kubectl cryptography tests: 1,310 passed, 22 skipped.

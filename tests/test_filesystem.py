@@ -551,7 +551,10 @@ class TestEnsureDockerfile:
         assert "{{DIND}}" not in content
         assert "# USER root" in content
         assert "fuse-overlayfs" in content
-        assert "ghcr.io/astral-sh/uv:0.13.5" in content
+        assert (
+            "ghcr.io/astral-sh/uv:0.13.5@sha256:32a7bb39b496babbd997b0a39a4d66c126bdaf5661b302bf6f06abda8deca6ff"
+            in content
+        )
 
     def test_pins_harness_to_latest_at_generation(self, fake_repo, monkeypatch):
         self._prep(fake_repo)
