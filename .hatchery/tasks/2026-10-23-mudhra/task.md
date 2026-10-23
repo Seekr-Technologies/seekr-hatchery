@@ -35,10 +35,15 @@ Decisions and changes:
 - `src/seekr_hatchery/agents/codex.py` and `src/seekr_hatchery/agents/pi.py`:
   copy Node 22.23.4 from the digest-pinned official Node image. This version
   includes the eMudhra distrust fix and avoids both Debian's older bundled Node
-  trust data and an unpinned `curl | bash` installer.
+  trust data and an unpinned `curl | bash` installer. Inline comments preserve
+  the intent to return to `apt-get install nodejs npm` once trixie ships Node
+  22.23.4 or newer.
 - `src/seekr_hatchery/resources/Dockerfile.template`: update the optional uv
   image from vulnerable `0.10.7` to fixed `0.13.5` and pin its multi-platform
   image digest.
+- `src/seekr_hatchery/resources/Dockerfile.template`: also repin
+  `debian:trixie-slim` to the October 21 image, so fresh sandboxes start from a
+  base containing Debian's current security updates.
 - `.hatchery/Dockerfile.codex` and `.hatchery/Dockerfile.pi`: apply the same
   changes to this repository's own sandbox definitions.
 - `tests/test_agent_codex.py`, `tests/test_agent_pi.py`, and

@@ -525,6 +525,8 @@ USER root
 # stops pi from downloading its own copies into ~/.pi/agent/bin at first run
 # (that dir is a fresh per-task volume, so it would re-download every task).
 # pi accepts either "fd" or "fdfind" on PATH (tools-manager.ts systemBinaryNames).
+# eMudhra mitigation: Debian trixie's nodejs is still Node 20; use patched Node 22.23.4.
+# Return to apt-get install nodejs npm once trixie ships Node >=22.23.4.
 COPY --from=node:22.23.4-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d /usr/local/ /usr/local/
 RUN apt-get update && apt-get install -y --no-install-recommends ripgrep fd-find \\
     && rm -rf /var/lib/apt/lists/*

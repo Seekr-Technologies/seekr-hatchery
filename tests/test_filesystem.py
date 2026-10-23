@@ -549,6 +549,7 @@ class TestEnsureDockerfile:
         content = docker.dockerfile_path(fake_repo, agent.CODEX).read_text()
         assert "{{AGENT_INSTALL}}" not in content
         assert "{{DIND}}" not in content
+        assert "debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad" in content
         assert "# USER root" in content
         assert "fuse-overlayfs" in content
         assert (

@@ -1,7 +1,7 @@
 # Hatchery Sandbox
 # Minimal image for running an AI coding agent in an isolated environment.
 # Uncomment the sections below to add tools your project needs.
-FROM debian:trixie-slim@sha256:1d3c811171a08a5adaa4a163fbafd96b61b87aa871bbc7aa15431ac275d3d430
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
 
 # ── System packages ───────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -28,6 +28,8 @@ USER root
 # stops pi from downloading its own copies into ~/.pi/agent/bin at first run
 # (that dir is a fresh per-task volume, so it would re-download every task).
 # pi accepts either "fd" or "fdfind" on PATH (tools-manager.ts systemBinaryNames).
+# eMudhra mitigation: Debian trixie's nodejs is still Node 20; use patched Node 22.23.4.
+# Return to apt-get install nodejs npm once trixie ships Node >=22.23.4.
 COPY --from=node:22.23.4-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d /usr/local/ /usr/local/
 RUN apt-get update && apt-get install -y --no-install-recommends ripgrep fd-find \
     && rm -rf /var/lib/apt/lists/*

@@ -1,7 +1,7 @@
 # Hatchery Sandbox
 # Minimal image for running an AI coding agent in an isolated environment.
 # Uncomment the sections below to add tools your project needs.
-FROM debian:trixie-slim@sha256:1d3c811171a08a5adaa4a163fbafd96b61b87aa871bbc7aa15431ac275d3d430
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
 
 # ── System packages ───────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
