@@ -1885,9 +1885,21 @@ class TestMergeIncludesWithConfig:
         ref = tmp_path / "ref"
         ref.mkdir()
         config = [IncludeItem(path="ref", mode="ro")]  # relative to repo
+
         result = sessions.merge_includes_with_config([], config, tmp_path)
-        assert len(result) == 1
-        assert result[0].path == ref.resolve()
+
+        assert result == [IncludeEntry(path=ref.resolve(), mode="ro")]
+
+    def test_home_path_is_expanded(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        ref = home / "ref"
+        ref.mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        config = [IncludeItem(path="~/ref", mode="ro")]
+
+        result = sessions.merge_includes_with_config([], config, tmp_path / "repo")
+
+        assert result == [IncludeEntry(path=ref.resolve(), mode="ro")]
 
 
 # ---------------------------------------------------------------------------
