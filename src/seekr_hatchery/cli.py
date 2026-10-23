@@ -35,6 +35,21 @@ logger = logging.getLogger(__name__)
 # Valid agent choices derived from the single source of truth in agents/__init__.py
 AGENT_CHOICES: list[str] = [b.kind.lower() for b in agent.ALL_BACKENDS]
 
+
+class _ExpandUserPath(click.Path):
+    """Click path type that expands ``~`` before existence validation."""
+
+    def convert(
+        self,
+        value: str | os.PathLike[str],
+        param: click.Parameter | None,
+        ctx: click.Context | None,
+    ) -> Path:
+        return Path(super().convert(os.path.expanduser(value), param, ctx))
+
+
+_INCLUDE_PATH = _ExpandUserPath(exists=True, file_okay=False, dir_okay=True, path_type=Path)
+
 try:
     _version = importlib.metadata.version("seekr-hatchery")
 except importlib.metadata.PackageNotFoundError:
@@ -134,7 +149,7 @@ def _cli_includes_to_entries(
         *((p, "rw") for p in cli_rw),
         *((p, "ro") for p in cli_ro),
     ):
-        resolved = p.resolve()
+        resolved = sessions.resolve_include_path(p, Path.cwd())
         if resolved not in seen:
             seen.add(resolved)
             result.append(IncludeEntry(path=resolved, mode=mode))
@@ -511,7 +526,7 @@ def cli(log_level: str) -> None:
     "--include",
     "include",
     multiple=True,
-    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    type=_INCLUDE_PATH,
     metavar="PATH",
     help=(
         "Mount an additional directory inside the container at /includes/<basename>/. "
@@ -523,7 +538,7 @@ def cli(log_level: str) -> None:
     "--include-rw",
     "include_rw",
     multiple=True,
-    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    type=_INCLUDE_PATH,
     metavar="PATH",
     help=(
         "Mount an additional directory read-write inside the container at /includes/<basename>/. "
@@ -535,7 +550,7 @@ def cli(log_level: str) -> None:
     "--include-ro",
     "include_ro",
     multiple=True,
-    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    type=_INCLUDE_PATH,
     metavar="PATH",
     help=(
         "Mount an additional directory read-only inside the container at /includes/<basename>/. "
@@ -824,7 +839,7 @@ def cmd_rename(name: str, new_name: str) -> None:
     "--include",
     "include",
     multiple=True,
-    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    type=_INCLUDE_PATH,
     metavar="PATH",
     help=(
         "Add or update an include path in worktree mode. "
@@ -836,7 +851,7 @@ def cmd_rename(name: str, new_name: str) -> None:
     "--include-rw",
     "include_rw",
     multiple=True,
-    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    type=_INCLUDE_PATH,
     metavar="PATH",
     help="Add or update an include path as a read-write reference mount (no worktree).",
 )
@@ -844,7 +859,7 @@ def cmd_rename(name: str, new_name: str) -> None:
     "--include-ro",
     "include_ro",
     multiple=True,
-    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    type=_INCLUDE_PATH,
     metavar="PATH",
     help="Add or update an include path as a read-only reference mount (no worktree).",
 )

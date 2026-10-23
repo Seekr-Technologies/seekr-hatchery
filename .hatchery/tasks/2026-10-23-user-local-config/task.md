@@ -1,7 +1,7 @@
 # Task: user-local-config
 
 **Status**: complete
-**Branch**: user-local-config
+**Branch**: include-home-expansion
 **Created**: 2026-10-23 08:26
 **Completed**: 2026-10-23
 
@@ -49,3 +49,12 @@ tests pass, and focused follow-up tests pass. The full 1,411-test run reached
 the unrelated kubectl RBAC integration tests before the container's
 `cryptography` extension terminated with an illegal-instruction error.
 Package build succeeds and includes the new template resource.
+
+Follow-up: `include` paths now expand `~` consistently before path resolution.
+This applies to `docker.yaml`, `docker.local.yaml`, post-edit include discovery,
+and quoted `--include`, `--include-rw`, and `--include-ro` arguments. A custom
+Click path type performs expansion before existence validation, while
+`sessions.resolve_include_path()` centralizes expansion and repository-relative
+resolution. README and template documentation describe all three supported
+forms: absolute, repository-relative, and home-relative. Ruff passes and the
+356 CLI/session tests pass.

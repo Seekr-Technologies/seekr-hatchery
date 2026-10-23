@@ -869,6 +869,12 @@ def next_chat_name(repo: Path) -> str:
     return f"chat-{n}"
 
 
+def resolve_include_path(path: str | Path, repo: Path) -> Path:
+    """Expand a user-home include path and resolve relatives against *repo*."""
+    expanded = Path(path).expanduser()
+    return expanded.resolve() if expanded.is_absolute() else (repo / expanded).resolve()
+
+
 def merge_includes_with_config(
     cli_entries: list[IncludeEntry],
     config_includes: list,
@@ -878,7 +884,7 @@ def merge_includes_with_config(
 
     CLI entries take priority. For each ``config_includes`` raw entry
     (``str`` or ``IncludeItem`` dict from docker.yaml):
-    - resolve the path against *repo* if relative,
+    - expand ``~`` and resolve the path against *repo* if relative,
     - skip if the path doesn't exist (with a warning),
     - if a CLI entry already covers the same path, keep the CLI mode and
       ``ui.note`` the override,
@@ -893,8 +899,7 @@ def merge_includes_with_config(
 
     for entry in config_includes:
         path_str, config_mode = docker.parse_docker_include_entry(entry)
-        raw = Path(path_str)
-        resolved = (repo / raw).resolve() if not raw.is_absolute() else raw.resolve()
+        resolved = resolve_include_path(path_str, repo)
         if not resolved.exists():
             ui.warn(f"docker.yaml include path does not exist, skipping: {path_str}")
             continue
@@ -1246,11 +1251,7 @@ def create(
             new_entries: list[IncludeEntry] = []
             for raw_entry in post_config.include:
                 path_str, mode = docker.parse_docker_include_entry(raw_entry)
-                resolved = (
-                    (worktree / Path(path_str)).resolve()
-                    if not Path(path_str).is_absolute()
-                    else Path(path_str).resolve()
-                )
+                resolved = resolve_include_path(path_str, worktree)
                 if resolved not in post_include_paths and resolved.exists():
                     new_entries.append(IncludeEntry(path=resolved, mode=mode))
                     post_include_paths.add(resolved)

@@ -31,8 +31,9 @@ volumes:
   #   path: /home/hatchery/.cache/uv
 
 # include: additional repos or directories to mount inside the container.
-# Paths are mounted at /includes/<basename>/. Paths are relative to this
-# repo's root, or absolute. Merged with --include* flags passed to `hatchery new`.
+# Paths are mounted at /includes/<basename>/. Relative paths use this repo's
+# root; absolute and home-relative (`~/...`) paths are also supported. Merged
+# with --include* flags passed to `hatchery new`.
 #
 # Three mount modes are supported (default: worktree):
 #   worktree  — git repos get a configured-prefix branch + worktree for isolation (read-write)

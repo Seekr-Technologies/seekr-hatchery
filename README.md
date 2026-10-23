@@ -208,6 +208,8 @@ hatchery sandbox edit --local
 
 This creates `.hatchery/docker.local.yaml` in the main checkout and adds it to the repository-local `.git/info/exclude`, so it remains uncommitted and applies to sandbox shells and every task worktree. The local file accepts the same options as `docker.yaml`: mappings merge recursively, lists such as `mounts` and `environment` append to shared values, and local scalar values override shared values. Within `environment`, later local entries for the same variable take precedence.
 
+Paths in the `include` section may be absolute, relative to the repository root, or home-relative with `~`. The same home expansion applies to quoted `--include`, `--include-rw`, and `--include-ro` CLI values rather than relying on shell expansion.
+
 ### Symlinked directories
 
 A symlink stores a *path*, and that path only means the same thing inside the container when the mount's destination equals its source. Hatchery mirrors repo paths host→container precisely so that holds for your worktree. It does not hold under `$HOME`: the container's is `/home/hatchery`. So if you keep your agent config in a dotfiles repo — `~/.codex/skills/my-skill` symlinked to `~/.dotfiles/codex/skills/my-skill` — the link dangles in the sandbox and the skill is invisible to the agent, even though `skills/` itself is mounted.

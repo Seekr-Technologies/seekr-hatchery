@@ -2788,9 +2788,10 @@ class TestSelfCompletions:
 
 
 class TestCliNewInclude:
-    def test_include_stored_in_metadata(self, tmp_path):
-        """--include paths are stored as absolute strings in saved metadata."""
+    def test_home_relative_include_stored_as_absolute_path(self, tmp_path, monkeypatch):
+        """Quoted --include paths expand ~ before Click validates existence."""
         runner = CliRunner()
+        monkeypatch.setenv("HOME", str(tmp_path))
         repo_b = tmp_path / "repo-b"
         repo_b.mkdir()
 
@@ -2829,7 +2830,7 @@ class TestCliNewInclude:
                 patch("seekr_hatchery.cli.docker.load_docker_config", return_value=MagicMock(include=[]))
             )
 
-            result = runner.invoke(cli, ["new", "my-task", "--include", str(repo_b)])
+            result = runner.invoke(cli, ["new", "my-task", "--include", "~/repo-b"])
 
         assert result.exit_code == 0, result.output
         include = saved_meta.get("include", [])
