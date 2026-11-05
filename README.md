@@ -282,8 +282,10 @@ directories](#symlinked-directories).
 ### The container's `~/.pi/agent`
 
 Pi sandbox sessions keep their own agent state in a per-task volume. Hatchery
-bind-mounts your host `settings.json`, `models-store.json`, installed npm
-modules, and global `extensions/` and `skills/` directories. Hatchery creates
+bind-mounts your host `settings.json`, installed npm modules, and global
+`extensions/` and `skills/` directories. The host model catalog is mounted
+read-only as `hatchery-host-models-store.json`; the wrapper writes a proxy-routed
+copy to the task volume's `models-store.json`. Hatchery creates
 the two directories on the host if needed, then mounts them read-write:
 extensions and skills are auto-discovered normally, session-authored changes
 persist on the host, and host edits can be hot-reloaded with `/reload`.
@@ -297,7 +299,11 @@ with the generated proxy configuration, replacing upstream URLs and API keys
 with per-session proxy values. Host changes therefore take effect on the next
 launch or resume without exposing the host model API keys to the container.
 Authentication remains container-local and contains only the per-session proxy
-credentials.
+credentials. Each model retains its own upstream URL path instead of inheriting
+the first model's path. A provider's effective model URLs must share one upstream
+origin (scheme, host, and port); mixed origins produce a launch error. Configure
+separate providers for different origins. Pi runs with `PI_OFFLINE=1` so catalog
+refreshes cannot overwrite the proxy routes.
 
 ### Container runtime auto-detection
 

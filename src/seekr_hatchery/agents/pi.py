@@ -26,12 +26,14 @@ derives request state (the ChatGPT account id) from its *local* token
 client-side, so its endpoint supplies a ``container_token`` — a fake JWT carrying
 the real account id — instead of the shared proxy token.
 
-pi has no ``*_BASE_URL`` env var — the only override mechanism is
-``~/.pi/agent/models.json``'s ``providers.<id>.baseUrl``, written at
-container-exec time (the proxy port is only known then). The real credentials
-never touch the container: the container only ever sees the per-launch fake
-proxy token; the host-side ``ProxyEndpoint.header_mutator`` swaps in the real
-key/token on the way out.
+pi has no ``*_BASE_URL`` env var. At container-exec time, Hatchery rewrites
+each catalog model's ``baseUrl`` to the proxy origin while retaining its path,
+and sets a ``models.json`` provider base URL when configured on the host or
+when all effective model URLs agree (so static providers also use the proxy).
+``PI_OFFLINE=1`` prevents network refresh from replacing the routed catalog.
+The real credentials never touch the container: the container only ever
+sees the per-launch fake proxy token; the host-side
+``ProxyEndpoint.header_mutator`` swaps in the real key/token on the way out.
 """
 
 import base64
@@ -65,6 +67,7 @@ _NPM_PACKAGE = "@earendil-works/pi-coding-agent"
 
 _OPENAI_CODEX = "openai-codex"
 _HOST_MODELS_FILENAME = "hatchery-host-models.json"
+_HOST_MODELS_STORE_FILENAME = "hatchery-host-models-store.json"
 
 # JWT claim path pi-ai's extractAccountId() (openai-codex-responses.js) reads
 # the ChatGPT account id from: payload["https://api.openai.com/auth"].chatgpt_account_id
@@ -104,56 +107,99 @@ def _read_models_config() -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def _store_providers() -> dict[str, tuple[str, str]]:
-    """Map provider id → ``(api, baseUrl)`` from Pi's host configuration.
+def _provider_target_hosts() -> dict[str, str]:
+    """Map providers to their sole effective upstream host.
 
-    The fetched ``models-store.json`` supplies the built-in catalog. User
-    entries from ``models.json`` are layered over it so provider overrides and
-    entirely custom providers resolve to the same Hatchery proxy path.
+    The wrapper maps every effective model URL for a provider to one proxy.
+    Providers whose model URLs span origins cannot be represented by that
+    proxy, so reject them before launching the container rather than silently
+    sending requests to the wrong upstream.
     """
-    store = Path.home() / ".pi" / "agent" / "models-store.json"
+    store_path = Path.home() / ".pi" / "agent" / "models-store.json"
     try:
-        data = json.loads(store.read_text())
+        store = json.loads(store_path.read_text())
     except (json.JSONDecodeError, OSError):
-        data = {}
-    out: dict[str, tuple[str, str]] = {}
-    if isinstance(data, dict):
-        for pid, entry in data.items():
-            models = entry.get("models") if isinstance(entry, dict) else None
-            if not models or not isinstance(models[0], dict):
-                continue
-            api, base_url = models[0].get("api"), models[0].get("baseUrl")
-            if isinstance(api, str) and isinstance(base_url, str) and api and base_url:
-                out[pid] = (api, base_url)
+        store = {}
+    if not isinstance(store, dict):
+        store = {}
 
-    providers = _read_models_config().get("providers", {})
-    if not isinstance(providers, dict):
-        return out
-    for pid, entry in providers.items():
-        if not isinstance(pid, str) or not isinstance(entry, dict):
+    configured_providers = _read_models_config().get("providers", {})
+    if not isinstance(configured_providers, dict):
+        configured_providers = {}
+
+    provider_ids = dict.fromkeys((*store, *configured_providers))
+    target_hosts: dict[str, str] = {}
+    for provider_id in provider_ids:
+        if not isinstance(provider_id, str):
             continue
-        inherited_api, inherited_base_url = out.get(pid, ("", ""))
-        api = entry.get("api", inherited_api)
-        base_url = entry.get("baseUrl", inherited_base_url)
-        if isinstance(api, str) and isinstance(base_url, str) and api and base_url:
-            out[pid] = (api, base_url)
-    return out
+        catalog_provider = store.get(provider_id)
+        catalog_models = (
+            [model for model in catalog_provider.get("models", []) if isinstance(model, dict)]
+            if isinstance(catalog_provider, dict) and isinstance(catalog_provider.get("models"), list)
+            else []
+        )
+        provider_config = configured_providers.get(provider_id)
+        if not isinstance(provider_config, dict):
+            provider_config = {}
+        configured_models = (
+            [model for model in provider_config.get("models", []) if isinstance(model, dict)]
+            if isinstance(provider_config.get("models"), list)
+            else []
+        )
 
+        inherited_api = next(
+            (model["api"] for model in catalog_models if isinstance(model.get("api"), str) and model["api"]),
+            "",
+        )
+        first_configured_model = next(iter(configured_models), {})
+        api = provider_config.get("api", first_configured_model.get("api", inherited_api))
+        if not isinstance(api, str) or not api:
+            continue
 
-def _endpoint_for(provider_id: str) -> tuple[str, str] | None:
-    """Return ``(target_host, base_path)`` for *provider_id*, or None if unknown.
+        provider_base_url = provider_config.get("baseUrl")
+        if not isinstance(provider_base_url, str) or not provider_base_url:
+            provider_base_url = ""
+        configured_by_id = {
+            model["id"]: model for model in configured_models if isinstance(model.get("id"), str) and model["id"]
+        }
 
-    Every provider — openai-codex included — is looked up in the store and split
-    from its ``baseUrl`` (e.g. ``https://api.openai.com/v1`` →
-    ``("api.openai.com", "/v1")``).
-    """
-    prov = _store_providers().get(provider_id)
-    if not prov:
-        return None
-    split = urlsplit(prov[1])
-    if not split.netloc:
-        return None
-    return split.netloc, split.path.rstrip("/")
+        effective_urls: list[str] = []
+        matched_model_ids: set[str] = set()
+        for catalog_model in catalog_models:
+            catalog_base_url = catalog_model.get("baseUrl")
+            model_id = catalog_model.get("id")
+            configured_model = configured_by_id.get(model_id) if isinstance(model_id, str) else None
+            if configured_model is not None:
+                matched_model_ids.add(model_id)
+                model_base_url = configured_model.get("baseUrl")
+            else:
+                model_base_url = ""
+            base_url = model_base_url or provider_base_url or catalog_base_url
+            if isinstance(base_url, str) and base_url:
+                effective_urls.append(base_url)
+
+        for configured_model in configured_models:
+            model_id = configured_model.get("id")
+            if isinstance(model_id, str) and model_id in matched_model_ids:
+                continue
+            base_url = configured_model.get("baseUrl") or provider_base_url
+            if isinstance(base_url, str) and base_url:
+                effective_urls.append(base_url)
+
+        origins = {
+            (split.scheme.lower(), split.netloc.lower())
+            for base_url in effective_urls
+            if (split := urlsplit(base_url)).scheme and split.netloc
+        }
+        if not origins:
+            continue
+        if len(origins) > 1:
+            raise RuntimeError(
+                f"pi provider '{provider_id}' uses multiple upstream origins; configure its model and provider base URLs "
+                "to use one origin before starting a container"
+            )
+        target_hosts[provider_id] = next(iter(origins))[1]
+    return target_hosts
 
 
 def _run_pi_auth_check(provider_id: str) -> dict | None:
@@ -352,8 +398,8 @@ class PiBackend(AgentBackend):
         host:
 
         - ``settings.json`` RW — user config, flows both ways.
-        - ``models-store.json`` RO — pi's model catalogue; RO keeps upstream
-          target resolution host-authoritative.
+        - ``hatchery-host-models-store.json`` RO — host catalog input; the wrapper
+          writes a routed copy into the volume as ``models-store.json``.
         - ``hatchery-host-models.json`` RO — a per-launch sanitized copy of the
           host's custom model configuration, merged into the generated
           ``models.json`` by the wrapper.
@@ -377,7 +423,7 @@ class PiBackend(AgentBackend):
             mounts.append(BindMount(src=settings, dst=f"{agent_dst}/settings.json", mode="RW"))
         store = agent_dir / "models-store.json"
         if store.exists():
-            mounts.append(BindMount(src=store, dst=f"{agent_dst}/models-store.json", mode="RO"))
+            mounts.append(BindMount(src=store, dst=f"{agent_dst}/{_HOST_MODELS_STORE_FILENAME}", mode="RO"))
         host_models = session_dir / _HOST_MODELS_FILENAME
         if host_models.exists():
             mounts.append(BindMount(src=host_models, dst=f"{agent_dst}/{_HOST_MODELS_FILENAME}", mode="RO"))
@@ -405,13 +451,10 @@ class PiBackend(AgentBackend):
         ``container_token`` carrying the real ChatGPT account id, since pi reads
         that id from its local token client-side.
         """
-        store = _store_providers()
+        target_hosts = _provider_target_hosts()
 
         endpoints: list[ProxyEndpoint] = []
-        for provider_id in store:
-            endpoint = _endpoint_for(provider_id)
-            if endpoint is None:
-                continue
+        for provider_id, target_host in target_hosts.items():
             check = _run_pi_auth_check(provider_id)
             if not check or not check.get("credentials"):
                 continue
@@ -426,7 +469,7 @@ class PiBackend(AgentBackend):
                 ProxyEndpoint(
                     key=provider_id,
                     header_mutator=_build_injection_mutator(provider_id, credentials, kind),
-                    target_host=endpoint[0],
+                    target_host=target_host,
                     container_token=container_token,
                     container_oauth=kind == "OAUTH",
                 )
@@ -448,14 +491,14 @@ class PiBackend(AgentBackend):
         real provider id (the env-key form is uppercased/underscored) and
         ``_SHAPE`` tells the wrapper whether to write an api_key- or
         oauth-shaped fake auth entry — derived from the credential the endpoint
-        resolved (``container_oauth``), not a hard-coded provider list.
+        resolved (``container_oauth``), not a hard-coded provider list. The
+        proxy origin deliberately carries no provider path: the wrapper applies
+        it to each model's existing base path.
         """
         prefix = "HATCHERY_PI_" + endpoint.key.upper().replace("-", "_")
-        resolved = _endpoint_for(endpoint.key)
-        base_path = resolved[1] if resolved else ""
         return {
             f"{prefix}_ID": endpoint.key,
-            f"{prefix}_BASEURL": f"http://host.docker.internal:{proxy_port}{base_path}",
+            f"{prefix}_PROXY_ORIGIN": f"http://host.docker.internal:{proxy_port}",
             f"{prefix}_KEY": proxy_token,
             f"{prefix}_SHAPE": "oauth" if endpoint.container_oauth else "api_key",
         }
