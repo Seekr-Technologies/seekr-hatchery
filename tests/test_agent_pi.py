@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -584,7 +585,9 @@ class TestLifecycleHooksAreNoops:
     def test_on_before_container_start_without_host_models(self, tmp_path):
         session_dir = tmp_path / "session"
         session_dir.mkdir()
-        agent.PI.on_before_container_start(session_dir, "proxy-tok", "/workdir")
+        agent.PI.on_before_container_start(
+            SimpleNamespace(session_dir=session_dir), "proxy-tok", "/workdir", runtime=SimpleNamespace()
+        )
         assert list(session_dir.iterdir()) == []
 
     def test_on_before_container_start_sanitizes_host_models(self, home, tmp_path):
@@ -612,7 +615,9 @@ class TestLifecycleHooksAreNoops:
         )
         session_dir = tmp_path / "session"
 
-        agent.PI.on_before_container_start(session_dir, "proxy-tok", "/workdir")
+        agent.PI.on_before_container_start(
+            SimpleNamespace(session_dir=session_dir), "proxy-tok", "/workdir", runtime=SimpleNamespace()
+        )
 
         written = json.loads((session_dir / pi_backend._HOST_MODELS_FILENAME).read_text())
         assert written == {

@@ -1715,7 +1715,8 @@ class TestSessionCancelledRollback:
 
 
 class TestSessionLaunchDockerBranch:
-    def test_runtime_delegates_to_docker_run_session(self, spy_backend, fake_tasks_db, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("kind", ["new", "resume", "finalize"])
+    def test_runtime_delegates_to_docker_run_session(self, spy_backend, fake_tasks_db, tmp_path, monkeypatch, kind):
         """When runtime is set, sessions.launch routes through docker.run_session
         with the right meta + tokens (the native subprocess.run path is bypassed).
         """
@@ -1751,7 +1752,7 @@ class TestSessionLaunchDockerBranch:
         ):
             sessions.launch(
                 meta,
-                kind="new",
+                kind=kind,
                 backend=spy_backend,
                 runtime=runtime_sentinel,
                 main_branch="main",

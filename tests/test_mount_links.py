@@ -1,10 +1,13 @@
 """Unit tests for mount_links.expand_link_mounts — resolving symlinked entries."""
 
 import os
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
 
+import seekr_hatchery.mount as mount
 import seekr_hatchery.mount_links as mount_links
 from seekr_hatchery.mount import BindMount, TmpfsMount, VolumeMount
 
@@ -385,7 +388,215 @@ class TestAlreadyProvided:
         assert mount_links.expand_link_mounts([_bind(skills), inner]) == [_plain(skills), inner]
 
 
+class TestRecursiveLinks:
+    @pytest.mark.parametrize("child_first", [True, False])
+    def test_discovered_parent_is_not_blocked_by_generated_child(
+        self,
+        tmp_path: Path,
+        child_first: bool,
+    ) -> None:
+        package = tmp_path / "external/package"
+        child = package / "subdir"
+        child.mkdir(parents=True)
+        dependency = tmp_path / "external/dependency"
+        dependency.write_text("resource")
+        (package / "dependency").symlink_to(dependency)
+        child_root, parent_root = tmp_path / "child-root", tmp_path / "parent-root"
+        child_root.mkdir()
+        parent_root.mkdir()
+        (child_root / "link").symlink_to(child)
+        (parent_root / "link").symlink_to(package)
+        declared = [
+            BindMount(src=child_root, dst="/inputs/child", follow_links="RECURSIVE"),
+            BindMount(src=parent_root, dst="/inputs/parent", follow_links="RECURSIVE"),
+        ]
+        if not child_first:
+            declared.reverse()
+        expected = [
+            *(m.model_copy(update={"follow_links": False}) for m in declared),
+            BindMount(src=package, dst=str(package)),
+        ]
+        if child_first:
+            expected.append(BindMount(src=child, dst=str(child)))
+        expected.append(BindMount(src=dependency, dst=str(dependency)))
+
+        result = mount_links.expand_link_mounts(declared)
+        assert result == expected
+        assert mount_links.expand_link_mounts(result) == expected
+
+    @pytest.mark.parametrize("follow_links", [True, "SHALLOW", "RECURSIVE"])
+    @pytest.mark.parametrize("absolute", [False, True])
+    def test_nested_targets_use_container_paths(self, tmp_path: Path, follow_links: bool | str, absolute: bool) -> None:
+        host = tmp_path / "host"
+        root = host / "root"
+        package = host / "packages/pkg"
+        dependency = host / "packages/dep"
+        resources = host / "resources"
+        for directory in (root, package, dependency, resources):
+            directory.mkdir(parents=True)
+        document = resources / "readme"
+        document.write_text("dependency")
+        (root / "pkg").symlink_to(package if absolute else "../packages/pkg")
+        (package / "dependency").symlink_to("../dep")
+        (dependency / "readme").symlink_to("../../resources/readme")
+        original = BindMount(src=root, dst="/sandbox/root", mode="RO", follow_links=follow_links)
+        base = str(host) if absolute else "/sandbox"
+        expected = [
+            BindMount(src=root, dst="/sandbox/root", mode="RO"),
+            BindMount(src=package, dst=f"{base}/packages/pkg", mode="RO"),
+        ]
+        if follow_links == "RECURSIVE":
+            expected.extend(
+                [
+                    BindMount(src=dependency, dst=f"{base}/packages/dep", mode="RO"),
+                    BindMount(src=document, dst=f"{base}/resources/readme", mode="RO"),
+                ]
+            )
+
+        result = mount_links.expand_link_mounts([original])
+        assert result == expected
+        assert mount_links.expand_link_mounts(result) == expected
+
+    def test_directory_cycle_stops_without_global_alias_suppression(self, tmp_path: Path) -> None:
+        root = tmp_path / "root"
+        package = tmp_path / "package"
+        root.mkdir()
+        package.mkdir()
+        alias = tmp_path / "alias"
+        alias.symlink_to(package)
+        (root / "package").symlink_to(package)
+        (package / "cycle").symlink_to(alias)
+        # The cycle resolves to the same host directory at a new container
+        # destination. Mount that first hop but do not scan it forever.
+        assert mount_links.expand_link_mounts(
+            [
+                BindMount(src=root, dst=DST, follow_links="RECURSIVE"),
+            ]
+        ) == [
+            BindMount(src=root, dst=DST),
+            BindMount(src=package, dst=str(package)),
+            BindMount(src=package, dst=str(alias)),
+        ]
+
+    def test_aliases_are_scanned_at_each_container_location(self, tmp_path: Path) -> None:
+        root = tmp_path / "host/root"
+        root.mkdir(parents=True)
+        package = tmp_path / "host/pkg"
+        package.mkdir()
+        document = tmp_path / "host/readme"
+        document.write_text("resource")
+        (package / "readme").symlink_to("../readme")
+        # Two different first hops resolve to the same host target.
+        (tmp_path / "host/other").mkdir()
+        (tmp_path / "host/other/alias").symlink_to(package)
+        (root / "one").symlink_to("../pkg")
+        (root / "two").symlink_to("../other/alias")
+        assert mount_links.expand_link_mounts(
+            [
+                BindMount(src=root, dst="/sandbox/root", follow_links="RECURSIVE"),
+            ]
+        ) == [
+            BindMount(src=root, dst="/sandbox/root"),
+            BindMount(src=package, dst="/sandbox/pkg"),
+            BindMount(src=package, dst="/sandbox/other/alias"),
+            BindMount(src=document, dst="/sandbox/readme"),
+            BindMount(src=document, dst="/sandbox/other/readme"),
+        ]
+
+
 # ── The mirrored case (the worktree) ──────────────────────────────────────────
+
+
+@pytest.mark.parametrize("shape", ["file", "directory", "directory_link"])
+@pytest.mark.parametrize("follow_links", [True, "SHALLOW", "RECURSIVE"])
+def test_shadowed_paths_do_not_export_symlink_targets(tmp_path: Path, shape: str, follow_links: bool | str) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    secret = tmp_path / "secret"
+    secret.write_text("host-secret")
+    hidden = root / "hidden"
+    if shape == "file":
+        hidden.symlink_to(secret)
+        overlay = BindMount(src=tmp_path / "safe", dst=f"{DST}/hidden")
+    else:
+        directory = root / "hidden" if shape == "directory" else tmp_path / "external"
+        directory.mkdir()
+        (directory / "credential").symlink_to(secret)
+        if shape == "directory_link":
+            hidden.symlink_to(directory)
+        overlay = VolumeMount(name="local", dst=f"{DST}/hidden")
+    visible = tmp_path / "APPEND_SYSTEM.md"
+    visible.write_text("user instructions")
+    (root / "APPEND_SYSTEM.md").symlink_to(visible)
+
+    assert mount_links.expand_link_mounts([BindMount(src=root, dst=DST, follow_links=follow_links), overlay]) == [
+        _plain(root),
+        overlay,
+        BindMount(src=visible, dst=str(visible)),
+    ]
+
+
+@pytest.mark.parametrize("follow_links", [True, "SHALLOW", "RECURSIVE"])
+@pytest.mark.parametrize("alias_kind", ["directory", "ancestor", "file", "file_target", "volume_child"])
+def test_aliases_cannot_expose_shadowed_host_sources(
+    tmp_path: Path,
+    follow_links: bool | str,
+    alias_kind: str,
+) -> None:
+    root = tmp_path / "agent"
+    root.mkdir()
+    credential = root / "auth.json"
+    external = tmp_path / "private-auth"
+    external.write_text("host-secret")
+    credential.symlink_to(external)
+    sessions = root / "sessions"
+    sessions.mkdir()
+    history = sessions / "history"
+    history.write_text("host-history")
+    targets = {
+        "directory": root,
+        "ancestor": tmp_path,
+        "file": credential,
+        "file_target": external,
+        "volume_child": history,
+    }
+    (root / "alias").symlink_to(targets[alias_kind])
+    visible = tmp_path / "instructions.md"
+    visible.write_text("shared")
+    (root / "instructions").symlink_to(visible)
+    overlays = [
+        BindMount(src=tmp_path / "task-auth", dst=f"{DST}/auth.json"),
+        VolumeMount(name="sessions", dst=f"{DST}/sessions"),
+    ]
+    expected = [BindMount(src=root, dst=DST), *overlays, BindMount(src=visible, dst=str(visible))]
+
+    assert (
+        mount_links.expand_link_mounts(
+            [
+                BindMount(src=root, dst=DST, follow_links=follow_links),
+                *overlays,
+            ]
+        )
+        == expected
+    )
+
+
+def test_aliases_of_unrestricted_nested_binds_still_work(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    nested = root / "nested"
+    nested.mkdir(parents=True)
+    (root / "alias").symlink_to(nested)
+    overlay = BindMount(src=nested, dst=f"{DST}/nested")
+    assert mount_links.expand_link_mounts(
+        [
+            BindMount(src=root, dst=DST, follow_links="RECURSIVE"),
+            overlay,
+        ]
+    ) == [
+        BindMount(src=root, dst=DST),
+        overlay,
+        BindMount(src=nested, dst=str(nested)),
+    ]
 
 
 class TestMirroredTree:
@@ -474,7 +685,9 @@ class TestMirroredTree:
         scan.mkdir()
         (scan / "syslink").symlink_to("/usr/bin/env")
 
-        assert self._companions(scan) == [BindMount(src=Path("/usr/bin/env"), dst="/usr/bin/env", mode="RW")]
+        # Some distributions symlink env to another coreutils installation.
+        # Sources resolve fully; destinations retain the first symlink hop.
+        assert self._companions(scan) == [BindMount(src=Path("/usr/bin/env").resolve(), dst="/usr/bin/env", mode="RW")]
 
     def test_nested_external_target(self, tmp_path, external):
         # Found at any depth, not just among direct entries.
@@ -520,3 +733,166 @@ class TestMirroredTree:
         scan.symlink_to(real, target_is_directory=True)
 
         assert self._companions(scan) == [BindMount(src=target, dst=str(target), mode="RW")]
+
+
+@pytest.mark.parametrize("live", [False, pytest.param(True, marks=pytest.mark.integration)])
+@pytest.mark.parametrize("parent_first", [True, False])
+@pytest.mark.parametrize("parent_mode,child_mode", [("RW", "RO"), ("RO", "RW")])
+@pytest.mark.parametrize("child_follow", [True, "RECURSIVE"])
+def test_generated_child_preserves_mode_and_recursive_dependencies(
+    tmp_path: Path, parent_first: bool, parent_mode: str, child_mode: str, child_follow: bool | str, live: bool
+) -> None:
+    package = tmp_path / "package"
+    child = package / "child"
+    child.mkdir(parents=True)
+    (child / "data").write_text("original")
+    dependency = tmp_path / "dependency"
+    dependency.write_text("resource")
+    (child / "dependency").symlink_to(dependency)
+    parent_root, child_root = tmp_path / "parent-root", tmp_path / "child-root"
+    parent_root.mkdir()
+    child_root.mkdir()
+    (parent_root / "package").symlink_to(package)
+    (child_root / "child").symlink_to(child)
+    parent_mount = BindMount(src=parent_root, dst="/inputs/parent", mode=parent_mode, follow_links="RECURSIVE")
+    child_mount = BindMount(src=child_root, dst="/inputs/child", mode=child_mode, follow_links=child_follow)
+    declared = [parent_mount, child_mount] if parent_first else [child_mount, parent_mount]
+    expected = [
+        *(m.model_copy(update={"follow_links": False}) for m in declared),
+        BindMount(src=package, dst=str(package), mode=parent_mode),
+        BindMount(src=child, dst=str(child), mode=child_mode),
+        BindMount(src=dependency, dst=str(dependency), mode=child_mode),
+    ]
+    result = mount_links.expand_link_mounts(declared)
+    assert result == expected
+    assert mount_links.expand_link_mounts(result) == expected
+    if live:
+        output = _run_link_container(
+            result,
+            "cat /inputs/child/child/dependency; "
+            "if echo changed > /inputs/child/child/data 2>/dev/null; then echo WRITABLE; else echo BLOCKED; fi; "
+            "if echo changed > /inputs/child/child/dependency 2>/dev/null; then echo WRITABLE; else echo BLOCKED; fi",
+        )
+        assert output == {"RO": "resourceBLOCKED\nBLOCKED\n", "RW": "resourceWRITABLE\nWRITABLE\n"}[child_mode]
+        assert (child / "data").read_text() == {"RO": "original", "RW": "changed\n"}[child_mode]
+
+
+@pytest.mark.parametrize("live", [False, pytest.param(True, marks=pytest.mark.integration)])
+@pytest.mark.parametrize("recursive_first", [True, False])
+@pytest.mark.parametrize("shallow", [True, "SHALLOW"])
+def test_recursive_scan_is_not_satisfied_by_shallow_companion(
+    tmp_path: Path, recursive_first: bool, shallow: bool | str, live: bool
+) -> None:
+    package = tmp_path / "package"
+    package.mkdir()
+    dependency = tmp_path / "dependency"
+    dependency.write_text("resource")
+    (package / "dependency").symlink_to(dependency)
+    shallow_root, recursive_root = tmp_path / "shallow", tmp_path / "recursive"
+    shallow_root.mkdir()
+    recursive_root.mkdir()
+    (shallow_root / "package").symlink_to(package)
+    (recursive_root / "package").symlink_to(package)
+    shallow_mount = BindMount(src=shallow_root, dst="/shallow", follow_links=shallow)
+    recursive_mount = BindMount(src=recursive_root, dst="/recursive", follow_links="RECURSIVE")
+    declared = [recursive_mount, shallow_mount] if recursive_first else [shallow_mount, recursive_mount]
+    expected = [
+        *(m.model_copy(update={"follow_links": False}) for m in declared),
+        BindMount(src=package, dst=str(package)),
+        BindMount(src=dependency, dst=str(dependency)),
+    ]
+    result = mount_links.expand_link_mounts(declared)
+    assert result == expected
+    assert mount_links.expand_link_mounts(result) == expected
+    if live:
+        assert _run_link_container(result, "cat /recursive/package/dependency") == "resource"
+
+
+def _run_link_container(mounts: list[mount.Mount], script: str) -> str:
+    if shutil.which("podman") is None or subprocess.run(["podman", "info"], capture_output=True).returncode:
+        pytest.skip("podman unavailable")
+    result = subprocess.run(
+        [
+            "podman",
+            "run",
+            "--rm",
+            *(arg for item in mounts for arg in mount.mount_to_docker_args(item)),
+            "docker.io/library/alpine:3.21",
+            "sh",
+            "-c",
+            script,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout
+
+
+@pytest.mark.parametrize("parent_first", [True, False])
+def test_generated_coverage_requires_matching_source_mapping(tmp_path: Path, parent_first: bool) -> None:
+    first_root = tmp_path / "first/root"
+    second_root = tmp_path / "second/root"
+    package = tmp_path / "first/package"
+    child = tmp_path / "second/package/child"
+    for directory in (first_root, second_root, package / "child", child):
+        directory.mkdir(parents=True)
+    (first_root / "link").symlink_to("../package")
+    (second_root / "link").symlink_to("../package/child")
+    parent = BindMount(src=first_root, dst="/sandbox/root-one", follow_links="RECURSIVE")
+    nested = BindMount(src=second_root, dst="/sandbox/root-two", follow_links="RECURSIVE")
+    declared = [parent, nested] if parent_first else [nested, parent]
+    assert mount_links.expand_link_mounts(declared) == [
+        *(m.model_copy(update={"follow_links": False}) for m in declared),
+        BindMount(src=package, dst="/sandbox/package"),
+        BindMount(src=child, dst="/sandbox/package/child"),
+    ]
+
+
+def test_mixed_scan_strength_preserves_independent_relative_aliases(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    package = tmp_path / "package"
+    root.mkdir()
+    package.mkdir()
+    dependency = tmp_path / "dependency"
+    dependency.write_text("resource")
+    (root / "package").symlink_to("../package")
+    (package / "dependency").symlink_to("../dependency")
+    assert mount_links.expand_link_mounts(
+        [
+            BindMount(src=root, dst="/one/root", follow_links=True),
+            BindMount(src=root, dst="/two/root", follow_links="RECURSIVE"),
+            BindMount(src=root, dst="/three/root", follow_links="RECURSIVE"),
+        ]
+    ) == [
+        BindMount(src=root, dst="/one/root"),
+        BindMount(src=root, dst="/two/root"),
+        BindMount(src=root, dst="/three/root"),
+        BindMount(src=package, dst="/one/package"),
+        BindMount(src=package, dst="/two/package"),
+        BindMount(src=package, dst="/three/package"),
+        BindMount(src=dependency, dst="/two/dependency"),
+        BindMount(src=dependency, dst="/three/dependency"),
+    ]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_exact_generated_destination_source_conflicts_remain_first_wins(tmp_path: Path, reverse: bool) -> None:
+    first_root, second_root = tmp_path / "first/root", tmp_path / "second/root"
+    first_package, second_package = tmp_path / "first/package", tmp_path / "second/package"
+    for directory in (first_root, second_root, first_package, second_package):
+        directory.mkdir(parents=True)
+    (first_root / "link").symlink_to("../package")
+    (second_root / "link").symlink_to("../package")
+    first = BindMount(src=first_root, dst="/sandbox/first", mode="RO", follow_links="RECURSIVE")
+    second = BindMount(src=second_root, dst="/sandbox/second", mode="RW", follow_links="RECURSIVE")
+    declared = [second, first] if reverse else [first, second]
+    winner = (
+        BindMount(src=second_package, dst="/sandbox/package", mode="RW")
+        if reverse
+        else BindMount(src=first_package, dst="/sandbox/package", mode="RO")
+    )
+    assert mount_links.expand_link_mounts(declared) == [
+        *(m.model_copy(update={"follow_links": False}) for m in declared),
+        winner,
+    ]
