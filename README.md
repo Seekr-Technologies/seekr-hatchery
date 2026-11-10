@@ -292,10 +292,11 @@ aliases that would re-expose overlaid host files or directories are not mounted.
 This is generic mount behavior, not an extensions/skills allowlist. Newly added external
 symlinks may require container recreation.
 
-Four paths are overlaid with task-local state:
+Five paths are overlaid with task-local state:
 
 - `auth.json` and `models.json`: task-local files containing generated proxy
   configuration, never the host originals.
+- `models-store.json`: a task-local, proxy-routed model catalog, never the host original.
 - `bin/`: a per-task volume for Linux-compatible binaries.
 - `sessions/`: a per-task volume so sandbox sessions remain separate from host
   sessions and persist across resume.
@@ -303,14 +304,24 @@ Four paths are overlaid with task-local state:
 Before every launch, Hatchery sanitizes host `models.json` into a read-only
 per-task copy. The wrapper merges custom model definitions and provider options
 with proxy URLs and credentials into the task-local `models.json`. Host model
-changes take effect on the next launch or resume. Both generated JSON files use
+changes take effect on the next launch or resume. A read-only per-launch snapshot
+of the host catalog is mounted as `hatchery-host-models-store.json`; the wrapper
+writes its proxy-routed copy into the task-local `models-store.json`.
+Each model retains its own upstream path. A provider's effective model URLs must
+share one origin (scheme, host, effective port); implicit and explicit default
+ports are equivalent, while distinct non-default ports remain distinct. Configure
+separate providers for different origins. Pi runs with `PI_OFFLINE=1` so catalog
+refreshes cannot overwrite proxy routes. For mixed model paths, explicit routed
+chat-model definitions also preserve routing when Pi uses bundled models instead
+of the cached catalog. All three generated JSON files use
 single-file bind mounts: direct writes work, but atomic replacement via
 `rename()` does not.
 
 **Trust boundary:** everything else in `~/.pi/agent` is shared RW, including
 backups such as `models.bak`. Do not keep credential-bearing backups there if
-they must remain inaccessible to the sandbox. Settings, the model catalogue,
-and npm packages are also writable and shared across tasks.
+they must remain inaccessible to the sandbox. Settings and npm packages are
+also writable and shared across tasks; the host model catalog is isolated from
+sandbox writes.
 
 Pi's `migrate_container_state` hook runs after image build and before per-launch
 configuration, mount construction, or volume preparation. Its explicit storage
@@ -337,7 +348,9 @@ during recovery aborts without deleting remaining partial data. Existing
 containers retain their old mounts until recreated.
 
 Pi owns this pathway in `agents/pi/migrations.py`; it is independent of task and
-configuration schema versions. That module documents adding the next sequential
+configuration schema versions. Proxy configuration/catalog files are regenerated
+per launch, so their initialization does not require an additional storage upgrade.
+That module documents adding the next sequential
 upgrade and retiring old steps only when support for their source layout is
 explicitly dropped.
 
