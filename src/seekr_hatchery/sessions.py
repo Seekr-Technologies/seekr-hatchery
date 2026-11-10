@@ -559,7 +559,7 @@ def _mint_proxy_token() -> str:
     client-side if the string isn't a well-formed 3-segment JWT. Shaping the
     token this way lets that check pass; the embedded account id is a dummy
     ("hatchery") that gets overwritten host-side by the real OAuth token's
-    claim once the request reaches the proxy (see agents/pi.py's
+    claim once the request reaches the proxy (see agents/pi/backend.py's
     ``_chatgpt_account_id``/header mutator). The third segment — a
     uuid4 hex, not a real signature — carries the actual entropy and is
     what the proxy's exact-string token check validates against.
