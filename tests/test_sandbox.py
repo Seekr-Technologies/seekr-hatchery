@@ -120,10 +120,10 @@ def no_wt_run(
     session_dir.mkdir(parents=True, exist_ok=True)
     agent.CODEX.on_new_task(session_dir)
     container_cwd = str(no_wt_cwd)
-    agent.CODEX.on_before_container_start(session_dir, "test-proxy-token", container_cwd)
+    no_wt_meta = SessionMeta(name="test-no-wt", repo=str(no_wt_cwd), worktree=str(no_wt_cwd), no_worktree=True)
+    agent.CODEX.on_before_container_start(no_wt_meta, "test-proxy-token", container_cwd, runtime=runtime)
     (Path.home() / ".codex").mkdir(parents=True, exist_ok=True)
 
-    no_wt_meta = SessionMeta(name="test-no-wt", repo=str(no_wt_cwd), worktree=str(no_wt_cwd), no_worktree=True)
     mounts = docker.build_mounts(no_wt_meta, agent.CODEX, session_dir, docker.DockerConfig())
 
     def run(
@@ -234,7 +234,8 @@ def wt_run(
     agent.CODEX.on_new_task(session_dir)
     container_worktree = str(wt_worktree)
     container_repo = str(wt_repo)
-    agent.CODEX.on_before_container_start(session_dir, "test-proxy-token", container_worktree)
+    wt_meta = SessionMeta(name=task_name, repo=str(wt_repo), worktree=str(wt_worktree), no_worktree=False)
+    agent.CODEX.on_before_container_start(wt_meta, "test-proxy-token", container_worktree, runtime=runtime)
     (Path.home() / ".codex").mkdir(parents=True, exist_ok=True)
 
     # Mirror launch_docker: create sentinel files for any .git-root writes.
@@ -251,7 +252,6 @@ def wt_run(
     # worktree's existing .git file (gitdir: <host_repo>/.git/worktrees/<name>)
     # already resolves correctly inside the container.
 
-    wt_meta = SessionMeta(name=task_name, repo=str(wt_repo), worktree=str(wt_worktree), no_worktree=False)
     mounts = docker.build_mounts(
         wt_meta,
         agent.CODEX,

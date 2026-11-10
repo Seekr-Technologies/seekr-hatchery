@@ -12,6 +12,7 @@ import pytest
 
 import seekr_hatchery.agents as agent
 import seekr_hatchery.agents.codex as codex_backend
+import seekr_hatchery.docker as docker
 import seekr_hatchery.mount as mount
 from seekr_hatchery.models import SessionMeta
 
@@ -286,16 +287,18 @@ class TestOnBeforeContainerStart:
     required abstract method on the base."""
 
     def test_is_noop(self, home, tmp_path):
-        session_dir = tmp_path / "session"
-        session_dir.mkdir()
-        agent.CODEX.on_before_container_start(session_dir, "proxy-tok", "/workdir")
+        meta = SessionMeta(name="task", repo=str(tmp_path), worktree=str(tmp_path))
+        session_dir = meta.session_dir
+        session_dir.mkdir(parents=True)
+        agent.CODEX.on_before_container_start(meta, "proxy-tok", "/workdir", runtime=docker.PodmanRuntime())
         assert list(session_dir.iterdir()) == []
 
     def test_is_noop_with_custom_provider(self, home, tmp_path):
         _make_custom_provider_config(home)
-        session_dir = tmp_path / "session"
-        session_dir.mkdir()
-        agent.CODEX.on_before_container_start(session_dir, "proxy-tok", "/workdir")
+        meta = SessionMeta(name="task", repo=str(tmp_path), worktree=str(tmp_path))
+        session_dir = meta.session_dir
+        session_dir.mkdir(parents=True)
+        agent.CODEX.on_before_container_start(meta, "proxy-tok", "/workdir", runtime=docker.PodmanRuntime())
         assert list(session_dir.iterdir()) == []
 
 

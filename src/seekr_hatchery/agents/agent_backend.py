@@ -188,22 +188,18 @@ class AgentBackend(ABC):
     # Hooks fire side-effects at specific points in the launch lifecycle.
     # Firing order for each launch type:
     #
-    #   New task (cmd_new)
-    #     1. on_new_task(session_dir)              one-time task setup
-    #     2. on_before_launch(worktree)             every launch, native + Docker
-    #     3. on_before_container_start(...)         Docker only
-    #     4. background_threads(...) → workers      every launch, threads run
-    #        └─ container runs (workers alive)         for the launch's lifetime
+    #   New task: on_new_task(session_dir), then on_before_launch(worktree).
+    #   Resume: on_before_launch(worktree).
+    #   Finalize: neither of those hooks.
     #
-    #   Resume (cmd_resume)
-    #     1. on_before_launch(worktree)             every launch, native + Docker
-    #     2. on_before_container_start(...)         Docker only
-    #     3. background_threads(...) → workers      every launch
-    #        └─ container runs (workers alive)
-    #
-    #   Finalize (_post_exit_check)
-    #     1. background_threads(...) → workers      every launch
-    #        └─ container runs (workers alive)
+    #   All three then start background_threads(...) workers. For Docker runs:
+    #     1. Build the image.
+    #     2. migrate_container_state(meta, runtime=runtime).
+    #     3. on_before_container_start(meta, ..., runtime=runtime).
+    #     4. Construct mounts and prepare/seed volumes.
+    #     5. Start sidecars and run the container.
+    #   Native runs skip the container hook. Workers stop after the agent exits.
+    #   Standalone sandbox shells do not invoke agent lifecycle hooks.
 
     @staticmethod
     @abstractmethod
@@ -229,19 +225,33 @@ class AgentBackend(ABC):
         """
 
     @staticmethod
+    def migrate_container_state(meta: "SessionMeta", *, runtime: "ContainerRuntime") -> None:
+        """Upgrade persisted backend state after image build, before preparation.
+
+        Called for containerized new, resume and finalize launches. Backends own
+        their version markers, upgrade pathway and recovery; this default is a
+        no-op. Exceptions abort launch before per-launch preparation or seeding.
+        Native launches and standalone sandbox shells do not invoke this hook.
+        """
+
+    @staticmethod
     @abstractmethod
     def on_before_container_start(
-        session_dir: Path,
+        meta: "SessionMeta",
         proxy_token: str,
         workdir: str,
+        *,
+        runtime: "ContainerRuntime",
     ) -> None:
-        """Hook called immediately before the Docker container starts.
+        """Prepare per-launch state after migration, before mounts/volume setup.
 
-        Runs on every Docker launch (new and resume); never in native mode.
-        *session_dir* is the per-task directory (``sessions.task_session_dir``).
-        *proxy_token* is the short-lived token injected as the API key for
-        this launch.  *workdir* is the agent's working directory inside the
-        container.
+        Runs for containerized new, resume, and finalize; never for native runs
+        or standalone sandbox shells. Metadata supplies the task directory and
+        stable image/container identities. The selected runtime is explicit;
+        backends must not rediscover it. Exceptions abort the launch.
+
+        *proxy_token* is the token injected as the API key for this launch.
+        *workdir* is the agent's working directory inside the container.
         """
 
     @staticmethod

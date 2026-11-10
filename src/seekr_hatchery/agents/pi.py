@@ -44,7 +44,7 @@ import subprocess
 import uuid
 from collections.abc import Callable
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlsplit
 
 from seekr_hatchery.agents.agent_backend import (
@@ -55,6 +55,10 @@ from seekr_hatchery.agents.agent_backend import (
 from seekr_hatchery.locks import hatchery_lock
 from seekr_hatchery.mount import BindMount, Mount, VolumeMount
 from seekr_hatchery.utils import npm
+
+if TYPE_CHECKING:
+    from seekr_hatchery.docker import ContainerRuntime
+    from seekr_hatchery.models import SessionMeta
 
 logger = logging.getLogger(__name__)
 
@@ -470,9 +474,11 @@ class PiBackend(AgentBackend):
 
     @staticmethod
     def on_before_container_start(
-        session_dir: Path,
+        meta: "SessionMeta",
         proxy_token: str,
         workdir: str,
+        *,
+        runtime: "ContainerRuntime",
     ) -> None:
         """Materialize host model metadata without exposing its API keys.
 
@@ -481,6 +487,7 @@ class PiBackend(AgentBackend):
         routing and authentication. A per-task copy avoids mounting the host's
         credential-bearing file into the sandbox.
         """
+        session_dir = meta.session_dir
         destination = session_dir / _HOST_MODELS_FILENAME
         config = _read_models_config()
         providers = config.get("providers")

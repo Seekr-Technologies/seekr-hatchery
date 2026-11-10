@@ -13,6 +13,7 @@ import seekr_hatchery.constants as constants
 import seekr_hatchery.docker as docker
 import seekr_hatchery.mount as mount
 import seekr_hatchery.mount_links as mount_links
+import seekr_hatchery.seeded_volumes as seeded_volumes
 from seekr_hatchery.models import KubectlConfig, KubectlContext, SessionMeta
 
 
@@ -1951,3 +1952,96 @@ class TestEnsureHelpersNoPrompt:
         assert created is True
         assert path.exists()
         assert "{{AGENT_INSTALL}}" not in path.read_text()
+
+
+@pytest.mark.parametrize("failure_phase", ["NONE", "MIGRATION", "PREPARATION"])
+def test_container_migration_precedes_preparation_mounts_and_seeding(
+    tmp_path: Path, spy_backend: agent.AgentBackend, monkeypatch: pytest.MonkeyPatch, failure_phase: str
+) -> None:
+    events: list[str] = []
+    meta = _no_wt_meta(tmp_path)
+    staged = meta.session_dir / "backend.json"
+
+    def build_image(*args: object, **kwargs: object) -> bool:
+        events.append("build")
+        return True
+
+    def seed(ctx: mount.SeedContext) -> dict[str, bytes]:
+        events.append("seed")
+        return {"state": b"initial"}
+
+    class Backend(type(spy_backend)):
+        def proxy_endpoints(self) -> list[agent.ProxyEndpoint]:
+            return []
+
+        def migrate_container_state(self, received_meta: SessionMeta, *, runtime: docker.ContainerRuntime) -> None:
+            events.append("migrate")
+            assert (received_meta, runtime) == (meta, selected_runtime)
+            if failure_phase == "MIGRATION":
+                raise RuntimeError("migration failed")
+
+        def on_before_container_start(
+            self,
+            received_meta: SessionMeta,
+            proxy_token: str,
+            workdir: str,
+            *,
+            runtime: docker.ContainerRuntime,
+        ) -> None:
+            events.append("prepare")
+            assert (received_meta, proxy_token, workdir, runtime) == (meta, "token", str(tmp_path), selected_runtime)
+            if failure_phase == "PREPARATION":
+                raise RuntimeError("preparation failed")
+            staged.write_text("{}")
+
+        def construct_mounts(self, session_dir: Path) -> list[mount.Mount]:
+            events.append("mounts")
+            assert staged.read_text() == "{}"
+            return [
+                mount.BindMount(src=staged, dst="/backend/config"),
+                mount.VolumeMount(name="state", dst="/backend/state", seed=seed),
+            ]
+
+    class Runtime(docker.DockerRuntime):
+        def run(self, spec: docker.ContainerSpec, **kwargs: object) -> None:
+            events.append("run")
+            assert [m for m in spec.mounts if m.dst.startswith("/backend/")] == [
+                mount.BindMount(src=staged, dst="/backend/config"),
+                mount.VolumeMount(name=seeded_volumes.volume_name(meta, "state"), dst="/backend/state", seed=seed),
+            ]
+
+    def volume_cli(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+        action = cmd[2]
+        events.append(f"volume-{action}")
+        return subprocess.CompletedProcess(cmd, 1 if action == "inspect" else 0, stdout="", stderr="")
+
+    def seed_cli(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        events.append("seed-helper")
+        return subprocess.CompletedProcess(cmd, 0, stdout=b"", stderr=b"")
+
+    selected_runtime = Runtime()
+    monkeypatch.setattr(docker, "build_docker_image", build_image)
+    monkeypatch.setattr(seeded_volumes, "run", volume_cli)
+    monkeypatch.setattr(subprocess, "run", seed_cli)
+    backend = Backend()
+    config = docker.DockerConfig(clipboard_images=False)
+    if failure_phase != "NONE":
+        with pytest.raises(RuntimeError, match=f"{failure_phase.lower()} failed"):
+            docker.run_session(meta, backend, ["agent"], config, proxy_token="token", runtime=selected_runtime)
+        expected = ["build", "migrate"]
+        if failure_phase == "PREPARATION":
+            expected.append("prepare")
+        assert events == expected
+    else:
+        docker.run_session(meta, backend, ["agent"], config, proxy_token="token", runtime=selected_runtime)
+        assert events == [
+            "build",
+            "migrate",
+            "prepare",
+            "mounts",
+            "volume-inspect",
+            "volume-create",
+            "seed",
+            "seed-helper",
+            "run",
+        ]
