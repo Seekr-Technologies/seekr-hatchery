@@ -1,5 +1,6 @@
-"""Sandbox image builds and build-output streaming."""
+"""Sandbox image reuse, builds, and build-output streaming."""
 
+import hashlib
 import logging
 import re
 import shutil
@@ -69,6 +70,9 @@ def _stream_build(cmd: list[str], cwd: Path, n_lines: int = 4) -> tuple[int, lis
     return proc.returncode, all_lines
 
 
+_BUILD_FINGERPRINT_LABEL = "io.seekr-hatchery.build-fingerprint"
+
+
 def build_image(
     repo: Path,
     hatchery_dir: Path,
@@ -78,27 +82,89 @@ def build_image(
     no_cache: bool = False,
     exit_on_error: bool = True,
 ) -> bool:
-    """Build the sandbox image from the hatchery_dir's Dockerfile.<agent>.
+    """Reuse a matching sandbox image, or build from Dockerfile.<agent>.
+
+    A shared cache tag fingerprints the agent and Dockerfile bytes (the build
+    context is empty). Matching cache images are tagged for the session without
+    invoking the builder. ``no_cache`` bypasses reuse and the runtime layer
+    cache, refreshing both tags; remote inputs are not fingerprinted.
 
     Using the hatchery_dir copy means Dockerfile changes made as part of a task
     are isolated to that task's image and merge into main with the task.
 
     Caller resolves *image_name* — typically ``sessions.image_name(repo, name)``.
 
-    Returns True on a successful build. On failure the default is to print the
+    Returns True on a successful build or reuse. On failure the default is to print the
     error and ``sys.exit(1)``; pass ``exit_on_error=False`` to return False
     instead so the caller can recover (e.g. revert a Dockerfile edit).
     """
     runtime = runtime or sandbox_runtime.DockerRuntime()
     image = image_name
     worktree_dockerfile = scaffold.dockerfile_path(hatchery_dir, backend)
+    try:
+        dockerfile_bytes = worktree_dockerfile.read_bytes()
+    except OSError as exc:
+        ui.error(f"Cannot read Dockerfile: {worktree_dockerfile}\n  {exc}")
+        if exit_on_error:
+            sys.exit(1)
+        return False
+
+    # Version the fingerprint so future build-input changes can invalidate it.
+    fingerprint = hashlib.sha256(b"v1\0" + backend.kind.encode() + b"\0" + dockerfile_bytes).hexdigest()
+    cache_image = f"hatchery/cache:{fingerprint}"
+    if not no_cache:
+        inspected = subprocess.run(
+            [
+                runtime.binary,
+                "image",
+                "inspect",
+                "--format",
+                f'{{{{ index .Config.Labels "{_BUILD_FINGERPRINT_LABEL}" }}}}',
+                cache_image,
+            ],
+            cwd=repo,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+        )
+        if inspected.returncode == 0 and inspected.stdout.strip() == fingerprint:
+            tagged = subprocess.run(
+                [runtime.binary, "tag", cache_image, image],
+                cwd=repo,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+            )
+            if tagged.returncode != 0:
+                ui.error(f"{runtime.binary} tag failed.\n  Source: {cache_image}\n  Target: {image}")
+                if tagged.stderr.strip():
+                    ui.info(tagged.stderr.strip())
+                if exit_on_error:
+                    sys.exit(1)
+                return False
+            logger.debug("Reusing %s image %r from %r", runtime.binary, image, cache_image)
+            ui.info(click.style(f"Using cached sandbox image '{image}'", fg="magenta", bold=True))
+            ui.success("  Sandbox image ready.")
+            return True
+
     # Use a temporary empty directory as the build context — NOT the repo root.
     # The generated Dockerfile has no COPY/ADD from context (only multi-stage
     # COPY --from=), so an empty context is correct and avoids tar-ing the
     # entire repo (or .hatchery/worktrees/) which can hang indefinitely on
     # large repositories.
     with tempfile.TemporaryDirectory(prefix="hatchery-build-") as empty_context:
-        build_cmd = [runtime.binary, "build", "-f", str(worktree_dockerfile), "-t", image]
+        build_cmd = [
+            runtime.binary,
+            "build",
+            "-f",
+            str(worktree_dockerfile),
+            "-t",
+            image,
+            "-t",
+            cache_image,
+            "--label",
+            f"{_BUILD_FINGERPRINT_LABEL}={fingerprint}",
+        ]
         if no_cache:
             build_cmd.append("--no-cache")
         build_cmd.append(empty_context)
