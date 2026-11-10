@@ -12,7 +12,7 @@ import pytest
 
 import seekr_hatchery.agents as agent
 import seekr_hatchery.agents.pi as pi_backend
-import seekr_hatchery.mount as mount
+import seekr_hatchery.sandbox.mount_types as mount
 
 # ---------------------------------------------------------------------------
 # Helpers

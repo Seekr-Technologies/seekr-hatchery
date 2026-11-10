@@ -7,10 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from seekr_hatchery.mount import Mount
+import seekr_hatchery.sandbox.mount_types as mount_types
 
 if TYPE_CHECKING:
-    from seekr_hatchery.docker import ContainerRuntime
+    import seekr_hatchery.sandbox.runtime as sandbox_runtime
     from seekr_hatchery.models import SessionMeta
 
 # Home directory of the non-root user inside every sandbox container.
@@ -152,16 +152,16 @@ class AgentBackend(ABC):
 
     @staticmethod
     @abstractmethod
-    def construct_mounts(session_dir: Path) -> list[Mount]:
+    def construct_mounts(session_dir: Path) -> list[mount_types.Mount]:
         """Return the agent's container mounts.
 
         *session_dir* is ``sessions.task_session_dir(repo, name)`` — the per-task
         directory where ``on_new_task`` may have written config files.
 
-        Return ``Mount`` objects covering both bind mounts (mode ``"ro"`` /
+        Return ``mount_types.Mount`` objects covering both bind mounts (mode ``"ro"`` /
         ``"rw"``) and any tmpfs paths (mode ``"tmpfs"``, ``src=None``).  Common
         mounts shared by all agents (.gitconfig, uv cache) are added by
-        ``docker._default_home_mounts()`` — do not include them here.
+        ``sandbox.mounts.build_mounts()`` — do not include them here.
         """
 
     @staticmethod
@@ -249,7 +249,7 @@ class AgentBackend(ABC):
         meta: "SessionMeta",
         *,
         docker: bool,
-        runtime: "ContainerRuntime | None",
+        runtime: "sandbox_runtime.ContainerRuntime | None",
         launch_start: float,
         stop: threading.Event,
     ) -> list[Callable[[], None]]:

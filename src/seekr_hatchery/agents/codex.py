@@ -17,17 +17,17 @@ from urllib.parse import urlsplit
 
 import tomli_w
 
+import seekr_hatchery.sandbox.mount_types as mount_types
 from seekr_hatchery.agents.agent_backend import (
     CONTAINER_HOME,
     AgentBackend,
     ProxyEndpoint,
 )
 from seekr_hatchery.locks import hatchery_lock
-from seekr_hatchery.mount import BindMount, Mount, SeedContext, VolumeMount
 from seekr_hatchery.utils import npm
 
 if TYPE_CHECKING:
-    from seekr_hatchery.docker import ContainerRuntime
+    import seekr_hatchery.sandbox.runtime as sandbox_runtime
     from seekr_hatchery.models import SessionMeta
 
 logger = logging.getLogger(__name__)
@@ -116,7 +116,7 @@ def _probe_session_id(
     meta: "SessionMeta",
     *,
     docker: bool,
-    runtime: "ContainerRuntime | None",
+    runtime: "sandbox_runtime.ContainerRuntime | None",
     launch_start: float,
 ) -> str | None:
     """Return codex's session UUID for this launch, or ``None`` if not yet visible.
@@ -135,7 +135,7 @@ def _probe_session_id(
 
 def _probe_session_id_docker(
     meta: "SessionMeta",
-    runtime: "ContainerRuntime",
+    runtime: "sandbox_runtime.ContainerRuntime",
     launch_start: float,
 ) -> str | None:
     cmd = [runtime.binary, "exec", meta.container_name, "sh", "-c", _STAT_NEWEST_ROLLOUT_SH]
@@ -208,7 +208,7 @@ def _make_session_id_poller(
     meta: "SessionMeta",
     *,
     docker: bool,
-    runtime: "ContainerRuntime | None",
+    runtime: "sandbox_runtime.ContainerRuntime | None",
     launch_start: float,
     stop: threading.Event,
 ) -> Callable[[], None]:
@@ -533,7 +533,7 @@ class CodexBackend(AgentBackend):
         return CodexBackend._read_codex_creds()[1]
 
     @staticmethod
-    def construct_mounts(session_dir: Path) -> list[Mount]:
+    def construct_mounts(session_dir: Path) -> list[mount_types.Mount]:
         """Per-task volume for ~/.codex + bind mounts for cross-task state.
 
         The volume is seeded with ``auth.json`` and ``config.toml`` so the
@@ -576,7 +576,7 @@ class CodexBackend(AgentBackend):
         people keep in a dotfiles repo and symlink into place, and container
         ``$HOME`` does not mirror host ``$HOME``, so a symlinked entry inside
         one would otherwise dangle in the sandbox even with its parent
-        mounted.  See :mod:`seekr_hatchery.mount_links`.  The flag only adds
+        mounted.  See :mod:`seekr_hatchery.sandbox.mount_links`.  The flag only adds
         mounts; these ones are unchanged, so the directories are still bound
         whole and codex can create new entries in ``memories`` as before.
 
@@ -589,8 +589,8 @@ class CodexBackend(AgentBackend):
         stating once for the whole group rather than splitting the loop over
         an implementation detail of the mechanism.
         """
-        mounts: list[Mount] = [
-            VolumeMount(
+        mounts: list[mount_types.Mount] = [
+            mount_types.VolumeMount(
                 name="codex-dir",
                 dst=f"{CONTAINER_HOME}/.codex",
                 seed=CodexBackend._seed_codex_dir,
@@ -601,7 +601,7 @@ class CodexBackend(AgentBackend):
             p = host_codex / name
             if p.exists():
                 mounts.append(
-                    BindMount(
+                    mount_types.BindMount(
                         src=p,
                         dst=f"{CONTAINER_HOME}/.codex/{name}",
                         mode="RW",
@@ -611,11 +611,11 @@ class CodexBackend(AgentBackend):
 
         catalog = host_codex / "model-catalog.json"
         if catalog.exists():
-            mounts.append(BindMount(src=catalog, dst=_CONTAINER_MODEL_CATALOG, mode="RO"))
+            mounts.append(mount_types.BindMount(src=catalog, dst=_CONTAINER_MODEL_CATALOG, mode="RO"))
         return mounts
 
     @staticmethod
-    def _seed_codex_dir(ctx: SeedContext) -> Mapping[str, bytes]:
+    def _seed_codex_dir(ctx: mount_types.SeedContext) -> Mapping[str, bytes]:
         """Initial contents of the per-task ~/.codex volume.
 
         ``auth.json`` and ``config.toml`` are synthesised; codex populates
@@ -815,7 +815,7 @@ class CodexBackend(AgentBackend):
         """No-op — the container-side ``~/.codex`` is built by the volume seed.
 
         ``_seed_codex_dir`` synthesises both ``auth.json`` and
-        ``config.toml`` from ``SeedContext``, which carries the same
+        ``config.toml`` from ``mount_types.SeedContext``, which carries the same
         *proxy_token* and *workdir* this hook receives.  Nothing needs to
         be staged on the host beforehand.
         """
@@ -825,7 +825,7 @@ class CodexBackend(AgentBackend):
         meta: "SessionMeta",
         *,
         docker: bool,
-        runtime: "ContainerRuntime | None",
+        runtime: "sandbox_runtime.ContainerRuntime | None",
         launch_start: float,
         stop: threading.Event,
     ) -> list[Callable[[], None]]:

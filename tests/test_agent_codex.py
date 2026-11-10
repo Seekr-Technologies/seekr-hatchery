@@ -12,7 +12,7 @@ import pytest
 
 import seekr_hatchery.agents as agent
 import seekr_hatchery.agents.codex as codex_backend
-import seekr_hatchery.mount as mount
+import seekr_hatchery.sandbox.mount_types as mount
 from seekr_hatchery.models import SessionMeta
 
 # codex's container_env ignores its endpoint (single upstream); tests pass this.
@@ -931,7 +931,7 @@ class TestProbeSessionIdNative:
 
 class TestProbeSessionIdDocker:
     def test_shells_out_to_docker_exec(self):
-        from seekr_hatchery.docker import DockerRuntime
+        from seekr_hatchery.sandbox.runtime import DockerRuntime
 
         uuid = "019f1e3c-5b9a-76f3-b6f7-e5f967162066"
         launch = time.time()
@@ -947,7 +947,7 @@ class TestProbeSessionIdDocker:
         assert any("my-task" in part for part in cmd)
 
     def test_nonzero_exit_returns_none(self):
-        from seekr_hatchery.docker import DockerRuntime
+        from seekr_hatchery.sandbox.runtime import DockerRuntime
 
         with patch("subprocess.run", return_value=MagicMock(returncode=1, stdout="")):
             assert (
@@ -956,7 +956,7 @@ class TestProbeSessionIdDocker:
             )
 
     def test_empty_stdout_returns_none(self):
-        from seekr_hatchery.docker import DockerRuntime
+        from seekr_hatchery.sandbox.runtime import DockerRuntime
 
         with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="")):
             assert (
@@ -965,7 +965,7 @@ class TestProbeSessionIdDocker:
             )
 
     def test_timeout_returns_none(self):
-        from seekr_hatchery.docker import DockerRuntime
+        from seekr_hatchery.sandbox.runtime import DockerRuntime
 
         with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd=["docker"], timeout=2)):
             assert (
@@ -976,7 +976,7 @@ class TestProbeSessionIdDocker:
     def test_stale_rollout_returns_none(self):
         # File mtime is well before launch_start (dirty volume from a
         # previous task run) — must be filtered.
-        from seekr_hatchery.docker import DockerRuntime
+        from seekr_hatchery.sandbox.runtime import DockerRuntime
 
         launch = time.time()
         completed = MagicMock(
@@ -992,7 +992,7 @@ class TestProbeSessionIdDocker:
     def test_slight_negative_skew_still_accepted(self):
         # Container clock is a couple of seconds behind host — still
         # accepted thanks to the 5s tolerance window.
-        from seekr_hatchery.docker import DockerRuntime
+        from seekr_hatchery.sandbox.runtime import DockerRuntime
 
         uuid = "019f1e3c-5b9a-76f3-b6f7-e5f967162066"
         launch = time.time()
@@ -1003,7 +1003,7 @@ class TestProbeSessionIdDocker:
 
     def test_unparseable_stdout_returns_none(self):
         # Missing space between mtime and path, or otherwise garbage.
-        from seekr_hatchery.docker import DockerRuntime
+        from seekr_hatchery.sandbox.runtime import DockerRuntime
 
         with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="not-a-stat-line\n")):
             assert (
@@ -1012,7 +1012,7 @@ class TestProbeSessionIdDocker:
             )
 
     def test_non_numeric_mtime_returns_none(self):
-        from seekr_hatchery.docker import DockerRuntime
+        from seekr_hatchery.sandbox.runtime import DockerRuntime
 
         with patch(
             "subprocess.run",
@@ -1029,7 +1029,7 @@ class TestProbeSessionIdDocker:
     def test_malformed_filename_returns_none(self):
         # File exists and mtime is fresh, but the filename doesn't carry
         # a UUID — we must not persist garbage.
-        from seekr_hatchery.docker import DockerRuntime
+        from seekr_hatchery.sandbox.runtime import DockerRuntime
 
         launch = time.time()
         stdout = f"{launch + 1} /home/hatchery/.codex/sessions/2026/07/01/rollout-oops.jsonl\n"

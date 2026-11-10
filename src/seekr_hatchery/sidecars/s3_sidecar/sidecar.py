@@ -2,8 +2,8 @@
 
 from pathlib import Path
 
+import seekr_hatchery.sandbox.mount_types as mount_types
 from seekr_hatchery.agents import CONTAINER_HOME
-from seekr_hatchery.mount import BindMount
 from seekr_hatchery.sidecars import base
 from seekr_hatchery.sidecars.s3_sidecar import credentials, proxy
 from seekr_hatchery.sidecars.s3_sidecar.config import S3Config
@@ -35,7 +35,7 @@ class S3Sidecar(base.SandboxSidecar):
         server = self._cm.__enter__()
         client_dir = server.write_client_files(self._session_dir / "aws")
         return base.SidecarContribution(
-            mounts=[BindMount(src=client_dir, dst=f"{CONTAINER_HOME}/.aws", mode="RO")],
+            mounts=[mount_types.BindMount(src=client_dir, dst=f"{CONTAINER_HOME}/.aws", mode="RO")],
             env=server.container_env(self._config.default_alias),
             needs_host_gateway=True,
         )

@@ -1,12 +1,10 @@
-"""Unit tests for mount_links.expand_link_mounts — resolving symlinked entries."""
-
 import os
 from pathlib import Path
 
 import pytest
 
-import seekr_hatchery.mount_links as mount_links
-from seekr_hatchery.mount import BindMount, TmpfsMount, VolumeMount
+import seekr_hatchery.sandbox.mount_links as mount_links
+from seekr_hatchery.sandbox.mount_types import BindMount, TmpfsMount, VolumeMount
 
 DST = "/home/hatchery/.claude/skills"
 
@@ -277,12 +275,12 @@ class TestSkipped:
 
 
 class TestSystemPathsAreNotThisModulesJob:
-    """Expansion emits these; ``docker._validate_mounts`` drops them.
+    """Expansion emits these; ``sandbox_mounts._validate_mounts`` drops them.
 
     Kept here as the expansion half of the seam — a bad mount is equally
     reachable by asking for one directly, so the decision belongs to one
     validation pass over the finished list, not to each producer. The drop
-    itself is asserted in ``test_docker.py::TestValidateMounts``.
+    itself is asserted in ``sandbox/test_mounts.py::TestValidateMounts``.
     """
 
     def test_system_path_target_is_emitted_not_filtered(self, home):
@@ -469,7 +467,7 @@ class TestMirroredTree:
 
     def test_system_path_target_is_emitted_not_filtered(self, tmp_path):
         # The old scanner dropped this itself; now it survives expansion and
-        # docker._validate_mounts drops it. Same outcome at launch, one place.
+        # sandbox_mounts._validate_mounts drops it. Same outcome at launch, one place.
         scan = tmp_path / "worktree"
         scan.mkdir()
         (scan / "syslink").symlink_to("/usr/bin/env")

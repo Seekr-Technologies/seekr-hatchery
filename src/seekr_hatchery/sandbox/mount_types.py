@@ -1,4 +1,4 @@
-"""Container mount descriptors shared by ``agents`` and ``docker``.
+"""Container mount descriptors shared by ``agents`` and ``sandbox.launch``.
 
 Mounts are a tagged union of three Pydantic models — ``BindMount`` /
 ``VolumeMount`` / ``TmpfsMount``, discriminated on ``kind``. The union
@@ -16,12 +16,10 @@ Why a tagged union (and why Pydantic):
   tools narrow the variant; Pydantic's discriminator handles
   round-trips when a Mount comes from YAML.
 
-Mounts are agent-neutral (both ``agents/*`` and ``docker.py`` traffic
-in them), so they live at the top of the package, not inside
-``agents/``.
+These dependency-leaf descriptors can be imported by agents and sidecars
+without initializing sandbox launch coordination.
 """
 
-import shlex
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -70,7 +68,7 @@ class BindMount(BaseModel):
     a group of config paths without checking which of them are files.
 
     Links are looked for at any depth, pruning ``.git``, ``node_modules``
-    and similar (see :data:`seekr_hatchery.mount_links.SKIP_DIRS`), so a
+    and similar (see :data:`seekr_hatchery.sandbox.mount_links.SKIP_DIRS`), so a
     link nested inside a real subdirectory resolves too. That costs a walk
     of the tree per launch, which is why it is opt-in rather than always on.
 
@@ -78,7 +76,7 @@ class BindMount(BaseModel):
     nothing is mounted at a link's own path, so the link stays a link. The
     flag only asks for *additional* mounts that make the links'
     destinations exist. It is purely declarative — the mechanism lives in
-    :func:`seekr_hatchery.mount_links.expand_link_mounts`, which every
+    :func:`seekr_hatchery.sandbox.mount_links.expand_link_mounts`, which every
     mount-building path calls, so this module stays free of filesystem
     knowledge and any mount source (agent backends, ``docker.yaml``
     entries, ``--include``) can opt in with one field.
@@ -154,73 +152,3 @@ Mount = Annotated[
     BindMount | VolumeMount | TmpfsMount,
     Field(discriminator="kind"),
 ]
-
-
-def _sidecar_dir(dst: str) -> str:
-    """Return the container-side sidecar directory path for a file-shaped VolumeMount.
-
-    Named volumes always present as directories to the kernel, so a file-shaped
-    mount (``is_file=True``) cannot be mounted directly at ``dst``.  Instead we
-    mount the volume at ``dst + ".vol"`` and create a symlink from ``dst`` into
-    that directory before the agent starts (see ``file_mount_prestart_cmds``).
-    """
-    return dst + ".vol"
-
-
-def mount_to_docker_args(m: BindMount | VolumeMount | TmpfsMount) -> list[str]:
-    """Convert a Mount into Docker/Podman CLI flag(s) for ``run``.
-
-    For ``VolumeMount``, ``m.name`` is used verbatim as the runtime
-    volume name — the launch path resolves the per-task name before
-    calling this function (via ``model_copy(update={"name": ...})``).
-
-    File-shaped volume mounts (``is_file=True``) mount the volume at a sidecar
-    directory (``dst + ".vol"``) rather than at ``dst`` directly.  Docker and
-    Podman both treat named-volume mount points as directories, so mounting at
-    the file path itself would shadow any parent directory with an empty dir.
-    A symlink from ``dst`` into the sidecar is injected at container startup via
-    ``file_mount_prestart_cmds``.
-    """
-    if isinstance(m, TmpfsMount):
-        return ["--tmpfs", m.dst]
-    if isinstance(m, BindMount):
-        return ["-v", f"{m.src}:{m.dst}:{m.mode.lower()}"]
-    if isinstance(m, VolumeMount):
-        if m.is_file:
-            sidecar = _sidecar_dir(m.dst)
-            return ["-v", f"{m.name}:{sidecar}:{m.mode.lower()}"]
-        return ["-v", f"{m.name}:{m.dst}:{m.mode.lower()}"]
-    raise TypeError(f"unknown mount type: {type(m).__name__}")
-
-
-def file_mount_prestart_cmds(mounts: list[Mount]) -> list[str]:
-    """Return shell commands that wire up symlinks for ``is_file=True`` VolumeMounts.
-
-    For each file-shaped volume mount, the volume is mounted at a sidecar
-    directory (``dst + ".vol"``).  The agent expects the file at ``dst``, so we
-    emit a ``ln -sf`` command that creates (or replaces) that symlink before the
-    agent process starts.  These commands must run inside the container before
-    the agent binary is exec'd.
-    """
-    cmds = []
-    for m in mounts:
-        if isinstance(m, VolumeMount) and m.is_file:
-            sidecar = _sidecar_dir(m.dst)
-            filename = Path(m.dst).name
-            cmds.append(f"ln -sf {sidecar}/{filename} {m.dst}")
-    return cmds
-
-
-def wrap_cmd_for_file_mounts(cmd: list[str], mounts: list[Mount]) -> list[str]:
-    """Wrap *cmd* with the symlink setup needed by any file-shaped VolumeMounts.
-
-    Returns *cmd* unchanged when no file-shaped mounts are present. Otherwise
-    returns ``["sh", "-c", "<symlink-setup> && exec <cmd>"]`` so the symlinks
-    are in place before the agent process starts. Used by the launch path for
-    both the agent command and any command-override path.
-    """
-    prestart = file_mount_prestart_cmds(mounts)
-    if not prestart:
-        return cmd
-    setup = " && ".join(prestart)
-    return ["sh", "-c", f"{setup} && exec {shlex.join(cmd)}"]

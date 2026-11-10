@@ -927,8 +927,8 @@ class TestSessionCreateTask:
 
         Migrated from CLI test_no_flags_dockerfile_exists_at_root_not_committed:
         a pre-existing Dockerfile (ensure returns False) is not re-committed."""
-        monkeypatch.setattr(sessions.docker, "ensure_dockerfile", MagicMock(return_value=False))
-        monkeypatch.setattr(sessions.docker, "ensure_docker_config", MagicMock(return_value=False))
+        monkeypatch.setattr(sessions.sandbox_scaffold, "ensure_dockerfile", MagicMock(return_value=False))
+        monkeypatch.setattr(sessions.sandbox_scaffold, "ensure_config", MagicMock(return_value=False))
         spy = MagicMock()
         monkeypatch.setattr(sessions, "_commit_docker_files", spy)
         sessions.create(name="t", repo=git_repo, type="task", backend=agent.CODEX, objective="x")
@@ -940,7 +940,7 @@ class TestSessionCreateTask:
         Migrated from CLI test_keyboard_interrupt_cleans_up_worktree — the
         rollback is create()'s own KeyboardInterrupt handler, not CLI logic."""
         # ensure_dockerfile runs after create_worktree, inside create()'s try.
-        monkeypatch.setattr(sessions.docker, "ensure_dockerfile", MagicMock(side_effect=KeyboardInterrupt))
+        monkeypatch.setattr(sessions.sandbox_scaffold, "ensure_dockerfile", MagicMock(side_effect=KeyboardInterrupt))
         with pytest.raises(KeyboardInterrupt):
             sessions.create(name="t", repo=git_repo, type="task", backend=agent.CODEX, objective="x")
         assert not (git_repo / ".hatchery" / "worktrees" / "t").exists()
@@ -1042,8 +1042,8 @@ class TestPrepareSandbox:
         mdf = MagicMock(return_value=df_created)
         mdc = MagicMock(return_value=dc_created)
         mcommit = MagicMock()
-        monkeypatch.setattr(sessions.docker, "ensure_dockerfile", mdf)
-        monkeypatch.setattr(sessions.docker, "ensure_docker_config", mdc)
+        monkeypatch.setattr(sessions.sandbox_scaffold, "ensure_dockerfile", mdf)
+        monkeypatch.setattr(sessions.sandbox_scaffold, "ensure_config", mdc)
         monkeypatch.setattr(sessions, "_commit_docker_files", mcommit)
         return mdf, mdc, mcommit
 
@@ -1716,7 +1716,7 @@ class TestSessionCancelledRollback:
 
 class TestSessionLaunchDockerBranch:
     def test_runtime_delegates_to_docker_run_session(self, spy_backend, fake_tasks_db, tmp_path, monkeypatch):
-        """When runtime is set, sessions.launch routes through docker.run_session
+        """When runtime is set, sessions.launch routes through sandbox_launch.run_session
         with the right meta + tokens (the native subprocess.run path is bypassed).
         """
         wt = tmp_path / "wt"
@@ -1743,10 +1743,10 @@ class TestSessionLaunchDockerBranch:
 
         with (
             patch(
-                "seekr_hatchery.sessions.docker.launch_context",
+                "seekr_hatchery.sandbox.launch.launch_context",
                 return_value=(fake_config, ["docker"], "/repo/.hatchery/worktrees/t"),
             ),
-            patch("seekr_hatchery.sessions.docker.run_session") as mock_run_session,
+            patch("seekr_hatchery.sandbox.launch.run_session") as mock_run_session,
             patch("seekr_hatchery.sessions.get_or_create_proxy_token", return_value="tok"),
         ):
             sessions.launch(
@@ -1758,7 +1758,7 @@ class TestSessionLaunchDockerBranch:
                 session_id="sid",
             )
 
-        # docker.run_session was called with meta + the proxy token.
+        # sandbox_launch.run_session was called with meta + the proxy token.
         mock_run_session.assert_called_once()
         kwargs = mock_run_session.call_args[1]
         assert kwargs["proxy_token"] == "tok"

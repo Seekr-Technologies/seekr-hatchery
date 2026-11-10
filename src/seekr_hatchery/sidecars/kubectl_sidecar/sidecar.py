@@ -6,9 +6,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import seekr_hatchery.agents as agent
+import seekr_hatchery.sandbox.mount_types as mount_types
 import seekr_hatchery.ui as ui
 from seekr_hatchery.models import KubectlConfig
-from seekr_hatchery.mount import BindMount
 from seekr_hatchery.sidecars import base
 from seekr_hatchery.sidecars.kubectl_sidecar import kubeconfig, kubectl_proc, rbac_proxy
 
@@ -79,7 +79,9 @@ class KubectlSidecar(base.SandboxSidecar):
         )
         kubeconfig_path.chmod(0o600)
         return base.SidecarContribution(
-            mounts=[BindMount(src=str(kubeconfig_path), dst=f"{agent.CONTAINER_HOME}/.kube/config", mode="RO")],
+            mounts=[
+                mount_types.BindMount(src=str(kubeconfig_path), dst=f"{agent.CONTAINER_HOME}/.kube/config", mode="RO")
+            ],
             needs_host_gateway=True,
         )
 

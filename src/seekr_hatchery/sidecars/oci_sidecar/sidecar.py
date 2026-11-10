@@ -2,8 +2,8 @@
 
 from pathlib import Path
 
+import seekr_hatchery.sandbox.mount_types as mount_types
 from seekr_hatchery.agents import CONTAINER_HOME
-from seekr_hatchery.mount import BindMount
 from seekr_hatchery.sidecars import base
 from seekr_hatchery.sidecars.oci_sidecar import credentials, proxy
 from seekr_hatchery.sidecars.oci_sidecar.config import OciConfig
@@ -38,7 +38,7 @@ class OciSidecar(base.SandboxSidecar):
         server = self._cm.__enter__()
         client_dir = server.write_client_files(self._session_dir / "oci")
         return base.SidecarContribution(
-            mounts=[BindMount(src=client_dir, dst=f"{CONTAINER_HOME}/.oci", mode="RO")],
+            mounts=[mount_types.BindMount(src=client_dir, dst=f"{CONTAINER_HOME}/.oci", mode="RO")],
             env=server.container_env(self._config.default_profile),
             needs_host_gateway=True,
         )

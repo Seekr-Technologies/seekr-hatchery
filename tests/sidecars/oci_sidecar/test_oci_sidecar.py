@@ -12,7 +12,7 @@ import pytest
 from pydantic import ValidationError
 
 from seekr_hatchery.agents import CONTAINER_HOME
-from seekr_hatchery.mount import BindMount
+from seekr_hatchery.sandbox.mount_types import BindMount
 from seekr_hatchery.sidecars import SidecarConfig, base
 from seekr_hatchery.sidecars.oci_sidecar import OciConfig, OciSidecar, credentials, proxy
 

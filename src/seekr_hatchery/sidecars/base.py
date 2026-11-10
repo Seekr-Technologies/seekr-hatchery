@@ -5,7 +5,7 @@ after, declaring what it contributes to the ``ContainerSpec`` (extra mounts,
 extra env, whether the container needs the host gateway) without
 ``build_spec`` knowing anything about *why*.
 
-Layering (hard constraint): this module sits *below* ``docker.py`` in the
+Layering (hard constraint): this module sits *below* ``sandbox.launch`` in the
 import graph. It has no dependency on any concrete sidecar's transport.
 """
 
@@ -15,7 +15,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
-from seekr_hatchery.mount import Mount
+import seekr_hatchery.sandbox.mount_types as mount_types
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ class SidecarContribution:
     container needs the ``host.docker.internal`` gateway.
     """
 
-    mounts: list[Mount] = field(default_factory=list)
+    mounts: list[mount_types.Mount] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
     needs_host_gateway: bool = False
 

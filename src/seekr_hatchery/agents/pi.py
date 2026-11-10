@@ -47,13 +47,13 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
+import seekr_hatchery.sandbox.mount_types as mount_types
 from seekr_hatchery.agents.agent_backend import (
     CONTAINER_HOME,
     AgentBackend,
     ProxyEndpoint,
 )
 from seekr_hatchery.locks import hatchery_lock
-from seekr_hatchery.mount import BindMount, Mount, VolumeMount
 from seekr_hatchery.utils import npm
 
 logger = logging.getLogger(__name__)
@@ -336,7 +336,7 @@ class PiBackend(AgentBackend):
     # ── Docker infrastructure ─────────────────────────────────────────────────
 
     @staticmethod
-    def construct_mounts(session_dir: Path) -> list[Mount]:
+    def construct_mounts(session_dir: Path) -> list[mount_types.Mount]:
         """Per-task volume for ~/.pi/agent so sessions persist across resume.
 
         No seed: auth.json / models.json are synthesised by
@@ -371,23 +371,23 @@ class PiBackend(AgentBackend):
         """
         agent_dir = Path.home() / ".pi" / "agent"
         agent_dst = f"{CONTAINER_HOME}/.pi/agent"
-        mounts: list[Mount] = [VolumeMount(name="pi-dir", dst=agent_dst)]
+        mounts: list[mount_types.Mount] = [mount_types.VolumeMount(name="pi-dir", dst=agent_dst)]
         settings = agent_dir / "settings.json"
         if settings.exists():
-            mounts.append(BindMount(src=settings, dst=f"{agent_dst}/settings.json", mode="RW"))
+            mounts.append(mount_types.BindMount(src=settings, dst=f"{agent_dst}/settings.json", mode="RW"))
         store = agent_dir / "models-store.json"
         if store.exists():
-            mounts.append(BindMount(src=store, dst=f"{agent_dst}/models-store.json", mode="RO"))
+            mounts.append(mount_types.BindMount(src=store, dst=f"{agent_dst}/models-store.json", mode="RO"))
         host_models = session_dir / _HOST_MODELS_FILENAME
         if host_models.exists():
-            mounts.append(BindMount(src=host_models, dst=f"{agent_dst}/{_HOST_MODELS_FILENAME}", mode="RO"))
+            mounts.append(mount_types.BindMount(src=host_models, dst=f"{agent_dst}/{_HOST_MODELS_FILENAME}", mode="RO"))
         node_modules = agent_dir / "npm" / "node_modules"
         if node_modules.exists():
-            mounts.append(BindMount(src=node_modules, dst=f"{agent_dst}/npm/node_modules", mode="RO"))
+            mounts.append(mount_types.BindMount(src=node_modules, dst=f"{agent_dst}/npm/node_modules", mode="RO"))
         for name in ("extensions", "skills"):
             resource_dir = agent_dir / name
             resource_dir.mkdir(parents=True, exist_ok=True)
-            mounts.append(BindMount(src=resource_dir, dst=f"{agent_dst}/{name}", follow_links=True))
+            mounts.append(mount_types.BindMount(src=resource_dir, dst=f"{agent_dst}/{name}", follow_links=True))
         return mounts
 
     @staticmethod

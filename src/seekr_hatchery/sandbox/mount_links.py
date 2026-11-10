@@ -51,7 +51,7 @@ dangling, not a regular file or directory. Whether a resulting mount is safe to
 perform at all (system paths, host reachability) is not decided here; a bad
 mount can equally come from a user asking for one directly, so that check
 belongs to one validation pass over the finished mount list. See
-``docker._validate_mounts``.
+``sandbox.mounts._validate_mounts``.
 """
 
 import logging
@@ -60,9 +60,10 @@ import posixpath
 from collections.abc import Iterator
 from pathlib import Path
 
-from seekr_hatchery.mount import BindMount, Mount
+import seekr_hatchery.sandbox.mount_types as mount_types
 
-logger = logging.getLogger(__name__)
+# Keep diagnostic output and logger-level selection stable across relocation.
+logger = logging.getLogger("seekr_hatchery.mount_links")
 
 # Directories the walk doesn't descend into — large, and unlikely to hold
 # meaningful user-authored symlinks.
@@ -81,7 +82,7 @@ SKIP_DIRS: frozenset[str] = frozenset(
 )
 
 
-def expand_link_mounts(mounts: list[Mount]) -> list[Mount]:
+def expand_link_mounts(mounts: list[mount_types.Mount]) -> list[mount_types.Mount]:
     """Add the mounts that make ``follow_links`` directories' symlinks resolve.
 
     Every input mount is preserved; ``follow_links`` binds simply gain
@@ -92,15 +93,15 @@ def expand_link_mounts(mounts: list[Mount]) -> list[Mount]:
     # these resolves as-is, so it needs no companion.
     provided = [m.dst for m in mounts]
 
-    out: list[Mount] = []
-    extra: list[BindMount] = []
+    out: list[mount_types.Mount] = []
+    extra: list[mount_types.BindMount] = []
     for m in mounts:
-        if not isinstance(m, BindMount) or not m.follow_links:
+        if not isinstance(m, mount_types.BindMount) or not m.follow_links:
             out.append(m)
             continue
         out.append(m.model_copy(update={"follow_links": False}))
         for container_path, target in _link_targets(m, provided):
-            extra.append(BindMount(src=target, dst=container_path, mode=m.mode))
+            extra.append(mount_types.BindMount(src=target, dst=container_path, mode=m.mode))
 
     # Two links onto one container path is pathological; first declaration wins.
     seen: set[str] = set()
@@ -111,7 +112,7 @@ def expand_link_mounts(mounts: list[Mount]) -> list[Mount]:
     return out
 
 
-def _link_targets(m: BindMount, provided: list[str]) -> Iterator[tuple[str, Path]]:
+def _link_targets(m: mount_types.BindMount, provided: list[str]) -> Iterator[tuple[str, Path]]:
     """Yield ``(container_path, host_target)`` for each usable link in *m*."""
     src = m.src.expanduser()
     if not src.is_dir():

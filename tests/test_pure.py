@@ -4,11 +4,6 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
-import seekr_hatchery.agents as agent
-import seekr_hatchery.constants as constants
-import seekr_hatchery.docker as docker
 import seekr_hatchery.sessions as sessions
 import seekr_hatchery.utils as utils
 from seekr_hatchery.models import SessionMeta
@@ -317,12 +312,6 @@ class TestDockerImageName:
 # ---------------------------------------------------------------------------
 
 
-class TestDockerfilePath:
-    def test_returns_agent_specific_path(self):
-        repo = Path("/some/repo")
-        assert docker.dockerfile_path(repo, agent.CODEX) == Path("/some/repo/Dockerfile.codex")
-
-
 # ---------------------------------------------------------------------------
 # worktrees_dir
 # ---------------------------------------------------------------------------
@@ -384,200 +373,9 @@ class TestMigrate:
 # ---------------------------------------------------------------------------
 
 
-class TestSandboxContext:
-    def _native(self, **kwargs):
-        defaults = dict(
-            name="my-task",
-            branch="hatchery/my-task",
-            worktree=Path("/repo/.hatchery/worktrees/my-task"),
-            repo=Path("/repo"),
-            main_branch="main",
-            use_docker=False,
-        )
-        defaults.update(kwargs)
-        return sessions.sandbox_context(**defaults)
-
-    def _docker(self, **kwargs):
-        defaults = dict(
-            name="my-task",
-            branch="hatchery/my-task",
-            worktree=Path("/repo/.hatchery/worktrees/my-task"),
-            repo=Path("/repo"),
-            main_branch="main",
-            use_docker=True,
-        )
-        defaults.update(kwargs)
-        return sessions.sandbox_context(**defaults)
-
-    # --- return type ---
-
-    def test_returns_string(self):
-        assert isinstance(self._native(), str)
-
-    # --- native mode ---
-
-    def test_native_mentions_native_worktree(self):
-        result = self._native()
-        assert "native git worktree" in result
-
-    def test_native_does_not_claim_docker_container(self):
-        result = self._native()
-        assert "Docker container" not in result
-
-    def test_native_contains_working_directory(self):
-        result = self._native(worktree=Path("/repo/.hatchery/worktrees/my-task"))
-        assert "/repo/.hatchery/worktrees/my-task" in result
-
-    def test_native_contains_repo_root(self):
-        result = self._native(repo=Path("/some/repo"))
-        assert "/some/repo" in result
-
-    def test_native_contains_branch(self):
-        result = self._native(branch="hatchery/my-task")
-        assert "hatchery/my-task" in result
-
-    def test_native_contains_main_branch(self):
-        result = self._native(main_branch="develop")
-        assert "develop" in result
-
-    def test_native_pr_target_instruction(self):
-        result = self._native(main_branch="main")
-        assert "main" in result
-        assert "pull request" in result.lower() or "PR" in result
-
-    # --- docker mode ---
-
-    def test_docker_mentions_docker_container(self):
-        result = self._docker()
-        assert "Docker container" in result
-
-    def test_docker_does_not_mention_native(self):
-        result = self._docker()
-        assert "native git worktree" not in result
-
-    def test_docker_contains_container_worktree_path(self):
-        result = self._docker(name="my-task")
-        assert "/repo/.hatchery/worktrees/my-task" in result
-
-    def test_docker_contains_repo_root(self):
-        result = self._docker(repo=Path("/some/repo"))
-        assert "/some/repo" in result
-
-    def test_docker_mentions_read_write(self):
-        result = self._docker()
-        assert "read-write" in result
-
-    def test_docker_mentions_main_branch_inspection(self):
-        # After the host-path-mirroring switch the RO main-branch file view
-        # at /repo is gone — the system prompt should tell agents to use git.
-        result = self._docker()
-        assert "git show" in result or "git diff" in result
-
-    def test_docker_contains_branch(self):
-        result = self._docker(branch="hatchery/my-task")
-        assert "hatchery/my-task" in result
-
-    def test_docker_contains_main_branch(self):
-        result = self._docker(main_branch="master")
-        assert "master" in result
-
-    def test_docker_pr_target_instruction(self):
-        result = self._docker(main_branch="main")
-        assert "main" in result
-        assert "pull request" in result.lower() or "PR" in result
-
-
 # ---------------------------------------------------------------------------
 # sandbox_context — no-worktree mode
 # ---------------------------------------------------------------------------
-
-
-class TestSandboxContextNoWorktree:
-    def _no_worktree_native(self, branch: str = "", **kwargs) -> str:
-        defaults = dict(
-            name="my-task",
-            branch=branch,
-            worktree=Path("/projects/my-workspace"),
-            repo=Path("/projects/my-workspace"),
-            main_branch="main",
-            use_docker=False,
-            no_worktree=True,
-        )
-        defaults.update(kwargs)
-        return sessions.sandbox_context(**defaults)
-
-    def _no_worktree_docker(self, branch: str = "", **kwargs) -> str:
-        defaults = dict(
-            name="my-task",
-            branch=branch,
-            worktree=Path("/projects/my-workspace"),
-            repo=Path("/projects/my-workspace"),
-            main_branch="main",
-            use_docker=True,
-            no_worktree=True,
-        )
-        defaults.update(kwargs)
-        return sessions.sandbox_context(**defaults)
-
-    # --- native no-worktree ---
-
-    def test_native_no_worktree_mentions_directly(self):
-        result = self._no_worktree_native()
-        assert "directly in the working directory" in result
-
-    def test_native_no_worktree_does_not_claim_docker(self):
-        result = self._no_worktree_native()
-        assert "Docker container" not in result
-
-    def test_native_no_worktree_does_not_claim_native_worktree(self):
-        result = self._no_worktree_native()
-        assert "native git worktree" not in result
-
-    def test_native_no_worktree_shows_working_directory(self):
-        result = self._no_worktree_native(worktree=Path("/some/dir"))
-        assert "/some/dir" in result
-
-    def test_native_no_worktree_branch_shown_when_nonempty(self):
-        result = self._no_worktree_native(branch="hatchery/my-task")
-        assert "hatchery/my-task" in result
-
-    def test_native_no_worktree_branch_omitted_when_empty(self):
-        result = self._no_worktree_native(branch="")
-        assert "Your branch" not in result
-
-    def test_native_no_worktree_pr_target_omitted_when_no_branch(self):
-        result = self._no_worktree_native(branch="")
-        assert "Target branch" not in result
-
-    # --- docker no-worktree ---
-
-    def test_docker_no_worktree_mentions_docker_container(self):
-        result = self._no_worktree_docker()
-        assert "Docker container" in result
-
-    def test_docker_no_worktree_mentions_working_directory(self):
-        result = self._no_worktree_docker(worktree=Path("/host/some/cwd"))
-        assert "/host/some/cwd" in result
-
-    def test_docker_no_worktree_does_not_claim_native_worktree(self):
-        result = self._no_worktree_docker()
-        assert "native git worktree" not in result
-
-    def test_docker_no_worktree_branch_shown_when_nonempty(self):
-        result = self._no_worktree_docker(branch="hatchery/my-task")
-        assert "hatchery/my-task" in result
-
-    def test_docker_no_worktree_branch_omitted_when_empty(self):
-        result = self._no_worktree_docker(branch="")
-        assert "Your branch" not in result
-
-    def test_docker_no_worktree_pr_target_omitted_when_no_branch(self):
-        result = self._no_worktree_docker(branch="")
-        assert "Target branch" not in result
-
-    def test_docker_no_worktree_pr_target_shown_when_branch_present(self):
-        result = self._no_worktree_docker(branch="hatchery/my-task", main_branch="develop")
-        assert "develop" in result
 
 
 # ---------------------------------------------------------------------------
@@ -585,79 +383,9 @@ class TestSandboxContextNoWorktree:
 # ---------------------------------------------------------------------------
 
 
-class TestContainerRuntime:
-    def test_podman_binary(self):
-        assert docker.PodmanRuntime().binary == "podman"
-
-    def test_docker_binary(self):
-        assert docker.DockerRuntime().binary == "docker"
-
-
 # ---------------------------------------------------------------------------
 # DockerConfig validation
 # ---------------------------------------------------------------------------
-
-
-class TestDockerConfig:
-    def test_valid_empty_mounts(self):
-        config = docker.DockerConfig.model_validate({"schema_version": "1", "mounts": []})
-        assert config.mounts == []
-
-    def test_null_mounts_treated_as_empty(self):
-        config = docker.DockerConfig.model_validate({"schema_version": "1", "mounts": None})
-        assert config.mounts == []
-
-    def test_default_mounts_is_empty_list(self):
-        config = docker.DockerConfig.model_validate({"schema_version": "1"})
-        assert config.mounts == []
-
-    def test_valid_mount_ro(self):
-        config = docker.DockerConfig.model_validate({"schema_version": "1", "mounts": ["/host:/container:ro"]})
-        assert config.mounts == ["/host:/container:ro"]
-
-    def test_valid_mount_rw(self):
-        config = docker.DockerConfig.model_validate({"schema_version": "1", "mounts": ["/host:/container:rw"]})
-        assert config.mounts == ["/host:/container:rw"]
-
-    def test_valid_mount_without_mode(self):
-        config = docker.DockerConfig.model_validate({"schema_version": "1", "mounts": ["/host:/container"]})
-        assert config.mounts == ["/host:/container"]
-
-    def test_invalid_mount_no_colon(self):
-        with pytest.raises(Exception):
-            docker.DockerConfig.model_validate({"schema_version": "1", "mounts": ["/hostonly"]})
-
-    def test_invalid_mount_empty_host(self):
-        with pytest.raises(Exception):
-            docker.DockerConfig.model_validate({"schema_version": "1", "mounts": [":/container:ro"]})
-
-    def test_invalid_mount_empty_container(self):
-        with pytest.raises(Exception):
-            docker.DockerConfig.model_validate({"schema_version": "1", "mounts": ["/host::ro"]})
-
-    def test_invalid_mode(self):
-        with pytest.raises(Exception):
-            docker.DockerConfig.model_validate({"schema_version": "1", "mounts": ["/host:/container:rx"]})
-
-    def test_non_string_mount_entry(self):
-        with pytest.raises(Exception):
-            docker.DockerConfig.model_validate({"schema_version": "1", "mounts": [123]})
-
-    def test_extra_keys_forbidden(self):
-        with pytest.raises(Exception):
-            docker.DockerConfig.model_validate({"schema_version": "1", "mounts": [], "unknown_key": "oops"})
-
-    def test_dind_defaults_to_false(self):
-        config = docker.DockerConfig.model_validate({"schema_version": "1"})
-        assert config.dind is False
-
-    def test_dind_true_accepted(self):
-        config = docker.DockerConfig.model_validate({"schema_version": "1", "dind": True})
-        assert config.dind is True
-
-    def test_dind_false_accepted(self):
-        config = docker.DockerConfig.model_validate({"schema_version": "1", "dind": False})
-        assert config.dind is False
 
 
 # ---------------------------------------------------------------------------
@@ -665,52 +393,9 @@ class TestDockerConfig:
 # ---------------------------------------------------------------------------
 
 
-class TestDockerConfigCapAdd:
-    def test_defaults_empty(self):
-        assert docker.DockerConfig().cap_add == []
-
-    def test_uppercase_normalization(self):
-        config = docker.DockerConfig(cap_add=["net_admin"])
-        assert config.cap_add == ["NET_ADMIN"]
-
-    def test_invalid_cap_rejected(self):
-        with pytest.raises(Exception):
-            docker.DockerConfig(cap_add=["INVALID"])
-
-    def test_none_treated_as_empty(self):
-        config = docker.DockerConfig(cap_add=None)
-        assert config.cap_add == []
-
-
 # ---------------------------------------------------------------------------
 # DockerConfig.environment validation
 # ---------------------------------------------------------------------------
-
-
-class TestDockerConfigEnvironment:
-    def test_defaults_empty(self):
-        assert docker.DockerConfig().environment == []
-
-    def test_none_treated_as_empty(self):
-        assert docker.DockerConfig(environment=None).environment == []
-
-    def test_mixed_literal_and_passthrough_entries(self):
-        config = docker.DockerConfig(environment=["VAR_A=x", "VAR_B", "VAR_C="])
-        assert config.environment == ["VAR_A=x", "VAR_B", "VAR_C="]
-
-    def test_empty_name_rejected(self):
-        with pytest.raises(Exception):
-            docker.DockerConfig(environment=["=value"])
-
-    def test_non_string_entry_rejected(self):
-        with pytest.raises(Exception):
-            docker.DockerConfig(environment=[123])
-
-    def test_resolve_environment(self, monkeypatch):
-        monkeypatch.setenv("VAR_B", "from-host")
-        monkeypatch.delenv("VAR_MISSING", raising=False)
-        config = docker.DockerConfig(environment=["VAR_A=x", "VAR_B", "VAR_C=", "VAR_MISSING"])
-        assert docker._resolve_environment(config) == {"VAR_A": "x", "VAR_B": "from-host", "VAR_C": ""}
 
 
 # ---------------------------------------------------------------------------
@@ -718,70 +403,9 @@ class TestDockerConfigEnvironment:
 # ---------------------------------------------------------------------------
 
 
-class TestDindCapMerge:
-    """Verify build_spec merges user cap_add with DinD defaults."""
-
-    _COMMON = dict(
-        image="test-image:task",
-        mounts=[],
-        workdir="/repo/.hatchery/worktrees/task",
-        hatchery_repo="/repo",
-        name="task",
-        agent_cmd=["codex"],
-    )
-
-    def _run(self, **kwargs) -> list[str]:
-        args = {**self._COMMON, **kwargs}
-        spec = docker.build_spec(**args, container_name=None)
-        return docker.DockerRuntime().render_run_argv(spec)
-
-    def test_user_caps_merged(self):
-        cmd = self._run(dind=True, cap_add=["NET_BIND_SERVICE"])
-        cap_add_values = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--cap-add"]
-        assert "NET_BIND_SERVICE" in cap_add_values
-
-    def test_duplicates_eliminated(self):
-        cmd = self._run(dind=True, cap_add=["SYS_ADMIN"])
-        cap_add_values = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--cap-add"]
-        assert cap_add_values.count("SYS_ADMIN") == 1
-
-    def test_caps_ignored_when_dind_false(self):
-        cmd = self._run(dind=False, cap_add=["NET_ADMIN"])
-        assert "--cap-add" not in cmd
-
-
 # ---------------------------------------------------------------------------
 # _migrate_docker_config
 # ---------------------------------------------------------------------------
-
-
-class TestMigrateDockerConfig:
-    def test_v0_stamped_to_v1(self):
-        data = {"mounts": []}
-        result = docker._migrate_docker_config(data)
-        assert result["schema_version"] == "1"
-
-    def test_v1_idempotent(self):
-        data = {"schema_version": "1", "mounts": []}
-        result = docker._migrate_docker_config(data)
-        assert result["schema_version"] == "1"
-
-    def test_other_fields_preserved(self):
-        data = {"mounts": ["/host:/container:ro"]}
-        result = docker._migrate_docker_config(data)
-        assert result["mounts"] == ["/host:/container:ro"]
-
-    def test_missing_schema_version_treated_as_v0(self):
-        data = {"mounts": []}
-        assert "schema_version" not in data
-        result = docker._migrate_docker_config(data)
-        assert result["schema_version"] == "1"
-
-    def test_legacy_int_schema_version_coerced_to_str(self):
-        # Existing docker.yaml files written before this change have schema_version: 1 (int)
-        data = {"schema_version": 1, "mounts": []}
-        result = docker._migrate_docker_config(data)
-        assert result["schema_version"] == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -789,115 +413,14 @@ class TestMigrateDockerConfig:
 # ---------------------------------------------------------------------------
 
 
-class TestRunContainerDindFlags:
-    """Verify build_spec + render_run_argv injects the correct flags depending on dind=."""
-
-    _COMMON = dict(
-        image="test-image:task",
-        mounts=[],
-        workdir="/repo/.hatchery/worktrees/task",
-        hatchery_repo="/repo",
-        name="task",
-        agent_cmd=["codex"],
-    )
-
-    def _run(self, **kwargs) -> list[str]:
-        """Build spec and render argv (no subprocess call needed)."""
-        args = {**self._COMMON, **kwargs}
-        spec = docker.build_spec(**args, container_name=None)
-        return docker.DockerRuntime().render_run_argv(spec)
-
-    def test_dind_false_no_extra_flags(self):
-        cmd = self._run(dind=False)
-        assert "--cap-drop" not in cmd
-        assert "--device" not in cmd
-        assert "--security-opt" not in cmd
-
-    def test_dind_true_all_flags(self):
-        cmd = self._run(dind=True)
-        # --cap-drop ALL
-        cap_drop_values = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--cap-drop"]
-        assert cap_drop_values == ["ALL"]
-        # exact set of capabilities re-added
-        cap_add_values = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--cap-add"]
-        assert set(cap_add_values) == {
-            "SYS_ADMIN",
-            "MKNOD",
-            "SETUID",
-            "SETGID",
-            "CHOWN",
-            "DAC_OVERRIDE",
-            "FOWNER",
-            "SETFCAP",
-            "SYS_CHROOT",
-            "SETPCAP",
-            "AUDIT_WRITE",
-            "FSETID",
-            "KILL",
-            "NET_BIND_SERVICE",
-            "NET_ADMIN",
-            "NET_RAW",
-        }
-        # /dev/fuse device
-        device_values = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--device"]
-        assert device_values == ["/dev/fuse"]
-        # security-opt: label=disable + seccomp profile
-        security_opt_values = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--security-opt"]
-        assert "label=disable" in security_opt_values
-        assert any(v.startswith("seccomp=") and "seccomp.json" in v for v in security_opt_values)
-
-
 # ---------------------------------------------------------------------------
 # _SECCOMP bundled resource
 # ---------------------------------------------------------------------------
 
 
-class TestSeccompResource:
-    def test_is_absolute_path(self):
-        assert docker._SECCOMP.is_absolute()
-
-    def test_file_exists_and_is_nonempty(self):
-        assert docker._SECCOMP.exists()
-        assert docker._SECCOMP.stat().st_size > 0
-
-    def test_is_valid_json(self):
-        import json
-
-        data = json.loads(docker._SECCOMP.read_text())
-        assert "syscalls" in data
-
-
 # ---------------------------------------------------------------------------
 # build_spec container name
 # ---------------------------------------------------------------------------
-
-
-class TestRunContainerName:
-    """Verify build_spec + render_run_argv passes --name when container_name is provided."""
-
-    _COMMON = dict(
-        image="test-image:task",
-        mounts=[],
-        workdir="/repo/.hatchery/worktrees/task",
-        hatchery_repo="/repo",
-        name="my-task",
-        agent_cmd=["codex"],
-    )
-
-    def _run(self, **kwargs) -> list[str]:
-        args = {**self._COMMON, **kwargs}
-        container_name = args.pop("container_name", None)
-        spec = docker.build_spec(**args, container_name=container_name)
-        return docker.DockerRuntime().render_run_argv(spec)
-
-    def test_name_injected_when_provided(self):
-        cmd = self._run(container_name="hatchery-myrepo-my-task")
-        name_values = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--name"]
-        assert name_values == ["hatchery-myrepo-my-task"]
-
-    def test_name_absent_when_not_provided(self):
-        cmd = self._run()
-        assert "--name" not in cmd
 
 
 # ---------------------------------------------------------------------------
@@ -932,94 +455,7 @@ class TestTaskContainerName:
 # ---------------------------------------------------------------------------
 
 
-class TestSandboxContextIncludePaths:
-    """Verify that include_paths appear in the sandbox context output."""
-
-    _BASE = dict(
-        name="my-task",
-        branch="hatchery/my-task",
-        worktree=Path("/repo/.hatchery/worktrees/my-task"),
-        repo=Path("/repo"),
-        main_branch="main",
-    )
-
-    def _ctx(self, use_docker: bool, no_worktree: bool, include_paths=None) -> str:
-        return sessions.sandbox_context(
-            **self._BASE,
-            use_docker=use_docker,
-            no_worktree=no_worktree,
-            include_paths=include_paths,
-        )
-
-    def _entry(self, path, mode="worktree"):
-        from seekr_hatchery.includes import IncludeEntry
-
-        return IncludeEntry(path=path, mode=mode)
-
-    def test_no_includes_produces_no_includes_section(self):
-        result = self._ctx(use_docker=True, no_worktree=False)
-        assert "Included paths" not in result
-
-    def test_empty_list_produces_no_includes_section(self):
-        result = self._ctx(use_docker=True, no_worktree=False, include_paths=[])
-        assert "Included paths" not in result
-
-    def test_docker_plain_dir_shows_host_path(self, tmp_path):
-        plain = tmp_path / "shared-data"
-        plain.mkdir()
-        result = self._ctx(use_docker=True, no_worktree=False, include_paths=[self._entry(plain)])
-        assert "Included paths" in result
-        assert str(plain) in result
-
-    def test_docker_git_repo_with_worktree_shows_worktree_host_path(self, tmp_path):
-        repo_b = tmp_path / "repo-b"
-        repo_b.mkdir()
-        (repo_b / ".git").mkdir()
-
-        wt = repo_b / constants.WORKTREES_SUBDIR / "my-task"
-        wt.mkdir(parents=True)
-        result = self._ctx(use_docker=True, no_worktree=False, include_paths=[self._entry(repo_b)])
-        assert str(wt) in result
-
-    def test_docker_ro_reference_shows_read_only_label(self, tmp_path):
-        docs = tmp_path / "docs"
-        docs.mkdir()
-        result = self._ctx(use_docker=True, no_worktree=False, include_paths=[self._entry(docs, mode="ro")])
-        assert "Included paths" in result
-        assert str(docs) in result
-        assert "read-only" in result
-
-    def test_docker_rw_reference_shows_read_write_label(self, tmp_path):
-        shared = tmp_path / "shared"
-        shared.mkdir()
-        result = self._ctx(use_docker=True, no_worktree=False, include_paths=[self._entry(shared, mode="rw")])
-        assert str(shared) in result
-        assert "read-write" in result
-
-
 # ---------------------------------------------------------------------------
-
-
-class TestExecTaskShell:
-    """Verify exec_task_shell execs directly into the named container."""
-
-    def test_calls_docker_exec_with_container_name(self):
-        with patch("seekr_hatchery.docker.subprocess.run") as mock_run:
-            docker.exec_task_shell("hatchery-myrepo-deadbeef-my-task", docker.DockerRuntime())
-        cmd = mock_run.call_args[0][0]
-        assert cmd == ["docker", "exec", "-it", "hatchery-myrepo-deadbeef-my-task", "/bin/bash"]
-
-    def test_custom_shell_passed_to_exec(self):
-        with patch("seekr_hatchery.docker.subprocess.run") as mock_run:
-            docker.exec_task_shell("hatchery-myrepo-deadbeef-my-task", docker.DockerRuntime(), shell="/bin/sh")
-        cmd = mock_run.call_args[0][0]
-        assert cmd[-1] == "/bin/sh"
-
-    def test_uses_podman_binary_for_podman_runtime(self):
-        with patch("seekr_hatchery.docker.subprocess.run") as mock_run:
-            docker.exec_task_shell("hatchery-myrepo-deadbeef-my-task", docker.PodmanRuntime())
-        cmd = mock_run.call_args[0][0]
-        assert cmd[0] == "podman"
 
 
 # ---------------------------------------------------------------------------
