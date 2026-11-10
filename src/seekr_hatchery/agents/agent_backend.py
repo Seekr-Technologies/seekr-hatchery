@@ -188,18 +188,29 @@ class AgentBackend(ABC):
     # Hooks fire side-effects at specific points in the launch lifecycle.
     # Firing order for each launch type:
     #
-    #   New task: on_new_task(session_dir), then on_before_launch(worktree).
-    #   Resume: on_before_launch(worktree).
-    #   Finalize: neither of those hooks.
+    #   New task (cmd_new)
+    #     1. on_new_task(session_dir)              one-time task setup
+    #     2. on_before_launch(worktree)             every launch, native + Docker
+    #     3. background_threads(...) → workers      every launch
+    #     4. migrate_container_state(...)           Docker only
+    #     5. on_before_container_start(...)         Docker only
+    #        └─ agent runs (workers alive)             for the launch's lifetime
     #
-    #   All three then start background_threads(...) workers. For Docker runs:
-    #     1. Build the image.
-    #     2. migrate_container_state(meta, runtime=runtime).
-    #     3. on_before_container_start(meta, ..., runtime=runtime).
-    #     4. Construct mounts and prepare/seed volumes.
-    #     5. Start sidecars and run the container.
-    #   Native runs skip the container hook. Workers stop after the agent exits.
-    #   Standalone sandbox shells do not invoke agent lifecycle hooks.
+    #   Resume (cmd_resume)
+    #     1. on_before_launch(worktree)             every launch, native + Docker
+    #     2. background_threads(...) → workers      every launch
+    #     3. migrate_container_state(...)           Docker only
+    #     4. on_before_container_start(...)         Docker only
+    #        └─ agent runs (workers alive)
+    #
+    #   Finalize (_post_exit_check)
+    #     1. background_threads(...) → workers      every launch
+    #     2. migrate_container_state(...)           Docker only
+    #     3. on_before_container_start(...)         Docker only
+    #        └─ agent runs (workers alive)
+    #
+    # Docker hooks run after image build, before mount/volume preparation.
+    # Workers stop after agent exit. Standalone sandbox shells invoke no hooks.
 
     @staticmethod
     @abstractmethod
