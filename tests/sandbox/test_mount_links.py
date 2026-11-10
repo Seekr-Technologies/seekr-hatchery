@@ -3,13 +3,14 @@
 import os
 import shutil
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
-import seekr_hatchery.mount as mount
-import seekr_hatchery.mount_links as mount_links
-from seekr_hatchery.mount import BindMount, TmpfsMount, VolumeMount
+import seekr_hatchery.sandbox.mount_links as mount_links
+import seekr_hatchery.sandbox.mount_types as mount
+from seekr_hatchery.sandbox.mount_types import BindMount, TmpfsMount, VolumeMount
 
 DST = "/home/hatchery/.claude/skills"
 
@@ -478,7 +479,18 @@ class TestRecursiveLinks:
             BindMount(src=package, dst=str(alias)),
         ]
 
-    def test_aliases_are_scanned_at_each_container_location(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("reverse_order", [False, True], ids=["forward", "reverse"])
+    def test_aliases_are_scanned_at_each_container_location(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reverse_order: bool
+    ) -> None:
+        real_walk = os.walk
+
+        def walk(*args: object, **kwargs: object) -> Iterator[tuple[str, list[str], list[str]]]:
+            for directory, directories, files in real_walk(*args, **kwargs):
+                directories.sort(reverse=reverse_order)
+                yield directory, directories, sorted(files, reverse=reverse_order)
+
+        monkeypatch.setattr(os, "walk", walk)
         root = tmp_path / "host/root"
         root.mkdir(parents=True)
         package = tmp_path / "host/pkg"
@@ -491,16 +503,20 @@ class TestRecursiveLinks:
         (tmp_path / "host/other/alias").symlink_to(package)
         (root / "one").symlink_to("../pkg")
         (root / "two").symlink_to("../other/alias")
-        assert mount_links.expand_link_mounts(
+        result = mount_links.expand_link_mounts(
             [
                 BindMount(src=root, dst="/sandbox/root", follow_links="RECURSIVE"),
             ]
-        ) == [
-            BindMount(src=root, dst="/sandbox/root"),
-            BindMount(src=package, dst="/sandbox/pkg"),
+        )
+        assert result[:1] == [BindMount(src=root, dst="/sandbox/root")]
+        # Unrelated companions retain filesystem discovery order, which is not
+        # portable. Compare every mount, including duplicates, without fixing
+        # an order between the two independent alias branches.
+        assert sorted(result[1:], key=lambda mount: mount.dst) == [
             BindMount(src=package, dst="/sandbox/other/alias"),
-            BindMount(src=document, dst="/sandbox/readme"),
             BindMount(src=document, dst="/sandbox/other/readme"),
+            BindMount(src=package, dst="/sandbox/pkg"),
+            BindMount(src=document, dst="/sandbox/readme"),
         ]
 
 

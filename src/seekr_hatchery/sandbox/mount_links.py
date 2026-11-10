@@ -51,7 +51,7 @@ dangling, not a regular file or directory. Whether a resulting mount is safe to
 perform at all (system paths, host reachability) is not decided here; a bad
 mount can equally come from a user asking for one directly, so that check
 belongs to one validation pass over the finished mount list. See
-``docker._validate_mounts``.
+``sandbox.mounts._validate_mounts``.
 """
 
 import logging
@@ -61,9 +61,9 @@ from collections import deque
 from collections.abc import Iterator
 from pathlib import Path
 
-from seekr_hatchery.mount import BindMount, Mount
+from seekr_hatchery.sandbox.mount_types import BindMount, Mount
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("seekr_hatchery.mount_links")
 
 # Directories the walk doesn't descend into — large, and unlikely to hold
 # meaningful user-authored symlinks.

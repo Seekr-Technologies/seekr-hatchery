@@ -12,7 +12,8 @@ import yaml
 from click.testing import CliRunner
 
 import seekr_hatchery.branches as branches
-import seekr_hatchery.docker as docker
+import seekr_hatchery.sandbox.config as sandbox_config
+import seekr_hatchery.sandbox.runtime as sandbox_runtime
 import seekr_hatchery.sessions as sessions
 import seekr_hatchery.system_prompt as system_prompt
 import seekr_hatchery.utils as utils
@@ -176,8 +177,8 @@ def _new_patches():
         patch("seekr_hatchery.cli.sessions.ensure_gitignore"),
         patch("seekr_hatchery.cli.sessions.ensure_tasks_dir"),
         patch("seekr_hatchery.cli.sessions.ensure_git_exclude"),
-        patch("seekr_hatchery.cli.docker.ensure_dockerfile"),
-        patch("seekr_hatchery.cli.docker.ensure_docker_config"),
+        patch("seekr_hatchery.sandbox.scaffold.ensure_dockerfile"),
+        patch("seekr_hatchery.sandbox.scaffold.ensure_config"),
         patch("seekr_hatchery.cli.sessions.task_db_path"),
         patch("seekr_hatchery.cli.sessions.worktrees_dir"),
         patch("seekr_hatchery.cli.git.create_worktree"),
@@ -185,7 +186,7 @@ def _new_patches():
         patch("seekr_hatchery.cli.sessions.write_task_file"),
         patch("seekr_hatchery.sessions.open_for_editing"),
         patch("seekr_hatchery.cli.sessions.save_task"),
-        patch("seekr_hatchery.cli.docker.resolve_runtime"),
+        patch("seekr_hatchery.sandbox.launch.resolve_runtime"),
         patch("seekr_hatchery.cli._launch"),
         patch("seekr_hatchery.cli._prompt_objective", return_value="Default objective"),
         patch("seekr_hatchery.git.run", shared_run),  # same mock; git.add_and_commit flows through
@@ -243,12 +244,12 @@ def _new_env(
         )
         if not real_config:
             stack.enter_context(patch("seekr_hatchery.user_config.UserConfig.load", return_value=cfg))
-        stack.enter_context(patch("seekr_hatchery.cli.docker.load_docker_config", return_value=MagicMock(include=[])))
+        stack.enter_context(patch("seekr_hatchery.sandbox.config.load_config", return_value=MagicMock(include=[])))
         stack.enter_context(patch("seekr_hatchery.cli.sessions.merge_includes_with_config", return_value=[]))
         stack.enter_context(patch("seekr_hatchery.cli.load_include_entries", return_value=[]))
         ns.prompt = stack.enter_context(patch("seekr_hatchery.cli._prompt_objective", return_value=objective))
         ns.create = stack.enter_context(patch("seekr_hatchery.cli.sessions.create", return_value=meta or _fake_meta()))
-        stack.enter_context(patch("seekr_hatchery.cli.docker.resolve_runtime"))
+        stack.enter_context(patch("seekr_hatchery.sandbox.launch.resolve_runtime"))
         stack.enter_context(patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"))
         ns.launch = stack.enter_context(patch("seekr_hatchery.cli._launch"))
         ns.remove_worktree = stack.enter_context(patch("seekr_hatchery.cli.git.remove_worktree"))
@@ -781,9 +782,9 @@ class TestCliResume:
 
         with (
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
-            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
-            patch("seekr_hatchery.cli.sessions.docker.ensure_dockerfile"),
-            patch("seekr_hatchery.cli.sessions.docker.ensure_docker_config"),
+            patch("seekr_hatchery.sandbox.launch.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.sessions.sandbox_scaffold.ensure_dockerfile"),
+            patch("seekr_hatchery.cli.sessions.sandbox_scaffold.ensure_config"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch") as mock_launch,
         ):
@@ -799,9 +800,9 @@ class TestCliResume:
 
         with (
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
-            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None) as mock_docker,
-            patch("seekr_hatchery.cli.sessions.docker.ensure_dockerfile"),
-            patch("seekr_hatchery.cli.sessions.docker.ensure_docker_config"),
+            patch("seekr_hatchery.sandbox.launch.resolve_runtime", return_value=None) as mock_docker,
+            patch("seekr_hatchery.cli.sessions.sandbox_scaffold.ensure_dockerfile"),
+            patch("seekr_hatchery.cli.sessions.sandbox_scaffold.ensure_config"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch"),
         ):
@@ -822,10 +823,10 @@ class TestCliResume:
 
         with (
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
-            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
-            patch("seekr_hatchery.cli.docker.dockerfile_path", return_value=missing_df),
-            patch("seekr_hatchery.cli.sessions.docker.ensure_dockerfile") as mock_ensure,
-            patch("seekr_hatchery.cli.sessions.docker.ensure_docker_config"),
+            patch("seekr_hatchery.sandbox.launch.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.sandbox.scaffold.dockerfile_path", return_value=missing_df),
+            patch("seekr_hatchery.cli.sessions.sandbox_scaffold.ensure_dockerfile") as mock_ensure,
+            patch("seekr_hatchery.cli.sessions.sandbox_scaffold.ensure_config"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch"),
         ):
@@ -845,9 +846,9 @@ class TestCliResume:
 
         with (
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
-            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
-            patch("seekr_hatchery.cli.sessions.docker.ensure_dockerfile") as mock_ensure,
-            patch("seekr_hatchery.cli.sessions.docker.ensure_docker_config"),
+            patch("seekr_hatchery.sandbox.launch.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.sessions.sandbox_scaffold.ensure_dockerfile") as mock_ensure,
+            patch("seekr_hatchery.cli.sessions.sandbox_scaffold.ensure_config"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch"),
         ):
@@ -864,9 +865,9 @@ class TestCliResume:
 
         with (
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
-            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
-            patch("seekr_hatchery.cli.sessions.docker.ensure_dockerfile") as mock_ensure,
-            patch("seekr_hatchery.cli.sessions.docker.ensure_docker_config"),
+            patch("seekr_hatchery.sandbox.launch.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.sessions.sandbox_scaffold.ensure_dockerfile") as mock_ensure,
+            patch("seekr_hatchery.cli.sessions.sandbox_scaffold.ensure_config"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch"),
         ):
@@ -954,9 +955,9 @@ class TestCliResume:
 
         with (
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
-            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
-            patch("seekr_hatchery.cli.sessions.docker.ensure_dockerfile"),
-            patch("seekr_hatchery.cli.sessions.docker.ensure_docker_config"),
+            patch("seekr_hatchery.sandbox.launch.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.sessions.sandbox_scaffold.ensure_dockerfile"),
+            patch("seekr_hatchery.cli.sessions.sandbox_scaffold.ensure_config"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch") as mock_launch,
         ):
@@ -987,9 +988,9 @@ class TestSandbox:
         return (
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
             patch("seekr_hatchery.cli.sessions.prepare_sandbox", return_value=hdir),
-            patch("seekr_hatchery.cli.docker.detect_runtime", return_value=docker.DockerRuntime()),
-            patch("seekr_hatchery.cli.docker.load_docker_config", return_value=docker.DockerConfig()),
-            patch("seekr_hatchery.cli.docker.docker_features", return_value={}),
+            patch("seekr_hatchery.sandbox.runtime.detect_runtime", return_value=sandbox_runtime.DockerRuntime()),
+            patch("seekr_hatchery.sandbox.config.load_config", return_value=sandbox_config.SandboxConfig()),
+            patch("seekr_hatchery.sandbox.config.features", return_value={}),
         )
 
     def test_sandbox_delegates_to_prepare_and_launches(self, tmp_path):
@@ -1003,7 +1004,7 @@ class TestSandbox:
             p_rt,
             p_cfg,
             p_feat,
-            patch("seekr_hatchery.cli.docker.launch_sandbox_shell") as mock_launch,
+            patch("seekr_hatchery.sandbox.launch.launch_shell") as mock_launch,
         ):
             result = runner.invoke(cli, ["sandbox", "shell"])
 
@@ -1024,7 +1025,7 @@ class TestSandbox:
             p_rt,
             p_cfg,
             p_feat,
-            patch("seekr_hatchery.cli.docker.launch_sandbox_shell") as mock_launch,
+            patch("seekr_hatchery.sandbox.launch.launch_shell") as mock_launch,
         ):
             result = runner.invoke(cli, ["sandbox", "shell", "--agent", "pi"])
 
@@ -1042,7 +1043,7 @@ class TestSandbox:
             p_rt,
             p_cfg,
             p_feat,
-            patch("seekr_hatchery.cli.docker.launch_sandbox_shell") as mock_launch,
+            patch("seekr_hatchery.sandbox.launch.launch_shell") as mock_launch,
         ):
             result = runner.invoke(cli, ["sandbox", "shell", "--rebuild-sandbox"])
 
@@ -1059,7 +1060,7 @@ class TestSandbox:
             p_rt,
             p_cfg,
             p_feat,
-            patch("seekr_hatchery.cli.docker.launch_sandbox_shell") as mock_launch,
+            patch("seekr_hatchery.sandbox.launch.launch_shell") as mock_launch,
         ):
             result = runner.invoke(cli, ["sandbox", "shell", "--shell", "/bin/sh"])
 
@@ -1071,7 +1072,7 @@ class TestSandbox:
         repo = tmp_path / "repo"
         p_root, p_prep, p_rt, p_cfg, p_feat = self._patches(repo, tmp_path / "hdir")
         runner = CliRunner()
-        with p_root, p_prep as mock_prep, p_rt, p_cfg, p_feat, patch("seekr_hatchery.cli.docker.launch_sandbox_shell"):
+        with p_root, p_prep as mock_prep, p_rt, p_cfg, p_feat, patch("seekr_hatchery.sandbox.launch.launch_shell"):
             result = runner.invoke(cli, ["sandbox", "shell", "--no-commit"])
 
         assert result.exit_code == 0, result.output
@@ -1085,7 +1086,7 @@ class TestSandbox:
         (repo / ".hatchery" / "config.yaml").write_text("auto_commit: false\n")
         p_root, p_prep, p_rt, p_cfg, p_feat = self._patches(repo, tmp_path / "hdir")
         runner = CliRunner()
-        with p_root, p_prep as mock_prep, p_rt, p_cfg, p_feat, patch("seekr_hatchery.cli.docker.launch_sandbox_shell"):
+        with p_root, p_prep as mock_prep, p_rt, p_cfg, p_feat, patch("seekr_hatchery.sandbox.launch.launch_shell"):
             result = runner.invoke(cli, ["sandbox", "shell"])
 
         assert result.exit_code == 0, result.output
@@ -1112,8 +1113,8 @@ class TestHarnessUpdate:
         """
         monkeypatch.chdir(tmp_path)
         with (
-            patch("seekr_hatchery.sessions.docker.detect_runtime"),
-            patch("seekr_hatchery.sessions.docker.build_docker_image", return_value=True),
+            patch("seekr_hatchery.sandbox.runtime.detect_runtime"),
+            patch("seekr_hatchery.sandbox.images.build_image", return_value=True),
         ):
             yield
 
@@ -1219,7 +1220,7 @@ class TestHarnessUpdate:
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
             patch("seekr_hatchery.utils.npm.npm_latest_version", return_value="9.9.9"),
             patch("seekr_hatchery.sessions.repo_config.resolve_no_commit", return_value=False),
-            patch("seekr_hatchery.sessions.docker.build_docker_image", return_value=False),
+            patch("seekr_hatchery.sandbox.images.build_image", return_value=False),
             patch("seekr_hatchery.sessions.git.add_and_commit") as mock_commit,
         ):
             result = CliRunner().invoke(cli, ["sandbox", "harness", "update", "--agent", "codex"])
@@ -1691,7 +1692,7 @@ class TestCliNoWorktree:
         with ExitStack() as stack:
             mocks = [stack.enter_context(p) for p in _new_patches()]
             _, _, _, mock_launch, mock_docker = self._setup_no_worktree_mocks(mocks)
-            mock_docker.return_value = docker.DockerRuntime()  # Dockerfile present → Docker
+            mock_docker.return_value = sandbox_runtime.DockerRuntime()  # Dockerfile present → Docker
             mock_launch.side_effect = None  # still mocked; just verify the flag propagates
             result = runner.invoke(cli, ["new", "my-task", "--no-worktree"])
 
@@ -1817,7 +1818,7 @@ class TestCliNoWorktree:
         with (
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(tmp_path, False)),
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
-            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.sandbox.launch.resolve_runtime", return_value=None),
             patch("seekr_hatchery.cli.sessions.restore_dockerfile_if_needed"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch") as mock_launch,
@@ -2004,11 +2005,11 @@ class TestLaunchHooks:
                 stack.enter_context(p)
             stack.enter_context(
                 patch(
-                    "seekr_hatchery.sessions.docker.launch_context",
-                    return_value=(docker.DockerConfig(), [], str(meta.worktree_path)),
+                    "seekr_hatchery.sandbox.launch.launch_context",
+                    return_value=(sandbox_config.SandboxConfig(), [], str(meta.worktree_path)),
                 )
             )
-            stack.enter_context(patch("seekr_hatchery.sessions.docker.run_session"))
+            stack.enter_context(patch("seekr_hatchery.sandbox.launch.run_session"))
             stack.enter_context(patch("seekr_hatchery.sessions.get_or_create_proxy_token", return_value="token"))
             mock_banner = stack.enter_context(patch("seekr_hatchery.sessions.ui.banner"))
             mock_chat_banner = stack.enter_context(patch("seekr_hatchery.sessions.ui.chat_banner"))
@@ -2464,9 +2465,9 @@ class TestCmdChatDispatch:
         with (
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path.home() / "repo", True)),
             patch("seekr_hatchery.sessions.next_chat_name", return_value="chat-1"),
-            patch("seekr_hatchery.cli.docker.ensure_dockerfile", return_value=False),
-            patch("seekr_hatchery.cli.docker.ensure_docker_config", return_value=False),
-            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.sandbox.scaffold.ensure_dockerfile", return_value=False),
+            patch("seekr_hatchery.sandbox.scaffold.ensure_config", return_value=False),
+            patch("seekr_hatchery.sandbox.launch.resolve_runtime", return_value=None),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli.sessions.save_task", side_effect=lambda m: saved_meta.update(m)),
             patch("seekr_hatchery.cli._launch"),
@@ -2487,9 +2488,9 @@ class TestCmdChatDispatch:
 
         with (
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path.home() / "repo", True)),
-            patch("seekr_hatchery.cli.docker.ensure_dockerfile", return_value=False),
-            patch("seekr_hatchery.cli.docker.ensure_docker_config", return_value=False),
-            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.sandbox.scaffold.ensure_dockerfile", return_value=False),
+            patch("seekr_hatchery.sandbox.scaffold.ensure_config", return_value=False),
+            patch("seekr_hatchery.sandbox.launch.resolve_runtime", return_value=None),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli.sessions.save_task", side_effect=lambda m: saved_meta.update(m)),
             patch("seekr_hatchery.cli._launch"),
@@ -2508,9 +2509,9 @@ class TestCmdChatDispatch:
         with (
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path.home() / "repo", True)),
             patch("seekr_hatchery.sessions.next_chat_name", return_value="chat-1"),
-            patch("seekr_hatchery.cli.docker.ensure_dockerfile", return_value=False),
-            patch("seekr_hatchery.cli.docker.ensure_docker_config", return_value=False),
-            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.sandbox.scaffold.ensure_dockerfile", return_value=False),
+            patch("seekr_hatchery.sandbox.scaffold.ensure_config", return_value=False),
+            patch("seekr_hatchery.sandbox.launch.resolve_runtime", return_value=None),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli.sessions.save_task"),
             patch("seekr_hatchery.cli._launch") as mock_launch,
@@ -2529,9 +2530,9 @@ class TestCmdChatDispatch:
         with (
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(Path.home() / "repo", True)),
             patch("seekr_hatchery.sessions.next_chat_name", return_value="chat-1"),
-            patch("seekr_hatchery.cli.docker.ensure_dockerfile", return_value=False),
-            patch("seekr_hatchery.cli.docker.ensure_docker_config", return_value=False),
-            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.sandbox.scaffold.ensure_dockerfile", return_value=False),
+            patch("seekr_hatchery.sandbox.scaffold.ensure_config", return_value=False),
+            patch("seekr_hatchery.sandbox.launch.resolve_runtime", return_value=None),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli.sessions.save_task"),
             patch("seekr_hatchery.cli._launch") as mock_launch,
@@ -2561,9 +2562,9 @@ class TestCmdChatDispatch:
         with (
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(repo, True)),
             patch("seekr_hatchery.sessions.next_chat_name", return_value="chat-1"),
-            patch("seekr_hatchery.cli.docker.ensure_dockerfile", return_value=False),
-            patch("seekr_hatchery.cli.docker.ensure_docker_config", return_value=False),
-            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.sandbox.scaffold.ensure_dockerfile", return_value=False),
+            patch("seekr_hatchery.sandbox.scaffold.ensure_config", return_value=False),
+            patch("seekr_hatchery.sandbox.launch.resolve_runtime", return_value=None),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli.sessions.save_task", side_effect=lambda m: saved_meta.update(m)),
             patch("seekr_hatchery.cli._launch"),
@@ -2633,7 +2634,7 @@ class TestResumeChat:
 
         with (
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
-            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.sandbox.launch.resolve_runtime", return_value=None),
             patch("seekr_hatchery.cli.sessions.restore_dockerfile_if_needed"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch") as mock_launch,
@@ -2652,9 +2653,9 @@ class TestResumeChat:
 
         with (
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
-            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
-            patch("seekr_hatchery.cli.sessions.docker.ensure_dockerfile"),
-            patch("seekr_hatchery.cli.sessions.docker.ensure_docker_config"),
+            patch("seekr_hatchery.sandbox.launch.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.sessions.sandbox_scaffold.ensure_dockerfile"),
+            patch("seekr_hatchery.cli.sessions.sandbox_scaffold.ensure_config"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli._launch") as mock_launch,
         ):
@@ -2681,12 +2682,12 @@ class TestExec:
             worktree=str(tmp_path),
             type="chat",
         )
-        runtime = docker.DockerRuntime()
+        runtime = sandbox_runtime.DockerRuntime()
         with (
             patch("seekr_hatchery.cli.git.git_root_or_cwd", return_value=(tmp_path, True)),
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
-            patch("seekr_hatchery.cli.docker.detect_runtime", return_value=runtime),
-            patch("seekr_hatchery.cli.docker.exec_task_shell") as mock_exec,
+            patch("seekr_hatchery.sandbox.runtime.detect_runtime", return_value=runtime),
+            patch("seekr_hatchery.sandbox.launch.exec_task_shell") as mock_exec,
         ):
             result = runner.invoke(cli, ["exec", "renamed-chat", *shell_args])
 
@@ -2826,9 +2827,7 @@ class TestCliNewInclude:
             mock_save.side_effect = saved_meta.update
 
             stack.enter_context(patch("seekr_hatchery.cli.git.create_include_worktrees"))
-            stack.enter_context(
-                patch("seekr_hatchery.cli.docker.load_docker_config", return_value=MagicMock(include=[]))
-            )
+            stack.enter_context(patch("seekr_hatchery.sandbox.config.load_config", return_value=MagicMock(include=[])))
 
             result = runner.invoke(cli, ["new", "my-task", "--include", "~/repo-b"])
 
@@ -2871,9 +2870,7 @@ class TestCliNewInclude:
             mock_docker.return_value = None
 
             mock_create_inc = stack.enter_context(patch("seekr_hatchery.cli.git.create_include_worktrees"))
-            stack.enter_context(
-                patch("seekr_hatchery.cli.docker.load_docker_config", return_value=MagicMock(include=[]))
-            )
+            stack.enter_context(patch("seekr_hatchery.sandbox.config.load_config", return_value=MagicMock(include=[])))
 
             runner.invoke(cli, ["new", "my-task", "--include", str(repo_b)])
 
@@ -2915,9 +2912,7 @@ class TestCliNewInclude:
             mock_docker.return_value = None
 
             stack.enter_context(patch("seekr_hatchery.cli.git.create_include_worktrees"))
-            stack.enter_context(
-                patch("seekr_hatchery.cli.docker.load_docker_config", return_value=MagicMock(include=[]))
-            )
+            stack.enter_context(patch("seekr_hatchery.sandbox.config.load_config", return_value=MagicMock(include=[])))
 
             runner.invoke(cli, ["new", "my-task", "--include", str(repo_b)])
 
@@ -2963,9 +2958,7 @@ class TestCliNewInclude:
             mock_remove_inc = stack.enter_context(patch("seekr_hatchery.cli.git.remove_include_worktrees"))
             mock_delete_inc = stack.enter_context(patch("seekr_hatchery.cli.git.delete_include_branches"))
             stack.enter_context(patch("seekr_hatchery.cli.git.create_include_worktrees"))
-            stack.enter_context(
-                patch("seekr_hatchery.cli.docker.load_docker_config", return_value=MagicMock(include=[]))
-            )
+            stack.enter_context(patch("seekr_hatchery.sandbox.config.load_config", return_value=MagicMock(include=[])))
 
             result = runner.invoke(cli, ["new", "my-task", "--include", str(repo_b)])
 
@@ -3010,9 +3003,7 @@ class TestCliNewInclude:
             mock_save.side_effect = saved_meta.update
 
             mock_create_inc = stack.enter_context(patch("seekr_hatchery.cli.git.create_include_worktrees"))
-            stack.enter_context(
-                patch("seekr_hatchery.cli.docker.load_docker_config", return_value=MagicMock(include=[]))
-            )
+            stack.enter_context(patch("seekr_hatchery.sandbox.config.load_config", return_value=MagicMock(include=[])))
 
             result = runner.invoke(cli, ["new", "my-task", "--include-ro", str(repo_b)])
 
@@ -3061,9 +3052,7 @@ class TestCliNewInclude:
             mock_save.side_effect = saved_meta.update
 
             mock_create_inc = stack.enter_context(patch("seekr_hatchery.cli.git.create_include_worktrees"))
-            stack.enter_context(
-                patch("seekr_hatchery.cli.docker.load_docker_config", return_value=MagicMock(include=[]))
-            )
+            stack.enter_context(patch("seekr_hatchery.sandbox.config.load_config", return_value=MagicMock(include=[])))
 
             result = runner.invoke(cli, ["new", "my-task", "--include-rw", str(repo_b)])
 
@@ -3092,9 +3081,7 @@ class TestCliNewInclude:
             mock_docker.return_value = None
 
             mock_create_inc = stack.enter_context(patch("seekr_hatchery.cli.git.create_include_worktrees"))
-            stack.enter_context(
-                patch("seekr_hatchery.cli.docker.load_docker_config", return_value=MagicMock(include=[]))
-            )
+            stack.enter_context(patch("seekr_hatchery.sandbox.config.load_config", return_value=MagicMock(include=[])))
 
             result = runner.invoke(cli, ["new", "my-task", "--no-worktree", "--include", str(repo_b)])
 
@@ -3144,7 +3131,7 @@ class TestCliNewInclude:
             stack.enter_context(patch("seekr_hatchery.cli.git.create_include_worktrees"))
             stack.enter_context(
                 patch(
-                    "seekr_hatchery.cli.docker.load_docker_config",
+                    "seekr_hatchery.sandbox.config.load_config",
                     return_value=MagicMock(include=[IncludeItem(path=str(repo_b), mode="ro")]),
                 )
             )
@@ -3200,7 +3187,7 @@ class TestCliNewInclude:
             # Pre-worktree load: no includes. Post-edit load: one include added.
             stack.enter_context(
                 patch(
-                    "seekr_hatchery.cli.docker.load_docker_config",
+                    "seekr_hatchery.sandbox.config.load_config",
                     side_effect=[MagicMock(include=[]), post_edit_config],
                 )
             )
@@ -3244,9 +3231,9 @@ class TestCliResumeInclude:
         with (
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
             patch("seekr_hatchery.cli.sessions.save", side_effect=lambda m: saved.append(m.model_dump())),
-            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
-            patch("seekr_hatchery.cli.sessions.docker.ensure_dockerfile"),
-            patch("seekr_hatchery.cli.sessions.docker.ensure_docker_config"),
+            patch("seekr_hatchery.sandbox.launch.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.sessions.sandbox_scaffold.ensure_dockerfile"),
+            patch("seekr_hatchery.cli.sessions.sandbox_scaffold.ensure_config"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli.git.create_include_worktrees"),
             patch("seekr_hatchery.cli.git.remove_include_worktrees"),
@@ -3320,9 +3307,9 @@ class TestCliResumeInclude:
         with (
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
             patch("seekr_hatchery.cli.sessions.save"),
-            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
-            patch("seekr_hatchery.cli.sessions.docker.ensure_dockerfile"),
-            patch("seekr_hatchery.cli.sessions.docker.ensure_docker_config"),
+            patch("seekr_hatchery.sandbox.launch.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.sessions.sandbox_scaffold.ensure_dockerfile"),
+            patch("seekr_hatchery.cli.sessions.sandbox_scaffold.ensure_config"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli.git.create_include_worktrees") as mock_create,
             patch("seekr_hatchery.cli.git.remove_include_worktrees") as mock_remove,
@@ -3350,9 +3337,9 @@ class TestCliResumeInclude:
         with (
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
             patch("seekr_hatchery.cli.sessions.save"),
-            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
-            patch("seekr_hatchery.cli.sessions.docker.ensure_dockerfile"),
-            patch("seekr_hatchery.cli.sessions.docker.ensure_docker_config"),
+            patch("seekr_hatchery.sandbox.launch.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.sessions.sandbox_scaffold.ensure_dockerfile"),
+            patch("seekr_hatchery.cli.sessions.sandbox_scaffold.ensure_config"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli.git.create_include_worktrees") as mock_create,
             patch("seekr_hatchery.cli.git.remove_include_worktrees") as mock_remove,
@@ -3392,9 +3379,9 @@ class TestCliResumeInclude:
         with (
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
             patch("seekr_hatchery.cli.sessions.save"),
-            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
-            patch("seekr_hatchery.cli.sessions.docker.ensure_dockerfile"),
-            patch("seekr_hatchery.cli.sessions.docker.ensure_docker_config"),
+            patch("seekr_hatchery.sandbox.launch.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.sessions.sandbox_scaffold.ensure_dockerfile"),
+            patch("seekr_hatchery.cli.sessions.sandbox_scaffold.ensure_config"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli.git.create_include_worktrees") as mock_create,
             patch("seekr_hatchery.cli.git.remove_include_worktrees") as mock_remove,
@@ -3427,9 +3414,9 @@ class TestCliResumeInclude:
         with (
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
             patch("seekr_hatchery.cli.sessions.save") as mock_save,
-            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
-            patch("seekr_hatchery.cli.sessions.docker.ensure_dockerfile"),
-            patch("seekr_hatchery.cli.sessions.docker.ensure_docker_config"),
+            patch("seekr_hatchery.sandbox.launch.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.sessions.sandbox_scaffold.ensure_dockerfile"),
+            patch("seekr_hatchery.cli.sessions.sandbox_scaffold.ensure_config"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli.git.create_worktree"),
             patch("seekr_hatchery.cli.git.create_include_worktrees") as mock_create_inc,
@@ -3470,9 +3457,9 @@ class TestCliResumeInclude:
         with (
             patch("seekr_hatchery.cli.sessions.load", return_value=meta),
             patch("seekr_hatchery.cli.sessions.save") as mock_save,
-            patch("seekr_hatchery.cli.docker.resolve_runtime", return_value=None),
-            patch("seekr_hatchery.cli.sessions.docker.ensure_dockerfile"),
-            patch("seekr_hatchery.cli.sessions.docker.ensure_docker_config"),
+            patch("seekr_hatchery.sandbox.launch.resolve_runtime", return_value=None),
+            patch("seekr_hatchery.cli.sessions.sandbox_scaffold.ensure_dockerfile"),
+            patch("seekr_hatchery.cli.sessions.sandbox_scaffold.ensure_config"),
             patch("seekr_hatchery.cli.git.get_default_branch", return_value="main"),
             patch("seekr_hatchery.cli.git.create_worktree"),
             patch("seekr_hatchery.cli.git.create_include_worktrees") as mock_create_inc,
@@ -3535,7 +3522,7 @@ class TestCliResumeInclude:
             # docker.yaml says worktree, CLI flag says ro
             stack.enter_context(
                 patch(
-                    "seekr_hatchery.cli.docker.load_docker_config",
+                    "seekr_hatchery.sandbox.config.load_config",
                     return_value=MagicMock(include=[IncludeItem(path=str(repo_b), mode="worktree")]),
                 )
             )
@@ -3856,7 +3843,7 @@ class TestLaunchFinalizeInclude:
         with (
             patch("seekr_hatchery.sessions.set_status"),
             patch("seekr_hatchery.sessions.sandbox_context", wraps=sessions.sandbox_context) as mock_ctx,
-            patch("seekr_hatchery.sessions.docker.launch_context", return_value=(MagicMock(), [], "/workspace")),
+            patch("seekr_hatchery.sandbox.launch.launch_context", return_value=(MagicMock(), [], "/workspace")),
             patch("seekr_hatchery.sessions.os.chdir"),
             patch("seekr_hatchery.sessions.subprocess.run"),
         ):
@@ -3882,7 +3869,7 @@ class TestLaunchFinalizeInclude:
         assert entry_b in kwargs.get("include_paths", [])
 
     def test_include_repos_forwarded_to_launch_docker(self, tmp_path, spy_backend):
-        """sessions.launch forwards include_repos to docker.run_session."""
+        """sessions.launch forwards include_repos to sandbox_launch.run_session."""
         repo = tmp_path / "repo"
         repo.mkdir()
         (repo / ".git").mkdir()
@@ -3892,16 +3879,16 @@ class TestLaunchFinalizeInclude:
         repo_b.mkdir()
         entry_b = IncludeEntry(path=repo_b, mode="worktree")
 
-        # docker.launch_context returns a config whose .kubernetes is None so sessions.launch
+        # sandbox_launch.launch_context returns a config whose .kubernetes is None so sessions.launch
         # short-circuits the kubectl-token write that would otherwise hit fs.
         config = MagicMock()
         config.kubernetes = None
         with (
             patch("seekr_hatchery.sessions.set_status"),
             patch("seekr_hatchery.sessions.get_or_create_proxy_token", return_value="tok"),
-            patch("seekr_hatchery.sessions.docker.run_session") as mock_run_session,
+            patch("seekr_hatchery.sandbox.launch.run_session") as mock_run_session,
             patch(
-                "seekr_hatchery.sessions.docker.launch_context",
+                "seekr_hatchery.sandbox.launch.launch_context",
                 return_value=(config, [], "/repo/.hatchery/worktrees/my-task"),
             ),
         ):
