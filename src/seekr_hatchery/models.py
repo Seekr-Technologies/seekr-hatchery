@@ -1,10 +1,10 @@
 """Pydantic models for hatchery domain objects.
 
 This module is a deliberate leaf: it imports only the ``branches`` and
-``includes`` domain leaves and is imported by both ``sessions`` and ``docker``. Keeping the
+``includes`` domain leaves and is imported by both ``sessions`` and ``sandbox.launch``. Keeping the
 model here means neither of those modules needs to import the other just
 for the type — relevant once subsequent refactors move lifecycle logic
-into ``sessions``, where ``sessions.launch`` will call ``docker.run_session``
+into ``sessions``, where ``sessions.launch`` will call ``sandbox_launch.run_session``
 and the cycle would otherwise close.
 """
 

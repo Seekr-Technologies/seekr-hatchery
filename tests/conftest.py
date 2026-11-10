@@ -8,7 +8,7 @@ import pytest
 import seekr_hatchery.agents as agent
 import seekr_hatchery.agents.codex as codex_backend
 import seekr_hatchery.constants as constants
-import seekr_hatchery.mount as mount
+import seekr_hatchery.sandbox.mount_types as mount
 import seekr_hatchery.sessions as sessions
 import seekr_hatchery.user_config as user_config
 import seekr_hatchery.utils as utils

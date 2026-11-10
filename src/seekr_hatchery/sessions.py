@@ -22,9 +22,13 @@ from typing import TYPE_CHECKING, Literal
 
 import seekr_hatchery.branches as branches
 import seekr_hatchery.constants as constants
-import seekr_hatchery.docker as docker
 import seekr_hatchery.git as git
 import seekr_hatchery.repo_config as repo_config
+import seekr_hatchery.sandbox.config as sandbox_config
+import seekr_hatchery.sandbox.images as sandbox_images
+import seekr_hatchery.sandbox.launch as sandbox_launch
+import seekr_hatchery.sandbox.runtime as sandbox_runtime
+import seekr_hatchery.sandbox.scaffold as sandbox_scaffold
 import seekr_hatchery.system_prompt as system_prompt
 import seekr_hatchery.ui as ui
 import seekr_hatchery.user_config as user_config
@@ -39,8 +43,8 @@ from seekr_hatchery.models import SCHEMA_VERSION, SessionMeta
 from seekr_hatchery.utils import edit_with_validation, open_for_editing, repo_id, run, to_name
 
 if TYPE_CHECKING:
+    import seekr_hatchery.sandbox.runtime as sandbox_runtime
     from seekr_hatchery.agents.agent_backend import AgentBackend
-    from seekr_hatchery.docker import ContainerRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -774,21 +778,21 @@ def restore_dockerfile_if_needed(
     if no_docker:
         return
     hdir = meta.hatchery_dir
-    agent_df = docker.dockerfile_path(hdir, backend)
+    agent_df = sandbox_scaffold.dockerfile_path(hdir, backend)
     if agent_df.exists():
         return
     if meta.no_commit:
         ui.note("Dockerfile missing — restoring.")
-        docker.ensure_dockerfile(hdir, backend)
-        docker.ensure_docker_config(hdir)
+        sandbox_scaffold.ensure_dockerfile(hdir, backend)
+        sandbox_scaffold.ensure_config(hdir)
     elif meta.no_worktree:
         ui.note("Dockerfile missing — regenerating in place.")
-        docker.ensure_dockerfile(hdir, backend)
-        docker.ensure_docker_config(hdir)
+        sandbox_scaffold.ensure_dockerfile(hdir, backend)
+        sandbox_scaffold.ensure_config(hdir)
     else:
         ui.note("Dockerfile missing from worktree — regenerating (will be committed to the task branch).")
-        docker.ensure_dockerfile(hdir, backend)
-        docker.ensure_docker_config(hdir)
+        sandbox_scaffold.ensure_dockerfile(hdir, backend)
+        sandbox_scaffold.ensure_config(hdir)
 
 
 def resolve_resume_kind(meta: SessionMeta) -> tuple[Literal["new", "resume"], str]:
@@ -898,7 +902,7 @@ def merge_includes_with_config(
     result = list(cli_entries)
 
     for entry in config_includes:
-        path_str, config_mode = docker.parse_docker_include_entry(entry)
+        path_str, config_mode = sandbox_config.parse_include_entry(entry)
         resolved = resolve_include_path(path_str, repo)
         if not resolved.exists():
             ui.warn(f"docker.yaml include path does not exist, skipping: {path_str}")
@@ -1002,7 +1006,7 @@ def _commit_docker_files(backend: "AgentBackend", worktree: Path) -> None:
         worktree,
         "chore: add hatchery Docker configuration",
         paths=[
-            str(docker.dockerfile_path(hdir, backend).relative_to(worktree)),
+            str(sandbox_scaffold.dockerfile_path(hdir, backend).relative_to(worktree)),
             str(Path(".hatchery") / DOCKER_CONFIG),
         ],
     )
@@ -1204,8 +1208,8 @@ def create(
         if is_chat:
             hdir = hatchery_dir(repo, worktree, no_commit=no_commit, no_worktree=no_worktree)
             (hdir / "tasks").mkdir(parents=True, exist_ok=True)
-            df_created = docker.ensure_dockerfile(hdir, backend)
-            dc_created = docker.ensure_docker_config(hdir)
+            df_created = sandbox_scaffold.ensure_dockerfile(hdir, backend)
+            dc_created = sandbox_scaffold.ensure_config(hdir)
             if in_repo and not no_commit and (df_created or dc_created):
                 _commit_docker_files(backend, repo)
         else:
@@ -1237,20 +1241,20 @@ def create(
             hdir = hatchery_dir(repo, worktree, no_commit=no_commit, no_worktree=no_worktree)
             (hdir / "tasks").mkdir(parents=True, exist_ok=True)
             if in_repo:
-                df_created = docker.ensure_dockerfile(hdir, backend)
-                dc_created = docker.ensure_docker_config(hdir)
+                df_created = sandbox_scaffold.ensure_dockerfile(hdir, backend)
+                dc_created = sandbox_scaffold.ensure_config(hdir)
                 if (df_created or dc_created) and not no_commit:
                     _commit_docker_files(backend, worktree)
             elif not no_docker:
-                docker.ensure_dockerfile(hdir, backend)
-                docker.ensure_docker_config(hdir)
+                sandbox_scaffold.ensure_dockerfile(hdir, backend)
+                sandbox_scaffold.ensure_config(hdir)
 
             # Re-read docker.yaml from the hatchery dir; new include entries get materialised.
-            post_config = docker.load_docker_config(hdir)
+            post_config = sandbox_config.load_config(hdir)
             post_include_paths = {x.path for x in include_entries}
             new_entries: list[IncludeEntry] = []
             for raw_entry in post_config.include:
-                path_str, mode = docker.parse_docker_include_entry(raw_entry)
+                path_str, mode = sandbox_config.parse_include_entry(raw_entry)
                 resolved = resolve_include_path(path_str, worktree)
                 if resolved not in post_include_paths and resolved.exists():
                     new_entries.append(IncludeEntry(path=resolved, mode=mode))
@@ -1391,16 +1395,16 @@ def prepare_sandbox(
         hdir.mkdir(exist_ok=True)
         if in_repo:
             ensure_git_exclude(repo, ".hatchery/")
-        docker.ensure_dockerfile(hdir, backend)
-        docker.ensure_docker_config(hdir)
+        sandbox_scaffold.ensure_dockerfile(hdir, backend)
+        sandbox_scaffold.ensure_config(hdir)
     else:
         hdir = repo / ".hatchery"
         ensure_tasks_dir(repo)
         if in_repo:
             git.remove_local_git_exclude(repo, ".hatchery/")
             _require_hatchery_tracking(repo)
-        df_created = docker.ensure_dockerfile(hdir, backend)
-        dc_created = docker.ensure_docker_config(hdir)
+        df_created = sandbox_scaffold.ensure_dockerfile(hdir, backend)
+        dc_created = sandbox_scaffold.ensure_config(hdir)
         if in_repo and (df_created or dc_created):
             _commit_docker_files(backend, repo)
     return hdir
@@ -1437,7 +1441,7 @@ def harness_root(main_repo: Path, backend: "AgentBackend", task_name: str | None
     return _nearest_root(
         main_repo,
         task_name,
-        lambda root: docker.dockerfile_path(root / ".hatchery", backend).exists(),
+        lambda root: sandbox_scaffold.dockerfile_path(root / ".hatchery", backend).exists(),
     )
 
 
@@ -1472,7 +1476,7 @@ def update_harness(
     cfg = repo_config.load_effective_config(repo)
     no_commit = repo_config.resolve_no_commit(cfg, commit)
 
-    df = docker.dockerfile_path(repo / ".hatchery", backend)
+    df = sandbox_scaffold.dockerfile_path(repo / ".hatchery", backend)
     if not df.exists():
         ui.error(f"No Dockerfile for '{kind}' at {df}.")
         ui.info(f"  Run `hatchery sandbox shell --agent {kind}` first to create it.")
@@ -1495,9 +1499,9 @@ def update_harness(
     df.write_text(new_text)
     ui.info(f"Updating {kind} harness from {old_version or 'unpinned'} → {version}")
 
-    runtime = docker.detect_runtime()
+    runtime = sandbox_runtime.detect_runtime()
     ui.info("Rebuilding sandbox…")
-    built = docker.build_docker_image(
+    built = sandbox_images.build_image(
         repo,
         repo / ".hatchery",
         image_name(repo, "sandbox"),
@@ -1588,8 +1592,8 @@ def edit_docker_config(
             ensure_git_exclude(main_repo, str(Path(".hatchery") / LOCAL_DOCKER_CONFIG))
         edit_with_validation(
             path,
-            lambda candidate: docker.validate_docker_config_file(candidate, base_path=hdir / constants.DOCKER_CONFIG),
-            seed=lambda: docker.ensure_local_docker_config(hdir),
+            lambda candidate: sandbox_config.validate_config_file(candidate, base_path=hdir / constants.DOCKER_CONFIG),
+            seed=lambda: sandbox_scaffold.ensure_local_config(hdir),
         )
         return
 
@@ -1598,8 +1602,8 @@ def edit_docker_config(
     path = hdir / constants.DOCKER_CONFIG
     edit_with_validation(
         path,
-        docker.validate_docker_config_file,
-        seed=lambda: docker.ensure_docker_config(hdir, prompt=False),
+        sandbox_config.validate_config_file,
+        seed=lambda: sandbox_scaffold.ensure_config(hdir, prompt=False),
     )
     _commit_edit(root, in_repo=in_repo, commit=commit, path=path, message="chore: update hatchery docker.yaml")
     _apply_hint(task_name)
@@ -1616,8 +1620,8 @@ def edit_harness(
     """Edit an agent's harness Dockerfile (Dockerfile.<agent>) for the resolved checkout."""
     root = harness_root(main_repo, backend, task_name)
     hdir = root / ".hatchery"
-    path = docker.dockerfile_path(hdir, backend)
-    edit_with_validation(path, seed=lambda: docker.ensure_dockerfile(hdir, backend, prompt=False))
+    path = sandbox_scaffold.dockerfile_path(hdir, backend)
+    edit_with_validation(path, seed=lambda: sandbox_scaffold.ensure_dockerfile(hdir, backend, prompt=False))
     _commit_edit(root, in_repo=in_repo, commit=commit, path=path, message=f"chore: update {backend.kind} Dockerfile")
     _apply_hint(task_name)
 
@@ -1635,7 +1639,7 @@ def launch(
     *,
     kind: Literal["new", "resume", "finalize"],
     backend: "AgentBackend",
-    runtime: "ContainerRuntime | None",
+    runtime: "sandbox_runtime.ContainerRuntime | None",
     main_branch: str,
     session_id: str,
     no_cache: bool = False,
@@ -1691,7 +1695,7 @@ def launch(
         system_prompt_text = configured_prompt.rstrip() + "\n\n" + env_ctx
         initial_prompt = "" if kind == "finalize" else session_prompt(meta, prompt_note)
 
-    config, features, container_workdir = docker.launch_context(meta, runtime)
+    config, features, container_workdir = sandbox_launch.launch_context(meta, runtime)
 
     docker_flag = bool(runtime)
     if kind == "new":
@@ -1747,7 +1751,7 @@ def launch(
             kubectl_proxy_token = (
                 get_or_create_kubectl_token(meta.session_dir) if config and config.kubernetes else None
             )
-            docker.run_session(
+            sandbox_launch.run_session(
                 meta,
                 backend,
                 agent_cmd,

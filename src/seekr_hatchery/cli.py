@@ -18,11 +18,13 @@ import click
 from click.shell_completion import CompletionItem
 
 import seekr_hatchery.agents as agent
-import seekr_hatchery.docker as docker
 import seekr_hatchery.git as git
 import seekr_hatchery.logging_ as logging_
 import seekr_hatchery.repo_config as repo_config
-import seekr_hatchery.seeded_volumes as seeded_volumes
+import seekr_hatchery.sandbox.config as sandbox_config
+import seekr_hatchery.sandbox.launch as sandbox_launch
+import seekr_hatchery.sandbox.runtime as sandbox_runtime
+import seekr_hatchery.sandbox.volumes as sandbox_volumes
 import seekr_hatchery.sessions as sessions
 import seekr_hatchery.system_prompt as system_prompt
 import seekr_hatchery.ui as ui
@@ -186,7 +188,7 @@ def _cleanup_task(repo: Path, name: str) -> None:
     Currently just the clipboard image cache; future per-task ephemeral
     state (e.g. scratch dirs, agent caches) should be wired in here.
     """
-    docker.remove_clipboard_dir(sessions.task_session_dir(repo, name))
+    sandbox_launch.remove_clipboard_dir(sessions.task_session_dir(repo, name))
 
 
 def _do_delete(meta: sessions.SessionMeta, *, confirmed: bool = False) -> None:
@@ -207,7 +209,7 @@ def _do_delete(meta: sessions.SessionMeta, *, confirmed: bool = False) -> None:
 
     sessions.delete(meta)
     _cleanup_task(meta.repo_path, meta.name)
-    seeded_volumes.cleanup_task_volumes(meta.repo_path, meta.runtime_name)
+    sandbox_volumes.cleanup_task_volumes(meta.repo_path, meta.runtime_name)
 
 
 def _launch(
@@ -215,7 +217,7 @@ def _launch(
     *,
     kind: Literal["new", "resume", "finalize"],
     backend: agent.AgentBackend,
-    runtime: docker.ContainerRuntime | None,
+    runtime: sandbox_runtime.ContainerRuntime | None,
     main_branch: str,
     session_id: str,
     no_cache: bool = False,
@@ -299,7 +301,7 @@ def _post_exit_check(
             ui.error("no session ID found. Cannot relaunch.")
             return
         backend = agent.from_kind(meta.agent)
-        runtime = docker.resolve_runtime(meta.hatchery_dir, no_docker=not sandbox, backend=backend)
+        runtime = sandbox_launch.resolve_runtime(meta.hatchery_dir, no_docker=not sandbox, backend=backend)
         main_branch = git.get_default_branch(repo)
         include_repos = load_include_entries({"include": meta.include})
         _launch(
@@ -597,7 +599,7 @@ def cmd_new(
 
     # Resolve --include paths: convert CLI tuples → entries, then sessions
     # merges them with docker.yaml's 'include:' list.
-    early_config = docker.load_docker_config(repo / ".hatchery")
+    early_config = sandbox_config.load_config(repo / ".hatchery")
     include_repos = sessions.merge_includes_with_config(
         _cli_includes_to_entries(include, include_rw, include_ro),
         early_config.include,
@@ -629,7 +631,7 @@ def cmd_new(
         ui.warn("Cancelled.")
         sys.exit(1)
 
-    runtime = docker.resolve_runtime(meta.hatchery_dir, no_docker, backend=backend)
+    runtime = sandbox_launch.resolve_runtime(meta.hatchery_dir, no_docker, backend=backend)
     main_branch = git.get_default_branch(repo) if in_repo else ""
     include_repos = load_include_entries({"include": meta.include})
     try:
@@ -706,7 +708,7 @@ def cmd_chat(name: str | None, agent_name: str, rebuild_sandbox: bool, commit: b
         ui.warn("Cancelled.")
         sys.exit(1)
 
-    runtime = docker.resolve_runtime(meta.hatchery_dir, no_docker=False, backend=backend)
+    runtime = sandbox_launch.resolve_runtime(meta.hatchery_dir, no_docker=False, backend=backend)
     main_branch = git.get_default_branch(repo) if in_repo else ""
     _launch(
         meta,
@@ -786,7 +788,7 @@ def cmd_promote(
     cfg = repo_config.load_effective_config(repo)
     no_commit = repo_config.resolve_no_commit(cfg, commit)
     use_editor = editor if editor is not None else cfg.open_editor
-    early_config = docker.load_docker_config(repo / ".hatchery")
+    early_config = sandbox_config.load_config(repo / ".hatchery")
     include_repos = sessions.merge_includes_with_config([], early_config.include, repo)
     objective = None if use_editor else _prompt_objective()
 
@@ -920,7 +922,7 @@ def cmd_resume(
     updates = _cli_includes_to_entries(include, include_rw, include_ro)
     include_repos = sessions.merge_include_updates(include_repos, updates, meta)
 
-    runtime = docker.resolve_runtime(meta.hatchery_dir, no_docker, backend=backend)
+    runtime = sandbox_launch.resolve_runtime(meta.hatchery_dir, no_docker, backend=backend)
     _launch(
         meta,
         kind=launch_kind,
@@ -973,11 +975,11 @@ def cmd_sandbox_shell(shell: str, agent_name: str, rebuild_sandbox: bool, commit
 
     hdir = sessions.prepare_sandbox(repo, in_repo=in_repo, backend=backend, no_commit=no_commit)
 
-    runtime = docker.detect_runtime()
-    config = docker.load_docker_config(hdir)
-    features = docker.docker_features(config)
+    runtime = sandbox_runtime.detect_runtime()
+    config = sandbox_config.load_config(hdir)
+    features = sandbox_config.features(config)
     ui.banner("sandbox", repo, sandbox=True, worktree=False, features=features)
-    docker.launch_sandbox_shell(
+    sandbox_launch.launch_shell(
         repo,
         backend,
         config,
@@ -1088,8 +1090,8 @@ def cmd_exec(name: str, shell: str) -> None:
     """Exec an interactive shell into a running task's container."""
     repo, _ = git.git_root_or_cwd()
     meta = sessions.load(repo, name)
-    runtime = docker.detect_runtime()
-    docker.exec_task_shell(meta.container_name, runtime, shell=shell)
+    runtime = sandbox_runtime.detect_runtime()
+    sandbox_launch.exec_task_shell(meta.container_name, runtime, shell=shell)
 
 
 @cli.command("done")
