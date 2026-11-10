@@ -166,7 +166,7 @@ The prefix is concatenated with the task name exactly as configured and does not
 
 ## Docker sandbox
 
-By default, `new` and `resume` build a Docker image from the selected agent's `.hatchery/Dockerfile.<agent>` and run the agent inside it. On first `new`, if no matching Dockerfile exists, a starter is created for the selected agent and opened for editing. The sandbox launch banner shows the active worktree and Hatchery directory relative to the displayed repository; the Hatchery directory contains the Dockerfile and `docker.yaml` used for the session. Showing both paths makes it clear when a `--no-commit` worktree is using repository-level sandbox configuration. Configuration-validation and image-build errors also print the exact `docker.yaml` or `Dockerfile.<agent>` path involved.
+By default, `new` and `resume` run the agent inside a Docker image built from the selected agent's `.hatchery/Dockerfile.<agent>`. Sandbox launches (including `chat` and `sandbox shell`) reuse a shared image tagged `hatchery/cache:<fingerprint>`, where the fingerprint covers the selected agent and Dockerfile contents. A matching cache image is tagged for the session without running a build, so new tasks and chats can reuse identical images across sessions and repositories. Hatchery prints `Using cached sandbox image '<session-image>'` followed by `Sandbox image ready.` on reuse. Missing, changed, or unlabeled cache images are built automatically using the layer cache and tagged for both the session and the shared cache. Images created before shared caching was introduced require one build to populate the cache. Use `--rebuild-sandbox` to bypass reuse, force a build without the layer cache, and refresh the shared cache, for example to refresh packages installed by the Dockerfile. Remote inputs (such as base-image tags and package registries) are not checked during reuse; a forced rebuild does not guarantee pulling a newer base image. On first `new`, if no matching Dockerfile exists, a starter is created for the selected agent and opened for editing. The sandbox launch banner shows the active worktree and Hatchery directory relative to the displayed repository; the Hatchery directory contains the Dockerfile and `docker.yaml` used for the session. Showing both paths makes it clear when a `--no-commit` worktree is using repository-level sandbox configuration. Configuration-validation and image-build errors also print the exact `docker.yaml` or `Dockerfile.<agent>` path involved.
 
 The container receives:
 
@@ -319,7 +319,7 @@ DinD enables the agent to run a nested container engine inside its Docker sandbo
    mounts: []
    ```
 
-3. Run `hatchery new <name>` or `resume <name>` — the image rebuild is only slow the first time after the Dockerfile change; subsequent runs hit the layer cache.
+3. Run `hatchery new <name>` or `resume <name>` — the image rebuild is only slow the first time after the Dockerfile change; subsequent unchanged launches reuse the image without running a build.
 
 **What you can do inside the container:**
 
