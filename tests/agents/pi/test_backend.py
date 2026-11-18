@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -310,6 +311,140 @@ class TestProxyEndpoints:
 
         assert (endpoint.key, endpoint.target_host) == ("openai", "gateway.example")
 
+    def test_discovers_custom_model_level_base_url(self, home, monkeypatch):
+        _write_models(
+            home,
+            json.dumps(
+                {
+                    "providers": {
+                        "custom": {
+                            "models": [
+                                {
+                                    "id": "coder",
+                                    "api": "openai-completions",
+                                    "baseUrl": "https://models.example.com/v1",
+                                }
+                            ]
+                        }
+                    }
+                }
+            ),
+        )
+        _stub_checks(monkeypatch, {"custom": ("api_key", "sk-custom")})
+
+        (endpoint,) = agent.PI.proxy_endpoints()
+
+        assert (endpoint.key, endpoint.target_host) == ("custom", "models.example.com")
+
+    def test_provider_base_url_overrides_catalog_model_origins(self, home, monkeypatch):
+        _write_store(home, {"mixed": ("openai-completions", "https://catalog-one.example/v1")})
+        store_path = home / ".pi" / "agent" / "models-store.json"
+        store = json.loads(store_path.read_text())
+        store["mixed"]["models"].append(
+            {"id": "second", "api": "openai-completions", "baseUrl": "https://catalog-two.example/v1"}
+        )
+        store_path.write_text(json.dumps(store))
+        _write_models(home, json.dumps({"providers": {"mixed": {"baseUrl": "https://gateway.example/v2"}}}))
+        _stub_checks(monkeypatch, {"mixed": ("api_key", "sk-mixed")})
+
+        (endpoint,) = agent.PI.proxy_endpoints()
+
+        assert (endpoint.key, endpoint.target_host) == ("mixed", "gateway.example")
+
+    def test_model_base_url_overrides_provider_and_matching_catalog_defaults(self, home, monkeypatch):
+        _write_store(home, {"custom": ("openai-completions", "https://catalog.example/v1")})
+        store_path = home / ".pi" / "agent" / "models-store.json"
+        store = json.loads(store_path.read_text())
+        store["custom"]["models"][0]["id"] = "coder"
+        store_path.write_text(json.dumps(store))
+        _write_models(
+            home,
+            json.dumps(
+                {
+                    "providers": {
+                        "custom": {
+                            "baseUrl": "https://provider.example/v1",
+                            "models": [{"id": "coder", "baseUrl": "https://model.example/v1"}],
+                        }
+                    }
+                }
+            ),
+        )
+        _stub_checks(monkeypatch, {"custom": ("api_key", "sk-custom")})
+
+        (endpoint,) = agent.PI.proxy_endpoints()
+
+        assert (endpoint.key, endpoint.target_host) == ("custom", "model.example")
+
+    @pytest.mark.parametrize(
+        "custom_url",
+        [
+            "https://custom.example/v1?query-secret#fragment-secret",
+            "https://catalog.example:8443/v1",
+            "http://catalog.example/v1",
+        ],
+        ids=["host", "port", "scheme"],
+    )
+    def test_rejects_provider_with_differing_effective_model_origins(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch, custom_url: str
+    ) -> None:
+        _write_store(home, {"mixed": ("openai-completions", "https://catalog.example/v1")})
+        _write_models(
+            home,
+            json.dumps(
+                {
+                    "providers": {
+                        "mixed": {
+                            "models": [
+                                {
+                                    "id": "custom",
+                                    "baseUrl": custom_url,
+                                }
+                            ]
+                        }
+                    }
+                }
+            ),
+        )
+        _stub_checks(monkeypatch, {"mixed": ("api_key", "sk-mixed")})
+
+        with pytest.raises(RuntimeError) as error:
+            agent.PI.proxy_endpoints()
+
+        assert str(error.value) == (
+            "pi provider 'mixed' uses multiple upstream origins; configure its model and provider base URLs "
+            "to use one origin before starting a container"
+        )
+
+    @pytest.mark.parametrize("explicit_first", [False, True])
+    def test_accepts_equivalent_default_https_ports(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch, explicit_first: bool
+    ) -> None:
+        urls = ["https://gateway.example/api", "https://gateway.example:443/api/v1"]
+        if explicit_first:
+            urls.reverse()
+        _write_store(home, {"custom": ("openai-completions", urls[0])})
+        _write_models(home, json.dumps({"providers": {"custom": {"models": [{"id": "second", "baseUrl": urls[1]}]}}}))
+        _stub_checks(monkeypatch, {"custom": ("api_key", "sk-custom")})
+
+        endpoints = agent.PI.proxy_endpoints()
+
+        assert [(endpoint.key, endpoint.target_host) for endpoint in endpoints] == [("custom", "gateway.example")]
+
+    def test_accepts_distinct_model_paths_on_one_origin(self, home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _write_store(home, {"custom": ("openai-completions", "https://gateway.example/api")})
+        _write_models(
+            home,
+            json.dumps(
+                {"providers": {"custom": {"models": [{"id": "second", "baseUrl": "https://gateway.example/api/v1"}]}}}
+            ),
+        )
+        _stub_checks(monkeypatch, {"custom": ("api_key", "sk-custom")})
+
+        endpoints = agent.PI.proxy_endpoints()
+
+        assert [(endpoint.key, endpoint.target_host) for endpoint in endpoints] == [("custom", "gateway.example")]
+
     def test_container_oauth_tracks_resolved_auth_type(self, home, monkeypatch):
         _write_store(home, _STORE)
         _stub_checks(
@@ -444,29 +579,29 @@ class TestRefresh:
 
 
 class TestContainerEnv:
-    def test_no_base_path(self, home):
+    def test_uses_proxy_origin_without_provider_base_path(self, home):
         _write_store(home, _STORE)
         assert agent.PI.container_env(_ep("acme"), "proxy-tok", 9999) == {
             "HATCHERY_PI_ACME_ID": "acme",
-            "HATCHERY_PI_ACME_BASEURL": "http://host.docker.internal:9999",
+            "HATCHERY_PI_ACME_PROXY_ORIGIN": "http://host.docker.internal:9999",
             "HATCHERY_PI_ACME_KEY": "proxy-tok",
             "HATCHERY_PI_ACME_SHAPE": "api_key",
         }
 
-    def test_openai_carries_base_path(self, home):
+    def test_openai_uses_the_same_proxy_origin(self, home):
         _write_store(home, _STORE)
         assert agent.PI.container_env(_ep("openai"), "proxy-tok", 9999) == {
             "HATCHERY_PI_OPENAI_ID": "openai",
-            "HATCHERY_PI_OPENAI_BASEURL": "http://host.docker.internal:9999/v1",
+            "HATCHERY_PI_OPENAI_PROXY_ORIGIN": "http://host.docker.internal:9999",
             "HATCHERY_PI_OPENAI_KEY": "proxy-tok",
             "HATCHERY_PI_OPENAI_SHAPE": "api_key",
         }
 
-    def test_openai_codex_is_oauth_shaped_with_store_base_path(self, home):
+    def test_openai_codex_is_oauth_shaped_without_store_base_path(self, home):
         _write_store(home, {"openai-codex": ("openai-codex-responses", "https://chatgpt.com/backend-api")})
         assert agent.PI.container_env(_ep("openai-codex", oauth=True), "proxy-tok", 9999) == {
             "HATCHERY_PI_OPENAI_CODEX_ID": "openai-codex",
-            "HATCHERY_PI_OPENAI_CODEX_BASEURL": "http://host.docker.internal:9999/backend-api",
+            "HATCHERY_PI_OPENAI_CODEX_PROXY_ORIGIN": "http://host.docker.internal:9999",
             "HATCHERY_PI_OPENAI_CODEX_KEY": "proxy-tok",
             "HATCHERY_PI_OPENAI_CODEX_SHAPE": "oauth",
         }
@@ -494,20 +629,31 @@ class TestConstructMounts:
             mount.BindMount(src=agent_dir, dst=agent_dst, follow_links="RECURSIVE"),
             mount.BindMount(src=tmp_path / "pi-config/auth.json", dst=f"{agent_dst}/auth.json"),
             mount.BindMount(src=tmp_path / "pi-config/models.json", dst=f"{agent_dst}/models.json"),
+            mount.BindMount(src=tmp_path / "pi-config/models-store.json", dst=f"{agent_dst}/models-store.json"),
             mount.VolumeMount(name="pi-bin", dst=f"{agent_dst}/bin", seed=pi_backend._seed_empty_state),
             mount.VolumeMount(name="pi-sessions", dst=f"{agent_dst}/sessions", seed=pi_backend._seed_empty_state),
+            mount.BindMount(
+                src=tmp_path / pi_backend._HOST_MODELS_STORE_FILENAME,
+                dst=f"{agent_dst}/{pi_backend._HOST_MODELS_STORE_FILENAME}",
+                mode="RO",
+            ),
         ]
         assert agent_dir.is_dir()
         assert {path.name: json.loads(path.read_text()) for path in (tmp_path / "pi-config").iterdir()} == {
             "auth.json": {},
             "models.json": {},
+            "models-store.json": {},
         }
         assert list(agent_dir.iterdir()) == []
 
     def test_reconstruction_preserves_task_files_and_host_credentials(self, home, tmp_path):
         agent_dir = home / ".pi" / "agent"
         agent_dir.mkdir(parents=True)
-        host_files = {"auth.json": "host-auth-secret", "models.json": "host-model-secret"}
+        host_files = {
+            "auth.json": "host-auth-secret",
+            "models.json": "host-model-secret",
+            "models-store.json": "host-catalog",
+        }
         for name, content in host_files.items():
             (agent_dir / name).write_text(content)
         mounts = agent.PI.construct_mounts(tmp_path)
@@ -519,7 +665,47 @@ class TestConstructMounts:
         assert {name: (tmp_path / "pi-config" / name).read_text() for name in host_files} == {
             "auth.json": "task-local",
             "models.json": "task-local",
+            "models-store.json": "task-local",
         }
+
+    @pytest.mark.parametrize("catalog_shape", ["missing", "regular", "symlink"])
+    def test_snapshots_host_catalog_into_isolated_task_input(
+        self, home: Path, tmp_path: Path, catalog_shape: str
+    ) -> None:
+        agent_dir = home / ".pi/agent"
+        agent_dir.mkdir(parents=True)
+        catalog = {"openai": {"models": [{"id": "coder", "baseUrl": "https://gateway.example/v1"}]}}
+        external = tmp_path / "external-catalog.json"
+        external.write_text(json.dumps(catalog))
+        host_catalog = agent_dir / "models-store.json"
+        if catalog_shape == "regular":
+            host_catalog.write_text(json.dumps(catalog))
+        elif catalog_shape == "symlink":
+            host_catalog.symlink_to(external)
+        # A similarly named host file must not become the wrapper's input.
+        (agent_dir / pi_backend._HOST_MODELS_STORE_FILENAME).write_text("untrusted-host-input")
+        session_dir = tmp_path / "session"
+
+        mounts = agent.PI.construct_mounts(session_dir)
+
+        expected = {} if catalog_shape == "missing" else catalog
+        snapshot = session_dir / pi_backend._HOST_MODELS_STORE_FILENAME
+        assert (
+            mount.BindMount(
+                src=snapshot,
+                dst=f"{agent.CONTAINER_HOME}/.pi/agent/{pi_backend._HOST_MODELS_STORE_FILENAME}",
+                mode="RO",
+            )
+            in mounts
+        )
+        assert json.loads(snapshot.read_text()) == expected
+        (session_dir / "pi-config/models-store.json").write_text("routed-task-catalog")
+        assert json.loads(external.read_text()) == catalog
+        if catalog_shape == "missing":
+            assert not host_catalog.exists()
+        else:
+            assert json.loads(host_catalog.read_text()) == catalog
+        assert (agent_dir / pi_backend._HOST_MODELS_STORE_FILENAME).read_text() == "untrusted-host-input"
 
     def test_mounts_sanitized_host_models_copy(self, home, tmp_path):
         session_models = tmp_path / pi_backend._HOST_MODELS_FILENAME
@@ -543,7 +729,7 @@ def test_shared_agent_directory_in_container(home: Path, tmp_path: Path, credent
     agent_dir.mkdir(parents=True)
     secrets = tmp_path / "secrets"
     secrets.mkdir()
-    for name in ("auth.json", "models.json"):
+    for name in ("auth.json", "models.json", "models-store.json"):
         (secrets / name).write_text(f"host-secret-{name}")
         if credential_shape == "regular":
             (agent_dir / name).write_text(f"host-secret-{name}")
@@ -610,6 +796,7 @@ def test_shared_agent_directory_in_container(home: Path, tmp_path: Path, credent
                 cd {dst}
                 test "$(cat auth.json)" = '{{}}'
                 test "$(cat models.json)" = '{{}}'
+                test "$(cat models-store.json)" = '{{}}'
                 test "$(cat APPEND_SYSTEM.md)" = 'user instructions'
                 test "$(cat custom-resources/dependency.txt)" = dependency
                 test ! -e agent-alias/auth.json
@@ -626,6 +813,7 @@ def test_shared_agent_directory_in_container(home: Path, tmp_path: Path, credent
                 test ! -e sessions/host-only
                 echo task-auth > auth.json
                 echo task-models > models.json
+                echo task-catalog > models-store.json
                 echo task-bin > bin/task-only
                 echo task-session > sessions/task-only
                 echo shared > new-user-file
@@ -649,6 +837,7 @@ def test_shared_agent_directory_in_container(home: Path, tmp_path: Path, credent
                 cd {dst}
                 test "$(cat auth.json)" = task-auth
                 test "$(cat models.json)" = task-models
+                test "$(cat models-store.json)" = task-catalog
                 test "$(cat bin/task-only)" = task-bin
                 test "$(cat sessions/task-only)" = task-session
             """,
@@ -662,7 +851,7 @@ def test_shared_agent_directory_in_container(home: Path, tmp_path: Path, credent
             subprocess.run(["podman", "volume", "rm", "--force", volume], capture_output=True, check=True)
     assert instructions.read_text() == "updated\n"
     assert (agent_dir / "new-user-file").read_text() == "shared\n"
-    for name in ("auth.json", "models.json"):
+    for name in ("auth.json", "models.json", "models-store.json"):
         assert (secrets / name).read_text() == f"host-secret-{name}"
         if credential_shape != "missing":
             assert (agent_dir / name).read_text() == f"host-secret-{name}"
@@ -746,12 +935,296 @@ class TestLifecycleHooks:
 
 
 class TestDockerWrapperSecurity:
+    @pytest.mark.parametrize("provider_id", ["openai-codex", "openai"])
+    @pytest.mark.parametrize("last_modified", [None, 1], ids=["timestamp-free", "stale"])
+    def test_routes_models_even_when_pi_ignores_cached_catalog(
+        self, tmp_path: Path, provider_id: str, last_modified: int | None
+    ) -> None:
+        pi = shutil.which("pi")
+        if pi is None:
+            pytest.skip("Real Pi runtime regression requires an installed Pi CLI")
+        runtime_path = next(
+            (
+                parent / "dist/core/model-runtime.js"
+                for parent in Path(pi).resolve().parents
+                if (parent / "dist/core/model-runtime.js").is_file()
+            ),
+            None,
+        )
+        if runtime_path is None:
+            pytest.skip("Installed Pi does not expose ModelRuntime")
+        agent_dir = tmp_path / ".pi/agent"
+        agent_dir.mkdir(parents=True)
+        env = {**os.environ, "HOME": str(tmp_path), "PI_OFFLINE": "1"}
+        runtime_script = f"""
+import {{ ModelRuntime }} from {json.dumps(runtime_path.as_uri())};
+const dir = process.env.HOME + "/.pi/agent";
+const runtime = await ModelRuntime.create({{
+  modelsPath: dir + "/models.json", authPath: dir + "/auth.json",
+  modelsStorePath: dir + "/models-store.json", allowModelNetwork: false,
+}});
+const models = runtime.getModels({json.dumps(provider_id)});
+console.log(JSON.stringify(models));
+"""
+        baseline = subprocess.run(
+            ["node", "--input-type=module", "-e", runtime_script], env=env, capture_output=True, text=True, check=True
+        )
+        catalog_models = json.loads(baseline.stdout)[:2]
+        assert len(catalog_models) == 2
+        first, second = catalog_models
+        # Distinct paths in a catalog Pi will ignore must still be authoritative.
+        first["baseUrl"] = "https://gateway.example/first"
+        second["baseUrl"] = "https://gateway.example/second"
+        catalog = {"models": catalog_models}
+        if last_modified is not None:
+            catalog["lastModified"] = last_modified
+        (agent_dir / pi_backend._HOST_MODELS_STORE_FILENAME).write_text(json.dumps({provider_id: catalog}))
+        (agent_dir / pi_backend._HOST_MODELS_FILENAME).write_text(
+            json.dumps(
+                {
+                    "providers": {
+                        provider_id: {"models": [{"id": first["id"], "baseUrl": "https://gateway.example/custom"}]}
+                    }
+                }
+            )
+        )
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        pi_shim = bin_dir / "pi"
+        pi_shim.write_text("#!/bin/sh\nexit 0\n")
+        pi_shim.chmod(0o755)
+        prefix = "HATCHERY_PI_" + provider_id.upper().replace("-", "_")
+        env.update(
+            {
+                "PATH": _path_with_pi_shim(bin_dir),
+                f"{prefix}_ID": provider_id,
+                f"{prefix}_PROXY_ORIGIN": "http://host.docker.internal:12345",
+                f"{prefix}_KEY": "proxy-token",
+                f"{prefix}_SHAPE": "api_key",
+            }
+        )
+        subprocess.run(
+            ["sh", "-c", agent.PI._DOCKER_WRAPPER, "sh"], env=env, capture_output=True, text=True, check=True
+        )
+
+        resolved = subprocess.run(
+            ["node", "--input-type=module", "-e", runtime_script], env=env, capture_output=True, text=True, check=True
+        )
+
+        resolved_models = json.loads(resolved.stdout)
+        resolved_urls = [urlsplit(model["baseUrl"]) for model in resolved_models]
+        assert [(url.scheme, url.hostname, url.port) for url in resolved_urls] == [
+            ("http", "host.docker.internal", 12345)
+        ] * len(resolved_models)
+        assert [(model["id"], model["baseUrl"]) for model in resolved_models[:2]] == [
+            (first["id"], "http://host.docker.internal:12345/custom"),
+            (second["id"], "http://host.docker.internal:12345/second"),
+        ]
+
+    @pytest.mark.parametrize("existing_mode", [None, 0o600], ids=["new", "resume"])
+    def test_replaces_catalog_on_launch_without_changing_session_state(
+        self, tmp_path: Path, existing_mode: int | None
+    ) -> None:
+        agent_dir = tmp_path / ".pi" / "agent"
+        agent_dir.mkdir(parents=True)
+        catalog = agent_dir / "models-store.json"
+        if existing_mode is not None:
+            catalog.write_text('{"old": true}')
+            catalog.chmod(existing_mode)
+        original_inode = catalog.stat().st_ino if catalog.exists() else None
+        source = agent_dir / pi_backend._HOST_MODELS_STORE_FILENAME
+        source.write_text(
+            '{"openrouter":{"models":[{"id":"coder","api":"openai-completions",'
+            '"baseUrl":"https://openrouter.ai/api/v1"}]}}'
+        )
+        session = agent_dir / "sessions" / "existing.jsonl"
+        session.parent.mkdir()
+        session.write_text("existing session\n")
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        pi_shim = bin_dir / "pi"
+        pi_shim.write_text("#!/bin/sh\nexit 0\n")
+        pi_shim.chmod(0o755)
+        env = {
+            "HOME": str(tmp_path),
+            "PATH": _path_with_pi_shim(bin_dir),
+            "HATCHERY_PI_OPENROUTER_ID": "openrouter",
+            "HATCHERY_PI_OPENROUTER_PROXY_ORIGIN": "http://host.docker.internal:12345",
+            "HATCHERY_PI_OPENROUTER_KEY": "proxy-token",
+            "HATCHERY_PI_OPENROUTER_SHAPE": "api_key",
+        }
+
+        result = subprocess.run(
+            ["sh", "-c", pi_backend.PiBackend._DOCKER_WRAPPER, "sh"],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        assert (result.returncode, result.stderr) == (0, "")
+        if original_inode is not None:
+            assert catalog.stat().st_ino == original_inode  # Single-file bind mounts require in-place writes.
+        assert json.loads(catalog.read_text()) == {
+            "openrouter": {
+                "models": [
+                    {
+                        "id": "coder",
+                        "api": "openai-completions",
+                        "baseUrl": "http://host.docker.internal:12345/api/v1",
+                    }
+                ]
+            }
+        }
+        assert session.read_text() == "existing session\n"
+        assert json.loads(source.read_text()) == {
+            "openrouter": {
+                "models": [{"id": "coder", "api": "openai-completions", "baseUrl": "https://openrouter.ai/api/v1"}]
+            }
+        }
+        assert sorted(item.name for item in agent_dir.iterdir()) == [
+            "auth.json",
+            pi_backend._HOST_MODELS_STORE_FILENAME,
+            "models-store.json",
+            "models.json",
+            "sessions",
+        ]
+
+    @pytest.mark.parametrize("caller_offline", [None, "0"])
+    def test_exports_offline_mode_to_pi_and_its_children(self, tmp_path: Path, caller_offline: str | None) -> None:
+        fake_home = tmp_path / "fakehome"
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        pi_shim = bin_dir / "pi"
+        pi_shim.write_text(
+            r"""#!/bin/sh
+printf '%s\n' "$PI_OFFLINE"
+sh -c 'printf "%s\n" "$PI_OFFLINE"'
+"""
+        )
+        pi_shim.chmod(0o755)
+        env = {"HOME": str(fake_home), "PATH": _path_with_pi_shim(bin_dir)}
+        if caller_offline is not None:
+            env["PI_OFFLINE"] = caller_offline
+
+        result = subprocess.run(
+            ["sh", "-c", pi_backend.PiBackend._DOCKER_WRAPPER, "sh"],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        assert (result.returncode, result.stdout, result.stderr) == (0, "1\n1\n", "")
+
+    @pytest.mark.parametrize(
+        ("configured_models", "expected_provider"),
+        [
+            ([], {"apiKey": "proxy-token", "baseUrl": "http://host.docker.internal:12345/backend-api"}),
+            (
+                [
+                    {"id": "gpt-5.3-codex", "baseUrl": "https://chatgpt.com/custom"},
+                    {"id": "gpt-5.4", "baseUrl": "https://chatgpt.com/custom"},
+                ],
+                {
+                    "apiKey": "proxy-token",
+                    "baseUrl": "http://host.docker.internal:12345/custom",
+                    "models": [
+                        {"id": "gpt-5.3-codex", "baseUrl": "http://host.docker.internal:12345/custom"},
+                        {"id": "gpt-5.4", "baseUrl": "http://host.docker.internal:12345/custom"},
+                    ],
+                },
+            ),
+            (
+                [{"id": "gpt-5.3-codex", "baseUrl": "https://chatgpt.com/custom"}],
+                {
+                    "apiKey": "proxy-token",
+                    "baseUrl": "http://host.docker.internal:12345/backend-api",
+                    "models": [
+                        {
+                            "id": "gpt-5.3-codex",
+                            "api": "openai-codex-responses",
+                            "baseUrl": "http://host.docker.internal:12345/custom",
+                        },
+                        {
+                            "id": "gpt-5.4",
+                            "api": "openai-codex-responses",
+                            "baseUrl": "http://host.docker.internal:12345/backend-api",
+                        },
+                    ],
+                },
+            ),
+            (
+                [{"id": "gpt-5.3-codex", "contextWindow": 12345}],
+                {
+                    "apiKey": "proxy-token",
+                    "baseUrl": "http://host.docker.internal:12345/backend-api",
+                    "models": [{"id": "gpt-5.3-codex", "contextWindow": 12345}],
+                },
+            ),
+        ],
+        ids=["codex-catalog", "uniform-model-overrides", "mixed-model-overrides", "inherited-model-url"],
+    )
+    def test_routes_uniform_and_mixed_effective_model_urls(
+        self, tmp_path: Path, configured_models: list[dict], expected_provider: dict
+    ) -> None:
+        agent_dir = tmp_path / ".pi" / "agent"
+        agent_dir.mkdir(parents=True)
+        catalog_models = [
+            {"id": model_id, "api": "openai-codex-responses", "baseUrl": "https://chatgpt.com/backend-api"}
+            for model_id in ("gpt-5.3-codex", "gpt-5.4")
+        ]
+        (agent_dir / pi_backend._HOST_MODELS_STORE_FILENAME).write_text(
+            json.dumps({"openai-codex": {"models": catalog_models}})
+        )
+        host_provider = {"models": configured_models} if configured_models else {}
+        (agent_dir / pi_backend._HOST_MODELS_FILENAME).write_text(
+            json.dumps({"providers": {"openai-codex": host_provider}})
+        )
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        pi_shim = bin_dir / "pi"
+        pi_shim.write_text("#!/bin/sh\nexit 0\n")
+        pi_shim.chmod(0o755)
+        env = {
+            "HOME": str(tmp_path),
+            "PATH": _path_with_pi_shim(bin_dir),
+            "HATCHERY_PI_OPENAI_CODEX_ID": "openai-codex",
+            "HATCHERY_PI_OPENAI_CODEX_PROXY_ORIGIN": "http://host.docker.internal:12345",
+            "HATCHERY_PI_OPENAI_CODEX_KEY": "proxy-token",
+            "HATCHERY_PI_OPENAI_CODEX_SHAPE": "oauth",
+        }
+
+        result = subprocess.run(
+            ["sh", "-c", pi_backend.PiBackend._DOCKER_WRAPPER, "sh"],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert json.loads((agent_dir / "models.json").read_text()) == {"providers": {"openai-codex": expected_provider}}
+        assert json.loads((agent_dir / "models-store.json").read_text()) == {
+            "openai-codex": {
+                "models": [
+                    {
+                        "id": "gpt-5.3-codex",
+                        "api": "openai-codex-responses",
+                        "baseUrl": "http://host.docker.internal:12345/backend-api",
+                    },
+                    {
+                        "id": "gpt-5.4",
+                        "api": "openai-codex-responses",
+                        "baseUrl": "http://host.docker.internal:12345/backend-api",
+                    },
+                ]
+            }
+        }
+
     def test_writes_only_fake_proxy_creds_for_n_providers(self, tmp_path):
         """Run the real wrapper under sh with a fake $HOME and a `pi` shim on
-        PATH. The written auth.json/models.json must contain only the fake
-        proxy token and proxy-port URLs — never a real credential — for
-        whatever providers container_env passed, api_key- or oauth-shaped per
-        _SHAPE. The real ~/.pi/agent/auth.json is never mounted or read here.
+        PATH. The written auth.json/models.json must contain only fake proxy
+        credentials — never a real credential — for whatever providers
+        container_env passed, api_key- or oauth-shaped per _SHAPE. The real
+        ~/.pi/agent/auth.json is never mounted or read here.
         """
         fake_home = tmp_path / "fakehome"
         fake_home.mkdir()
@@ -765,15 +1238,15 @@ class TestDockerWrapperSecurity:
             "HOME": str(fake_home),
             "PATH": _path_with_pi_shim(bin_dir),
             "HATCHERY_PI_ACME_ID": "acme",
-            "HATCHERY_PI_ACME_BASEURL": "http://host.docker.internal:12345",
+            "HATCHERY_PI_ACME_PROXY_ORIGIN": "http://host.docker.internal:12345",
             "HATCHERY_PI_ACME_KEY": "proxy-token-aaa",
             "HATCHERY_PI_ACME_SHAPE": "api_key",
             "HATCHERY_PI_HUGGINGFACE_ID": "huggingface",
-            "HATCHERY_PI_HUGGINGFACE_BASEURL": "http://host.docker.internal:12345/v1",
+            "HATCHERY_PI_HUGGINGFACE_PROXY_ORIGIN": "http://host.docker.internal:12345",
             "HATCHERY_PI_HUGGINGFACE_KEY": "proxy-token-aaa",
             "HATCHERY_PI_HUGGINGFACE_SHAPE": "api_key",
             "HATCHERY_PI_OPENAI_CODEX_ID": "openai-codex",
-            "HATCHERY_PI_OPENAI_CODEX_BASEURL": "http://host.docker.internal:12345/backend-api",
+            "HATCHERY_PI_OPENAI_CODEX_PROXY_ORIGIN": "http://host.docker.internal:12345",
             "HATCHERY_PI_OPENAI_CODEX_KEY": "proxy-token-aaa",
             "HATCHERY_PI_OPENAI_CODEX_SHAPE": "oauth",
         }
@@ -800,12 +1273,9 @@ class TestDockerWrapperSecurity:
         }
         assert models == {
             "providers": {
-                "acme": {"baseUrl": "http://host.docker.internal:12345", "apiKey": "proxy-token-aaa"},
-                "huggingface": {"baseUrl": "http://host.docker.internal:12345/v1", "apiKey": "proxy-token-aaa"},
-                "openai-codex": {
-                    "baseUrl": "http://host.docker.internal:12345/backend-api",
-                    "apiKey": "proxy-token-aaa",
-                },
+                "acme": {"apiKey": "proxy-token-aaa"},
+                "huggingface": {"apiKey": "proxy-token-aaa"},
+                "openai-codex": {"apiKey": "proxy-token-aaa"},
             }
         }
         dumped = json.dumps(auth) + json.dumps(models)
@@ -822,9 +1292,15 @@ class TestDockerWrapperSecurity:
                     "$schema": "https://pi.dev/schemas/models.schema.json",
                     "providers": {
                         "custom": {
-                            "baseUrl": "https://models.example.com/v1",
+                            "baseUrl": "https://models.example.com/v1?provider-query-secret#provider-fragment-secret",
                             "api": "openai-completions",
-                            "models": [{"id": "coder", "contextWindow": 12345}],
+                            "models": [
+                                {
+                                    "id": "coder",
+                                    "baseUrl": "https://models.example.com/custom/v1?model-query-secret#model-fragment-secret",
+                                    "contextWindow": 12345,
+                                }
+                            ],
                         }
                     },
                 }
@@ -839,7 +1315,7 @@ class TestDockerWrapperSecurity:
             "HOME": str(fake_home),
             "PATH": _path_with_pi_shim(bin_dir),
             "HATCHERY_PI_CUSTOM_ID": "custom",
-            "HATCHERY_PI_CUSTOM_BASEURL": "http://host.docker.internal:12345/v1",
+            "HATCHERY_PI_CUSTOM_PROXY_ORIGIN": "http://host.docker.internal:12345",
             "HATCHERY_PI_CUSTOM_KEY": "proxy-token",
             "HATCHERY_PI_CUSTOM_SHAPE": "api_key",
         }
@@ -859,13 +1335,116 @@ class TestDockerWrapperSecurity:
                     "baseUrl": "http://host.docker.internal:12345/v1",
                     "api": "openai-completions",
                     "apiKey": "proxy-token",
-                    "models": [{"id": "coder", "contextWindow": 12345}],
+                    "models": [
+                        {
+                            "id": "coder",
+                            "baseUrl": "http://host.docker.internal:12345/custom/v1",
+                            "contextWindow": 12345,
+                        }
+                    ],
                 }
             },
         }
         assert json.loads((agent_dir / "auth.json").read_text()) == {
             "custom": {"type": "api_key", "key": "proxy-token"}
         }
+        generated = (agent_dir / "models.json").read_text()
+        assert "query-secret" not in generated
+        assert "fragment-secret" not in generated
+
+    def test_preserves_each_catalog_model_path_through_the_proxy(self, tmp_path):
+        fake_home = tmp_path / "fakehome"
+        agent_dir = fake_home / ".pi" / "agent"
+        agent_dir.mkdir(parents=True)
+        (agent_dir / pi_backend._HOST_MODELS_STORE_FILENAME).write_text(
+            json.dumps(
+                {
+                    "openrouter": {
+                        "opaqueMetadata": {"source": "catalog", "enabled": True},
+                        "models": [
+                            {
+                                "id": "anthropic/claude",
+                                "api": "anthropic-messages",
+                                "baseUrl": "https://openrouter.ai/api?catalog-query-secret#catalog-fragment-secret",
+                                "contextWindow": 200000,
+                            },
+                            {
+                                "id": "minimax/minimax-m3.1-flash",
+                                "api": "openai-completions",
+                                "baseUrl": "https://openrouter.ai/api/v1",
+                                "contextWindow": 100000,
+                            },
+                        ],
+                    }
+                }
+            )
+        )
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        pi_shim = bin_dir / "pi"
+        pi_shim.write_text("#!/bin/sh\nexit 0\n")
+        pi_shim.chmod(0o755)
+        env = {
+            "HOME": str(fake_home),
+            "PATH": _path_with_pi_shim(bin_dir),
+            "HATCHERY_PI_OPENROUTER_ID": "openrouter",
+            "HATCHERY_PI_OPENROUTER_PROXY_ORIGIN": "http://host.docker.internal:12345",
+            "HATCHERY_PI_OPENROUTER_KEY": "proxy-token",
+            "HATCHERY_PI_OPENROUTER_SHAPE": "api_key",
+        }
+
+        result = subprocess.run(
+            ["sh", "-c", pi_backend.PiBackend._DOCKER_WRAPPER, "sh"],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert json.loads((agent_dir / "models-store.json").read_text()) == {
+            "openrouter": {
+                "opaqueMetadata": {"source": "catalog", "enabled": True},
+                "models": [
+                    {
+                        "id": "anthropic/claude",
+                        "api": "anthropic-messages",
+                        "baseUrl": "http://host.docker.internal:12345/api",
+                        "contextWindow": 200000,
+                    },
+                    {
+                        "id": "minimax/minimax-m3.1-flash",
+                        "api": "openai-completions",
+                        "baseUrl": "http://host.docker.internal:12345/api/v1",
+                        "contextWindow": 100000,
+                    },
+                ],
+            }
+        }
+        assert json.loads((agent_dir / "models.json").read_text()) == {
+            "providers": {
+                "openrouter": {
+                    "apiKey": "proxy-token",
+                    "baseUrl": "http://host.docker.internal:12345/api",
+                    "models": [
+                        {
+                            "id": "anthropic/claude",
+                            "api": "anthropic-messages",
+                            "baseUrl": "http://host.docker.internal:12345/api",
+                            "contextWindow": 200000,
+                        },
+                        {
+                            "id": "minimax/minimax-m3.1-flash",
+                            "api": "openai-completions",
+                            "baseUrl": "http://host.docker.internal:12345/api/v1",
+                            "contextWindow": 100000,
+                        },
+                    ],
+                }
+            }
+        }
+        generated = (agent_dir / "models-store.json").read_text() + (agent_dir / "models.json").read_text()
+        assert "query-secret" not in generated
+        assert "fragment-secret" not in generated
 
 
 # ---------------------------------------------------------------------------
