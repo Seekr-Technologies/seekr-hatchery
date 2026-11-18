@@ -218,6 +218,8 @@ The fix is one rule: **mount the link's target at whatever path the link resolve
 
 Agent config directories (`~/.codex/skills`, `memories`, `prompts`) do this always. For the worktree and your own `mounts:` entries it is opt-in, since it costs a walk of the tree per launch: set `follow_symlinks: true` in `.hatchery/docker.yaml`.
 
+Backend mount descriptors can opt into recursive link-target scanning with `follow_links="RECURSIVE"` (this is not a new `docker.yaml` option). Targets are scanned for further links with cycle protection; source-overlay alias protection rejects aliases that would re-expose shadowed host paths. Parent and child mounts resolve consistently regardless of discovery order, including parents generated later.
+
 Three things worth knowing:
 
 - **A mount whose own source is a symlink needs none of this.** `-v` resolves the source path, so a symlinked `~/.codex/AGENTS.md` — or a symlinked `skills/` directory — already lands on the target's inode. Only links *inside* a mounted directory survive to dangle.

@@ -808,9 +808,11 @@ class CodexBackend(AgentBackend):
 
     @staticmethod
     def on_before_container_start(
-        session_dir: Path,
+        meta: "SessionMeta",
         proxy_token: str,
         workdir: str,
+        *,
+        runtime: "ContainerRuntime",
     ) -> None:
         """No-op — the container-side ``~/.codex`` is built by the volume seed.
 

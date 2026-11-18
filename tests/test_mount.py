@@ -33,11 +33,17 @@ class TestBindMount:
     def test_follow_links_defaults_off(self):
         assert BindMount(src=Path("/h"), dst="/c").follow_links is False
 
-    def test_follow_links_does_not_change_docker_args(self):
+    @pytest.mark.parametrize("follow_links", [False, True, "SHALLOW", "RECURSIVE"])
+    def test_follow_links_does_not_change_docker_args(self, follow_links: bool | str) -> None:
         """The flag is consumed by mount_links.expand_link_mounts, not by
         serialisation: an unexpanded mount still emits a valid bind flag."""
-        m = BindMount(src=Path("/h"), dst="/c", follow_links=True)
+        m = BindMount(src=Path("/h"), dst="/c", follow_links=follow_links)
         assert mount_to_docker_args(m) == ["-v", "/h:/c:rw"]
+
+    @pytest.mark.parametrize("value", ["shallow", "recursive", "DEEP"])
+    def test_invalid_follow_links_rejected(self, value: str) -> None:
+        with pytest.raises(ValidationError):
+            BindMount(src=Path("/h"), dst="/c", follow_links=value)
 
     def test_dst_required(self):
         with pytest.raises(ValidationError):

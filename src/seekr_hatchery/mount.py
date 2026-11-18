@@ -73,6 +73,10 @@ class BindMount(BaseModel):
     and similar (see :data:`seekr_hatchery.mount_links.SKIP_DIRS`), so a
     link nested inside a real subdirectory resolves too. That costs a walk
     of the tree per launch, which is why it is opt-in rather than always on.
+    ``True`` and ``"SHALLOW"`` are equivalent; ``False`` disables discovery.
+    Set ``follow_links="RECURSIVE"`` to scan discovered directory targets too,
+    including nested dependency links outside the original tree. Cycles stop
+    traversal; shadowed paths and the same directory exclusions still apply.
 
     The mount itself is unaffected: the directory is still bound whole and
     nothing is mounted at a link's own path, so the link stays a link. The
@@ -94,7 +98,7 @@ class BindMount(BaseModel):
     src: Path
     dst: str
     mode: MountMode = "RW"
-    follow_links: bool = False
+    follow_links: bool | Literal["SHALLOW", "RECURSIVE"] = False
 
 
 class VolumeMount(BaseModel):

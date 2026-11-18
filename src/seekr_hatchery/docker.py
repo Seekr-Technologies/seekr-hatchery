@@ -1582,9 +1582,9 @@ def run_session(
         ui.warn("dind: true is set but the Dockerfile doesn't appear to install Podman.")
         ui.info(f"  Uncomment the '── Podman-in-Podman (DinD)' block in {dockerfile_path(build_root, backend).name}.")
 
-    backend.on_before_container_start(session_dir, proxy_token, container_workdir)
-
     build_docker_image(meta.repo_path, build_root, meta.image_name, backend, runtime=runtime, no_cache=no_cache)
+    backend.migrate_container_state(meta, runtime=runtime)
+    backend.on_before_container_start(meta, proxy_token, container_workdir, runtime=runtime)
     mounts = build_mounts(
         meta,
         backend,

@@ -27,9 +27,9 @@ computation:
 
 For a directory mounted at its own host path the two collapse into one, because
 ``normpath(container_dir + raw) == normpath(host_dir + raw)`` when the two dirs
-are equal. That is why this single pass replaced the older worktree-only
-scanner: mirrored mounts are the degenerate case of the general rule, not a
-separate feature.
+are equal. Mirrored mounts are the degenerate case of the general rule,
+not a separate feature. Recursive mode applies that same rule again to links
+inside discovered directory targets, stopping at host-directory cycles.
 
 Note what needs nothing at all: a bind whose ``src`` is *itself* a symlink,
 file or directory. ``mount(2)`` follows symlinks in the source path — you
@@ -37,11 +37,11 @@ cannot bind-mount a link, only the inode it resolves to — so the container get
 the target directly and no link survives to dangle. Only links found *inside*
 the mounted tree survive verbatim, and those are this module's whole concern.
 
-A link whose container-side destination is already provided by some other mount
-needs nothing and is skipped. That covers links pointing back into the scanned
-directory itself, and it incidentally guarantees this never mounts anything
-*inside* a directory being scanned, where a destination component could itself
-be a dangling link.
+A link whose container-side destination is provided by a declared mount needs
+nothing and is skipped. Generated coverage is reusable only when its source
+mapping and access mode match; recursive scans are scheduled independently.
+Declared mount boundaries also cover links pointing back into the scanned
+input directory itself.
 
 Multi-hop chains resolve in one jump: the final target is mounted at the *first*
 hop's destination, so no intermediate hop is ever consulted.
@@ -57,6 +57,7 @@ belongs to one validation pass over the finished mount list. See
 import logging
 import os
 import posixpath
+from collections import deque
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -86,32 +87,110 @@ def expand_link_mounts(mounts: list[Mount]) -> list[Mount]:
 
     Every input mount is preserved; ``follow_links`` binds simply gain
     companions. Emitted mounts carry ``follow_links=False`` and the flag is
-    cleared on the originals, so calling this twice is a no-op.
+    cleared on the originals, so calling this twice is a no-op. The "RECURSIVE"
+    mode queues discovered directory targets independently of mount deduplication,
+    using host ancestry to stop cycles and each target's container location to
+    interpret its nested relative links.
     """
-    # Container paths some mount already provides. A link landing inside one of
-    # these resolves as-is, so it needs no companion.
     provided = [m.dst for m in mounts]
-
+    shadowed_sources = _shadowed_sources(mounts)
     out: list[Mount] = []
-    extra: list[BindMount] = []
+    companions: list[BindMount] = []
+    recursive_requested = any(isinstance(m, BindMount) and m.follow_links == "RECURSIVE" for m in mounts)
+    # Each branch has its own host ancestry: aliases mounted at different
+    # container paths need separate scans (relative links resolve differently).
+    pending: deque[tuple[BindMount, tuple[Path, ...]]] = deque()
     for m in mounts:
         if not isinstance(m, BindMount) or not m.follow_links:
             out.append(m)
             continue
         out.append(m.model_copy(update={"follow_links": False}))
-        for container_path, target in _link_targets(m, provided):
-            extra.append(BindMount(src=target, dst=container_path, mode=m.mode))
+        source = _resolved_target(m.src.expanduser()) if m.follow_links == "RECURSIVE" else None
+        pending.append((m, (source,) if source is not None else ()))
 
-    # Two links onto one container path is pathological; first declaration wins.
-    seen: set[str] = set()
-    for e in extra:
-        if e.dst not in seen:
-            seen.add(e.dst)
-            out.append(e)
-    return out
+    scanned: set[tuple[Path, str, str, bool]] = set()
+    while pending:
+        m, ancestors = pending.popleft()
+        recursive = m.follow_links == "RECURSIVE"
+        scan_key = (m.src.resolve(), m.dst, m.mode, recursive)
+        if scan_key in scanned:
+            continue
+        scanned.add(scan_key)
+        # Generated overlays prune walks, but unlike declared mounts they do
+        # not automatically satisfy the source/mode or recursive requirement.
+        if recursive:
+            # Scan generated child overlays in their own mode, not the parent's.
+            # This also upgrades children originally reached by a shallow input.
+            for child in companions:
+                if child.dst == m.dst or not _within(child.dst, m.dst):
+                    continue
+                mapped = (m.src / posixpath.relpath(child.dst, m.dst)).resolve()
+                if mapped == child.src and child.src.is_dir() and child.src not in ancestors:
+                    pending.append((child.model_copy(update={"follow_links": "RECURSIVE"}), (*ancestors, child.src)))
+        boundaries = [*provided, *(c.dst for c in companions)]
+        for container_path, target in _link_targets(m, boundaries, provided):
+            if any(
+                target == hidden or target in hidden.parents or hidden in target.parents for hidden in shadowed_sources
+            ):
+                logger.debug("follow_links: skipping %s, which exposes shadowed host state", target)
+                continue
+            covering = next((c for c in reversed(companions) if _within(container_path, c.dst)), None)
+            companion = BindMount(src=target, dst=container_path, mode=m.mode)
+            if covering is not None:
+                mapped = (covering.src / posixpath.relpath(container_path, covering.dst)).resolve()
+                if container_path == covering.dst:
+                    # Exact destinations retain the historical first-wins rule.
+                    if covering.src != target:
+                        continue
+                    companion = covering
+                elif mapped == target and covering.mode == m.mode:
+                    companion = None
+            if recursive and target.is_dir() and target not in ancestors:
+                scan = BindMount(
+                    src=target,
+                    dst=container_path,
+                    mode=companion.mode if companion is not None else m.mode,
+                    follow_links="RECURSIVE",
+                )
+                pending.append((scan, (*ancestors, target)))
+            if companion is None or companion in companions:
+                continue
+            # Insert late parents before their generated descendants, leaving
+            # unrelated companions and shallow-only expansion in discovery order.
+            position = len(companions)
+            if recursive_requested:
+                position = next(
+                    (i for i, child in enumerate(companions) if _within(child.dst, container_path)), position
+                )
+            companions.insert(position, companion)
+    return [*out, *companions]
 
 
-def _link_targets(m: BindMount, provided: list[str]) -> Iterator[tuple[str, Path]]:
+def _shadowed_sources(mounts: list[Mount]) -> set[Path]:
+    """Host paths hidden by overlays must not reappear through companions.
+
+    Keep both the directory entry and its resolved target: a credential may
+    itself be a symlink outside the parent bind. Aliasing either side, or an
+    ancestor directory containing it, would bypass the container overlay.
+    """
+    hidden: set[Path] = set()
+    for parent in mounts:
+        if not isinstance(parent, BindMount) or not parent.src.expanduser().is_dir():
+            continue
+        source = parent.src.expanduser().resolve()
+        for overlay in mounts:
+            if overlay.dst == parent.dst or not _within(overlay.dst, parent.dst):
+                continue
+            entry = source / posixpath.relpath(overlay.dst, parent.dst)
+            resolved = entry.resolve()
+            if isinstance(overlay, BindMount) and overlay.mode == parent.mode:
+                if overlay.src.expanduser().resolve() == resolved:
+                    continue  # The nested bind does not hide or restrict this source.
+            hidden.update((entry, resolved))
+    return hidden
+
+
+def _link_targets(m: BindMount, provided: list[str], declared: list[str]) -> Iterator[tuple[str, Path]]:
     """Yield ``(container_path, host_target)`` for each usable link in *m*."""
     src = m.src.expanduser()
     if not src.is_dir():
@@ -122,15 +201,17 @@ def _link_targets(m: BindMount, provided: list[str]) -> Iterator[tuple[str, Path
         # what lets callers declare the flag uniformly over a mixed group.
         return
 
-    for link, container_dir in _walk(src, m.dst):
+    # Mounts below this bind hide host entries, including any symlinks there.
+    shadowed = [d for d in provided if d != m.dst and _within(d, m.dst)]
+    for link, container_dir in _walk(src, m.dst, shadowed):
         container_path = _container_destination(link, container_dir)
         if container_path is None:
             continue
-        if any(_within(container_path, d) for d in provided):
+        if any(_within(container_path, d) for d in declared):
             continue  # Already mounted, or inside something already mounted.
-        if any(_within(d, container_path) for d in provided):
-            # A proper ancestor of an existing mount: over-broad, and it would
-            # bury whatever else lives at that path in the image.
+        if any(_within(d, container_path) for d in declared):
+            # Never bury a declared overlay. Generated children are different:
+            # a later parent must still be available, regardless of walk order.
             logger.debug("follow_links: skipping %s, a parent of an existing mount", container_path)
             continue
         target = _resolved_target(link)
@@ -139,7 +220,7 @@ def _link_targets(m: BindMount, provided: list[str]) -> Iterator[tuple[str, Path
         yield container_path, target
 
 
-def _walk(src: Path, dst: str) -> Iterator[tuple[Path, str]]:
+def _walk(src: Path, dst: str, shadowed: list[str]) -> Iterator[tuple[Path, str]]:
     """Yield ``(link, container_dir)`` for every symlink under *src*.
 
     Any depth, so a link nested inside a real subdirectory is found too;
@@ -150,12 +231,14 @@ def _walk(src: Path, dst: str) -> Iterator[tuple[Path, str]]:
         logger.debug("follow_links: walk error: %s", exc)
 
     for dirpath, dirnames, filenames in os.walk(src, followlinks=False, onerror=_on_err):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
-        # Symlinked directories land in dirnames but are not descended into,
-        # since followlinks is False.
         rel = os.path.relpath(dirpath, src)
         container_dir = dst if rel == os.curdir else posixpath.join(dst, *rel.split(os.sep))
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and posixpath.join(container_dir, d) not in shadowed]
+        # Symlinked directories land in dirnames but are not descended into,
+        # since followlinks is False. Shadowed files must not export targets.
         for entry in list(dirnames) + filenames:
+            if posixpath.join(container_dir, entry) in shadowed:
+                continue
             link = Path(dirpath) / entry
             if link.is_symlink():
                 yield link, container_dir

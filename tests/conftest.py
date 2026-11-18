@@ -8,6 +8,8 @@ import pytest
 import seekr_hatchery.agents as agent
 import seekr_hatchery.agents.codex as codex_backend
 import seekr_hatchery.constants as constants
+import seekr_hatchery.docker as docker
+import seekr_hatchery.models as models
 import seekr_hatchery.mount as mount
 import seekr_hatchery.sessions as sessions
 import seekr_hatchery.user_config as user_config
@@ -98,13 +100,18 @@ class SpyBackend(agent.AgentBackend):
     def on_before_launch(self, worktree: Path) -> None:
         self.calls.append(("on_before_launch", worktree))
 
+    def migrate_container_state(self, meta: models.SessionMeta, *, runtime: docker.ContainerRuntime) -> None:
+        self.calls.append(("migrate_container_state", meta, runtime))
+
     def on_before_container_start(
         self,
-        session_dir: Path | None,
+        meta: models.SessionMeta,
         proxy_token: str,
         workdir: str,
+        *,
+        runtime: docker.ContainerRuntime,
     ) -> None:
-        self.calls.append(("on_before_container_start", session_dir, proxy_token, workdir))
+        self.calls.append(("on_before_container_start", meta, proxy_token, workdir, runtime))
 
     def background_threads(
         self,
