@@ -12,7 +12,7 @@ import pytest
 from pydantic import ValidationError
 
 import seekr_hatchery.agents as agent
-import seekr_hatchery.agents.pi as pi_backend
+import seekr_hatchery.agents.pi.backend as pi_backend
 import seekr_hatchery.branches as branches
 import seekr_hatchery.constants as constants
 import seekr_hatchery.git as git
@@ -1938,7 +1938,7 @@ class TestGetOrCreateProxyToken:
         assert payload["https://api.openai.com/auth"]["chatgpt_account_id"] == "hatchery"
 
     def test_matches_pi_backends_own_jwt_extraction(self, fake_repo):
-        # Ties the minted shape to the exact extraction agents/pi.py mirrors
+        # Ties the minted shape to the exact extraction agents/pi/backend.py mirrors
         # from pi-ai's extractAccountId().
         token = sessions.get_or_create_proxy_token(fake_repo, "my-task")
         assert pi_backend._chatgpt_account_id(token) == "hatchery"

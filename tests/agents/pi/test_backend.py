@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -12,8 +13,11 @@ from unittest.mock import patch
 import pytest
 
 import seekr_hatchery.agents as agent
-import seekr_hatchery.agents.pi as pi_backend
+import seekr_hatchery.agents.pi.backend as pi_backend
+import seekr_hatchery.docker as docker
 import seekr_hatchery.mount as mount
+import seekr_hatchery.mount_links as mount_links
+import seekr_hatchery.seeded_volumes as seeded_volumes
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -482,90 +486,188 @@ class TestContainerEnv:
 
 
 class TestConstructMounts:
-    def test_creates_and_mounts_global_resources_when_no_host_config(self, home, tmp_path):
-        # autouse ``home`` fixture points Path.home() at an empty temp dir,
-        # so neither settings.json nor models-store.json exists.
-        vol, ext, skills = agent.PI.construct_mounts(tmp_path)
+    def test_shares_agent_directory_with_task_local_overlays(self, home, tmp_path):
+        agent_dir = home / ".pi" / "agent"
+        agent_dst = f"{agent.CONTAINER_HOME}/.pi/agent"
 
-        assert [
-            (vol.name, vol.dst, vol.mode, vol.seed),
-            (ext.src, ext.dst, ext.mode, ext.follow_links),
-            (skills.src, skills.dst, skills.mode, skills.follow_links),
-        ] == [
-            ("pi-dir", f"{agent.CONTAINER_HOME}/.pi/agent", "RW", None),
-            (
-                home / ".pi" / "agent" / "extensions",
-                f"{agent.CONTAINER_HOME}/.pi/agent/extensions",
-                "RW",
-                True,
-            ),
-            (
-                home / ".pi" / "agent" / "skills",
-                f"{agent.CONTAINER_HOME}/.pi/agent/skills",
-                "RW",
-                True,
-            ),
+        assert agent.PI.construct_mounts(tmp_path) == [
+            mount.BindMount(src=agent_dir, dst=agent_dst, follow_links="RECURSIVE"),
+            mount.BindMount(src=tmp_path / "pi-config/auth.json", dst=f"{agent_dst}/auth.json"),
+            mount.BindMount(src=tmp_path / "pi-config/models.json", dst=f"{agent_dst}/models.json"),
+            mount.VolumeMount(name="pi-bin", dst=f"{agent_dst}/bin", seed=pi_backend._seed_empty_state),
+            mount.VolumeMount(name="pi-sessions", dst=f"{agent_dst}/sessions", seed=pi_backend._seed_empty_state),
         ]
-        assert ext.src.is_dir()
-        assert skills.src.is_dir()
+        assert agent_dir.is_dir()
+        assert {path.name: json.loads(path.read_text()) for path in (tmp_path / "pi-config").iterdir()} == {
+            "auth.json": {},
+            "models.json": {},
+        }
+        assert list(agent_dir.iterdir()) == []
 
-    def test_layers_host_config_binds_over_volume(self, home, tmp_path):
+    def test_reconstruction_preserves_task_files_and_host_credentials(self, home, tmp_path):
         agent_dir = home / ".pi" / "agent"
         agent_dir.mkdir(parents=True)
-        (agent_dir / "settings.json").write_text("{}")
-        (agent_dir / "models-store.json").write_text("{}")
-        node_modules = agent_dir / "npm" / "node_modules"
-        node_modules.mkdir(parents=True)
-        extensions = agent_dir / "extensions"
-        extensions.mkdir()
-        skills = agent_dir / "skills"
-        skills.mkdir()
+        host_files = {"auth.json": "host-auth-secret", "models.json": "host-model-secret"}
+        for name, content in host_files.items():
+            (agent_dir / name).write_text(content)
+        mounts = agent.PI.construct_mounts(tmp_path)
+        for name in host_files:
+            (tmp_path / "pi-config" / name).write_text("task-local")
 
-        vol, settings, store, nm, ext, skill_mount = agent.PI.construct_mounts(tmp_path)
-
-        assert isinstance(vol, mount.VolumeMount)
-        assert [
-            (vol.dst, vol.mode),
-            (settings.src, settings.dst, settings.mode),
-            (store.src, store.dst, store.mode),
-            (nm.src, nm.dst, nm.mode),
-            (ext.src, ext.dst, ext.mode, ext.follow_links),
-            (skill_mount.src, skill_mount.dst, skill_mount.mode, skill_mount.follow_links),
-        ] == [
-            (f"{agent.CONTAINER_HOME}/.pi/agent", "RW"),
-            (agent_dir / "settings.json", f"{agent.CONTAINER_HOME}/.pi/agent/settings.json", "RW"),
-            (agent_dir / "models-store.json", f"{agent.CONTAINER_HOME}/.pi/agent/models-store.json", "RO"),
-            (node_modules, f"{agent.CONTAINER_HOME}/.pi/agent/npm/node_modules", "RO"),
-            (extensions, f"{agent.CONTAINER_HOME}/.pi/agent/extensions", "RW", True),
-            (skills, f"{agent.CONTAINER_HOME}/.pi/agent/skills", "RW", True),
-        ]
+        assert agent.PI.construct_mounts(tmp_path) == mounts
+        assert {name: (agent_dir / name).read_text() for name in host_files} == host_files
+        assert {name: (tmp_path / "pi-config" / name).read_text() for name in host_files} == {
+            "auth.json": "task-local",
+            "models.json": "task-local",
+        }
 
     def test_mounts_sanitized_host_models_copy(self, home, tmp_path):
         session_models = tmp_path / pi_backend._HOST_MODELS_FILENAME
         session_models.write_text("{}")
 
-        mounts = agent.PI.construct_mounts(tmp_path)
-
-        host_models = next(
-            item
-            for item in mounts
-            if isinstance(item, mount.BindMount) and Path(item.src).name == pi_backend._HOST_MODELS_FILENAME
-        )
-        assert (host_models.src, host_models.dst, host_models.mode) == (
-            session_models,
-            f"{agent.CONTAINER_HOME}/.pi/agent/{pi_backend._HOST_MODELS_FILENAME}",
-            "RO",
+        assert agent.PI.construct_mounts(tmp_path)[-1] == mount.BindMount(
+            src=session_models,
+            dst=f"{agent.CONTAINER_HOME}/.pi/agent/{pi_backend._HOST_MODELS_FILENAME}",
+            mode="RO",
         )
 
-    def test_never_binds_the_real_auth_json(self, home, tmp_path):
-        agent_dir = home / ".pi" / "agent"
-        agent_dir.mkdir(parents=True)
-        for name in ("auth.json", "settings.json", "models-store.json"):
-            (agent_dir / name).write_text("{}")
 
-        mounts = agent.PI.construct_mounts(tmp_path)
-
-        assert not any(isinstance(m, mount.BindMount) and Path(m.src).name == "auth.json" for m in mounts)
+@pytest.mark.integration
+@pytest.mark.parametrize("credential_shape", ["missing", "regular", "symlink"])
+def test_shared_agent_directory_in_container(home: Path, tmp_path: Path, credential_shape: str) -> None:
+    if shutil.which("podman") is None or subprocess.run(["podman", "info"], capture_output=True).returncode:
+        pytest.skip("podman unavailable")
+    image = "docker.io/library/alpine:3.21"
+    subprocess.run(["podman", "pull", "-q", image], check=True, capture_output=True)
+    agent_dir = home / ".pi/agent"
+    agent_dir.mkdir(parents=True)
+    secrets = tmp_path / "secrets"
+    secrets.mkdir()
+    for name in ("auth.json", "models.json"):
+        (secrets / name).write_text(f"host-secret-{name}")
+        if credential_shape == "regular":
+            (agent_dir / name).write_text(f"host-secret-{name}")
+        elif credential_shape == "symlink":
+            (agent_dir / name).symlink_to(secrets / name)
+    for name in ("bin", "sessions"):
+        (agent_dir / name).mkdir()
+        (agent_dir / name / "host-only").write_text("host-state")
+    instructions = tmp_path / "instructions.md"
+    instructions.write_text("user instructions")
+    (agent_dir / "APPEND_SYSTEM.md").symlink_to(instructions)
+    resource = tmp_path / "dotfile-custom-resources"
+    resource.mkdir()
+    dependency = tmp_path / "dependency.txt"
+    dependency.write_text("dependency")
+    (resource / "dependency.txt").symlink_to(dependency)
+    resource_link = os.path.relpath(resource, agent_dir) if credential_shape == "regular" else str(resource)
+    (agent_dir / "custom-resources").symlink_to(resource_link)
+    (agent_dir / "agent-alias").symlink_to(agent_dir)
+    (agent_dir / "parent-alias").symlink_to(agent_dir.parent)
+    if credential_shape != "missing":
+        (agent_dir / "credential-alias").symlink_to((agent_dir / "auth.json").resolve())
+    session_dir = tmp_path / "task"
+    prefix = f"pi-mount-test-{uuid.uuid4().hex}"
+    meta = SimpleNamespace(container_name=prefix, image_name=image, session_dir=session_dir)
+    agent.PI.migrate_container_state(meta, runtime=docker.PodmanRuntime())
+    agent.PI.on_before_container_start(meta, "proxy-token", "/work", runtime=docker.PodmanRuntime())
+    mounts = mount_links.expand_link_mounts(agent.PI.construct_mounts(session_dir))
+    mounts = seeded_volumes.prepare_volume_mounts("podman", mounts, meta, session_dir, "proxy-token", "/work")
+    volumes = [item.name for item in mounts if isinstance(item, mount.VolumeMount)]
+    args = [arg for item in mounts for arg in mount.mount_to_docker_args(item)]
+    dst = f"{agent.CONTAINER_HOME}/.pi/agent"
+    try:
+        # Fresh state overlays must be writable by the image\'s hatchery UID,
+        # independently of the host directory\'s ownership.
+        for volume in volumes:
+            subprocess.run(
+                [
+                    "podman",
+                    "run",
+                    "--rm",
+                    "--user",
+                    "1000:1000",
+                    "-v",
+                    f"{volume}:/state",
+                    image,
+                    "sh",
+                    "-ec",
+                    "touch /state/nonroot-write",
+                ],
+                check=True,
+                capture_output=True,
+            )
+        subprocess.run(
+            [
+                "podman",
+                "run",
+                "--rm",
+                *args,
+                image,
+                "sh",
+                "-ec",
+                f"""
+                cd {dst}
+                test "$(cat auth.json)" = '{{}}'
+                test "$(cat models.json)" = '{{}}'
+                test "$(cat APPEND_SYSTEM.md)" = 'user instructions'
+                test "$(cat custom-resources/dependency.txt)" = dependency
+                test ! -e agent-alias/auth.json
+                test ! -e parent-alias/agent/models.json
+                if test -e credential-alias; then
+                    test "$(cat credential-alias)" = '{{}}'
+                    echo task-alias > credential-alias
+                    test "$(cat auth.json)" = task-alias
+                    echo '{{}}' > auth.json
+                fi
+                if echo overwritten > agent-alias/auth.json 2>/dev/null; then exit 1; fi
+                if echo overwritten > parent-alias/agent/models.json 2>/dev/null; then exit 1; fi
+                test ! -e bin/host-only
+                test ! -e sessions/host-only
+                echo task-auth > auth.json
+                echo task-models > models.json
+                echo task-bin > bin/task-only
+                echo task-session > sessions/task-only
+                echo shared > new-user-file
+                echo updated > APPEND_SYSTEM.md
+            """,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [
+                "podman",
+                "run",
+                "--rm",
+                *args,
+                image,
+                "sh",
+                "-ec",
+                f"""
+                cd {dst}
+                test "$(cat auth.json)" = task-auth
+                test "$(cat models.json)" = task-models
+                test "$(cat bin/task-only)" = task-bin
+                test "$(cat sessions/task-only)" = task-session
+            """,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        for volume in volumes:
+            subprocess.run(["podman", "volume", "rm", "--force", volume], capture_output=True, check=True)
+    assert instructions.read_text() == "updated\n"
+    assert (agent_dir / "new-user-file").read_text() == "shared\n"
+    for name in ("auth.json", "models.json"):
+        assert (secrets / name).read_text() == f"host-secret-{name}"
+        if credential_shape != "missing":
+            assert (agent_dir / name).read_text() == f"host-secret-{name}"
+    for name in ("bin", "sessions"):
+        assert {p.name: p.read_text() for p in (agent_dir / name).iterdir()} == {"host-only": "host-state"}
 
 
 # ---------------------------------------------------------------------------
@@ -573,7 +675,7 @@ class TestConstructMounts:
 # ---------------------------------------------------------------------------
 
 
-class TestLifecycleHooksAreNoops:
+class TestLifecycleHooks:
     def test_on_new_task(self, tmp_path):
         session_dir = tmp_path / "session"
         agent.PI.on_new_task(session_dir)
@@ -582,15 +684,15 @@ class TestLifecycleHooksAreNoops:
     def test_on_before_launch(self, tmp_path):
         agent.PI.on_before_launch(tmp_path)  # should not raise
 
-    def test_on_before_container_start_without_host_models(self, tmp_path):
+    def test_on_before_container_start_without_host_models(self, tmp_path, pi_meta):
         session_dir = tmp_path / "session"
         session_dir.mkdir()
-        agent.PI.on_before_container_start(
-            SimpleNamespace(session_dir=session_dir), "proxy-tok", "/workdir", runtime=SimpleNamespace()
-        )
-        assert list(session_dir.iterdir()) == []
+        agent.PI.on_before_container_start(pi_meta, "proxy-tok", "/workdir", runtime=docker.PodmanRuntime())
+        assert {path.name: path.read_text() for path in session_dir.iterdir()} == {
+            pi_backend._HOST_MODELS_FILENAME: "{}"
+        }
 
-    def test_on_before_container_start_sanitizes_host_models(self, home, tmp_path):
+    def test_on_before_container_start_sanitizes_host_models(self, home, tmp_path, pi_meta):
         _write_models(
             home,
             json.dumps(
@@ -615,9 +717,7 @@ class TestLifecycleHooksAreNoops:
         )
         session_dir = tmp_path / "session"
 
-        agent.PI.on_before_container_start(
-            SimpleNamespace(session_dir=session_dir), "proxy-tok", "/workdir", runtime=SimpleNamespace()
-        )
+        agent.PI.on_before_container_start(pi_meta, "proxy-tok", "/workdir", runtime=docker.PodmanRuntime())
 
         written = json.loads((session_dir / pi_backend._HOST_MODELS_FILENAME).read_text())
         assert written == {

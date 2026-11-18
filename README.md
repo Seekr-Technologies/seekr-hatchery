@@ -218,8 +218,6 @@ The fix is one rule: **mount the link's target at whatever path the link resolve
 
 Agent config directories (`~/.codex/skills`, `memories`, `prompts`) do this always. For the worktree and your own `mounts:` entries it is opt-in, since it costs a walk of the tree per launch: set `follow_symlinks: true` in `.hatchery/docker.yaml`.
 
-Backend mount descriptors can opt into recursive link-target scanning with `follow_links="RECURSIVE"` (this is not a new `docker.yaml` option). Targets are scanned for further links with cycle protection; source-overlay alias protection rejects aliases that would re-expose shadowed host paths. Parent and child mounts resolve consistently regardless of discovery order, including parents generated later.
-
 Three things worth knowing:
 
 - **A mount whose own source is a symlink needs none of this.** `-v` resolves the source path, so a symlinked `~/.codex/AGENTS.md` — or a symlinked `skills/` directory — already lands on the target's inode. Only links *inside* a mounted directory survive to dangle.
@@ -283,23 +281,65 @@ directories](#symlinked-directories).
 
 ### The container's `~/.pi/agent`
 
-Pi sandbox sessions keep their own agent state in a per-task volume. Hatchery
-bind-mounts your host `settings.json`, `models-store.json`, installed npm
-modules, and global `extensions/` and `skills/` directories. Hatchery creates
-the two directories on the host if needed, then mounts them read-write:
-extensions and skills are auto-discovered normally, session-authored changes
-persist on the host, and host edits can be hot-reloaded with `/reload`.
-Symlink targets within both directories are mounted too, so dotfiles-managed
-resources and their dependencies load correctly.
+Hatchery bind-mounts your entire host `~/.pi/agent` read-write. Instructions
+such as `AGENTS.md` and `APPEND_SYSTEM.md`, extensions, skills, profiles,
+missions, npm packages, caches, and other user files are available without an
+allowlist. New files in this directory are shared immediately, and sandbox
+changes persist on the host. Pi's mount uses recursive symlink following:
+directory targets are scanned for further dependency links too, with cycle
+protection and without scanning paths hidden by the per-task overlays. Symlink
+aliases that would re-expose overlaid host files or directories are not mounted.
+This is generic mount behavior, not an extensions/skills allowlist. Newly added external
+symlinks may require container recreation.
 
-Host `models.json` custom providers, model definitions, and overrides are also
-available in the sandbox. Before every launch, Hatchery creates a sanitized
-per-task copy and mounts it read-only. Pi's container wrapper merges that copy
-with the generated proxy configuration, replacing upstream URLs and API keys
-with per-session proxy values. Host changes therefore take effect on the next
-launch or resume without exposing the host model API keys to the container.
-Authentication remains container-local and contains only the per-session proxy
-credentials.
+Four paths are overlaid with task-local state:
+
+- `auth.json` and `models.json`: task-local files containing generated proxy
+  configuration, never the host originals.
+- `bin/`: a per-task volume for Linux-compatible binaries.
+- `sessions/`: a per-task volume so sandbox sessions remain separate from host
+  sessions and persist across resume.
+
+Before every launch, Hatchery sanitizes host `models.json` into a read-only
+per-task copy. The wrapper merges custom model definitions and provider options
+with proxy URLs and credentials into the task-local `models.json`. Host model
+changes take effect on the next launch or resume. Both generated JSON files use
+single-file bind mounts: direct writes work, but atomic replacement via
+`rename()` does not.
+
+**Trust boundary:** everything else in `~/.pi/agent` is shared RW, including
+backups such as `models.bak`. Do not keep credential-bearing backups there if
+they must remain inaccessible to the sandbox. Settings, the model catalogue,
+and npm packages are also writable and shared across tasks.
+
+Pi's `migrate_container_state` hook runs after image build and before per-launch
+configuration, mount construction, or volume preparation. Its explicit storage
+upgrade pathway is **V1 → V2**:
+
+- **V1:** the old per-task `pi-dir` volume contains `sessions/`.
+- **V2:** the host agent directory is shared, with per-task `pi-sessions` and
+  `pi-bin` volumes.
+
+A missing version marker means V1. A fresh task follows the same upgrade without
+copying any history. For an existing V1 task, Hatchery copies `pi-dir/sessions/`
+read-only into the new sessions volume and leaves the old volume untouched.
+
+Readable JSON state under the task directory's `pi-container-state/` records the
+layout version and any `IN_PROGRESS` upgrade. The filename and lock are scoped to
+the runtime and immutable task identity. Progress and completion are written
+atomically and synced to disk. Completion records V2; subsequent launches do not
+replay the upgrade. An unexpected destination volume without a version marker,
+a corrupt marker, or an unsupported version aborts rather than guessing.
+
+On interrupted-upgrade recovery, Hatchery stops any orphaned import helper,
+discards partial output, and retries before launching Pi. Missing legacy history
+during recovery aborts without deleting remaining partial data. Existing
+containers retain their old mounts until recreated.
+
+Pi owns this pathway in `agents/pi/migrations.py`; it is independent of task and
+configuration schema versions. That module documents adding the next sequential
+upgrade and retiring old steps only when support for their source layout is
+explicitly dropped.
 
 ### Container runtime auto-detection
 

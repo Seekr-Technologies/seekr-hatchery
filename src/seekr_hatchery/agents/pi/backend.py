@@ -47,13 +47,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlsplit
 
+import seekr_hatchery.agents.pi.migrations as migrations
 from seekr_hatchery.agents.agent_backend import (
     CONTAINER_HOME,
     AgentBackend,
     ProxyEndpoint,
 )
 from seekr_hatchery.locks import hatchery_lock
-from seekr_hatchery.mount import BindMount, Mount, VolumeMount
+from seekr_hatchery.mount import BindMount, Mount, SeedContext, VolumeMount
 from seekr_hatchery.utils import npm
 
 if TYPE_CHECKING:
@@ -70,15 +71,21 @@ _NPM_PACKAGE = "@earendil-works/pi-coding-agent"
 _OPENAI_CODEX = "openai-codex"
 _HOST_MODELS_FILENAME = "hatchery-host-models.json"
 
+
+def _seed_empty_state(_ctx: SeedContext) -> dict[str, bytes]:
+    """Initialize writable volumes for the non-root hatchery user."""
+    return {}
+
+
 # JWT claim path pi-ai's extractAccountId() (openai-codex-responses.js) reads
 # the ChatGPT account id from: payload["https://api.openai.com/auth"].chatgpt_account_id
 _CHATGPT_JWT_CLAIM_PATH = "https://api.openai.com/auth"
 
-# Shell snippet run at container-exec time (see resources/pi_wrapper.sh for the
+# Shell snippet run at container-exec time (see wrapper.sh for the
 # script + rationale). Scans the environment for every HATCHERY_PI_<UP>_ID
 # marker and synthesises ~/.pi/agent/{models,auth}.json from the per-launch
 # proxy token + port; the real credentials never enter the container.
-_DOCKER_WRAPPER: str = (Path(__file__).parent.parent / "resources" / "pi_wrapper.sh").read_text()
+_DOCKER_WRAPPER: str = Path(__file__).with_name("wrapper.sh").read_text()
 
 
 def _read_models_config() -> dict:
@@ -341,57 +348,39 @@ class PiBackend(AgentBackend):
 
     @staticmethod
     def construct_mounts(session_dir: Path) -> list[Mount]:
-        """Per-task volume for ~/.pi/agent so sessions persist across resume.
+        """Share global Pi state, shadowing credentials and platform-local state.
 
-        No seed: auth.json / models.json are synthesised by
-        ``_DOCKER_WRAPPER`` at exec time from the per-launch proxy token and
-        port, which aren't known until then. A sanitized copy of host
-        ``models.json`` supplies custom model metadata. The host's real
-        ``~/.pi/agent/auth.json`` and model API keys are never mounted or read
-        into the container.
-
-        Host paths layered on top of the volume. Optional files and npm modules
-        are ``.exists()``-guarded. ``extensions/`` and ``skills/`` are created
-        before mounting so sandbox-authored global resources persist on the
-        host:
-
-        - ``settings.json`` RW — user config, flows both ways.
-        - ``models-store.json`` RO — pi's model catalogue; RO keeps upstream
-          target resolution host-authoritative.
-        - ``hatchery-host-models.json`` RO — a per-launch sanitized copy of the
-          host's custom model configuration, merged into the generated
-          ``models.json`` by the wrapper.
-        - ``npm/node_modules`` RO — pi's installed packages/plugins (subagents
-          etc.). ``PI_OFFLINE=1`` means the container can't install them
-          itself, so it takes the host's; RO stops per-task installs from
-          polluting the host tree. Pure-JS + same arch, so portable (unlike
-          ``bin/``, which holds native binaries).
-        - ``extensions/`` and ``skills/`` RW — global extensions and skills are
-          auto-discovered here and session-authored changes persist on the
-          host. Symlink targets are also mounted so dotfiles-managed resources
-          load.
-
-        ``bin/`` and ``sessions/`` stay container-local in the volume.
+        Single-file bind mounts keep wrapper-generated auth/models off the host
+        without inserting symlinks into the shared directory. They deliberately
+        do not support atomic replacement. Backups and arbitrary user files are
+        shared as-is; this is not a general secret-file filter.
         """
         agent_dir = Path.home() / ".pi" / "agent"
+        agent_dir.mkdir(parents=True, exist_ok=True)
         agent_dst = f"{CONTAINER_HOME}/.pi/agent"
-        mounts: list[Mount] = [VolumeMount(name="pi-dir", dst=agent_dst)]
-        settings = agent_dir / "settings.json"
-        if settings.exists():
-            mounts.append(BindMount(src=settings, dst=f"{agent_dst}/settings.json", mode="RW"))
-        store = agent_dir / "models-store.json"
-        if store.exists():
-            mounts.append(BindMount(src=store, dst=f"{agent_dst}/models-store.json", mode="RO"))
+        mounts: list[Mount] = [BindMount(src=agent_dir, dst=agent_dst, follow_links="RECURSIVE")]
+
+        config_dir = session_dir / "pi-config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        for name in ("auth.json", "models.json"):
+            source = config_dir / name
+            # Preserve existing task-local state on reconstruction; the wrapper
+            # refreshes both files with the current proxy configuration at exec.
+            try:
+                with source.open("x") as stream:
+                    stream.write("{}")
+            except FileExistsError:
+                pass
+            mounts.append(BindMount(src=source, dst=f"{agent_dst}/{name}"))
+        mounts.extend(
+            [
+                VolumeMount(name="pi-bin", dst=f"{agent_dst}/bin", seed=_seed_empty_state),
+                VolumeMount(name="pi-sessions", dst=f"{agent_dst}/sessions", seed=_seed_empty_state),
+            ]
+        )
         host_models = session_dir / _HOST_MODELS_FILENAME
         if host_models.exists():
             mounts.append(BindMount(src=host_models, dst=f"{agent_dst}/{_HOST_MODELS_FILENAME}", mode="RO"))
-        node_modules = agent_dir / "npm" / "node_modules"
-        if node_modules.exists():
-            mounts.append(BindMount(src=node_modules, dst=f"{agent_dst}/npm/node_modules", mode="RO"))
-        for name in ("extensions", "skills"):
-            resource_dir = agent_dir / name
-            resource_dir.mkdir(parents=True, exist_ok=True)
-            mounts.append(BindMount(src=resource_dir, dst=f"{agent_dst}/{name}", follow_links=True))
         return mounts
 
     @staticmethod
@@ -473,6 +462,10 @@ class PiBackend(AgentBackend):
         pass  # no worktree setup needed for pi
 
     @staticmethod
+    def migrate_container_state(meta: "SessionMeta", *, runtime: "ContainerRuntime") -> None:
+        migrations.upgrade_container_state(meta, runtime=runtime)
+
+    @staticmethod
     def on_before_container_start(
         meta: "SessionMeta",
         proxy_token: str,
@@ -480,7 +473,7 @@ class PiBackend(AgentBackend):
         *,
         runtime: "ContainerRuntime",
     ) -> None:
-        """Materialize host model metadata without exposing its API keys.
+        """Materialize sanitized host model metadata for this launch.
 
         The wrapper needs a normal file beside the generated ``models.json`` so
         it can preserve custom models and provider options while replacing
@@ -492,7 +485,10 @@ class PiBackend(AgentBackend):
         config = _read_models_config()
         providers = config.get("providers")
         if not isinstance(providers, dict):
-            destination.unlink(missing_ok=True)
+            # Always shadow this path too: a similarly named host file must
+            # never become the wrapper's unsanitized configuration input.
+            session_dir.mkdir(parents=True, exist_ok=True)
+            destination.write_text("{}")
             return
 
         sanitized = copy.deepcopy(config)
