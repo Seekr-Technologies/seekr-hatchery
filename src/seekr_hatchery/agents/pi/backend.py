@@ -56,12 +56,12 @@ from seekr_hatchery.agents.agent_backend import (
     ProxyEndpoint,
 )
 from seekr_hatchery.locks import hatchery_lock
-from seekr_hatchery.mount import BindMount, Mount, SeedContext, VolumeMount
+from seekr_hatchery.sandbox.mount_types import BindMount, Mount, SeedContext, VolumeMount
 from seekr_hatchery.utils import npm
 
 if TYPE_CHECKING:
-    from seekr_hatchery.docker import ContainerRuntime
     from seekr_hatchery.models import SessionMeta
+    from seekr_hatchery.sandbox.runtime import ContainerRuntime
 
 logger = logging.getLogger(__name__)
 

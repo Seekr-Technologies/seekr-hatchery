@@ -7,7 +7,7 @@ from botocore.credentials import Credentials
 from pydantic import ValidationError
 
 from seekr_hatchery.agents import CONTAINER_HOME
-from seekr_hatchery.mount import BindMount
+from seekr_hatchery.sandbox.mount_types import BindMount
 from seekr_hatchery.sidecars import SidecarConfig, base
 from seekr_hatchery.sidecars.s3_sidecar import S3Config, S3Sidecar, credentials, proxy
 

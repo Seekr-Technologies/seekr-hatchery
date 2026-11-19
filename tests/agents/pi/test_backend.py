@@ -15,10 +15,10 @@ import pytest
 
 import seekr_hatchery.agents as agent
 import seekr_hatchery.agents.pi.backend as pi_backend
-import seekr_hatchery.docker as docker
-import seekr_hatchery.mount as mount
-import seekr_hatchery.mount_links as mount_links
-import seekr_hatchery.seeded_volumes as seeded_volumes
+import seekr_hatchery.sandbox.mount_links as mount_links
+import seekr_hatchery.sandbox.mount_types as mount
+import seekr_hatchery.sandbox.runtime as docker
+import seekr_hatchery.sandbox.volumes as seeded_volumes
 
 # ---------------------------------------------------------------------------
 # Helpers

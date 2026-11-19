@@ -24,13 +24,13 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-import seekr_hatchery.seeded_volumes as volumes
+import seekr_hatchery.sandbox.volumes as volumes
 import seekr_hatchery.utils as utils
 from seekr_hatchery.locks import hatchery_lock
 
 if TYPE_CHECKING:
-    from seekr_hatchery.docker import ContainerRuntime
     from seekr_hatchery.models import SessionMeta
+    from seekr_hatchery.sandbox.runtime import ContainerRuntime
 
 logger = logging.getLogger(__name__)
 CURRENT_VERSION = 2

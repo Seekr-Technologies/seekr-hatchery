@@ -51,4 +51,4 @@ jobs:
         run: podman info
       - run: uv sync
       - name: Run integration tests
-        run: uv run pytest tests/test_sandbox.py --integration -v
+        run: uv run pytest tests/sandbox/test_launch_integration.py --integration -v
